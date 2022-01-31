@@ -1,7 +1,8 @@
 name: VoidClam
 version: 1.0
-main: com.serbanstein.voidclam.Main
-api-version: 1.16
+main: serbanstein.voidclam.Main
+api-version: 1.18.1
+softdepend: [Lands]
 commands:
   voidclammake:
     permission: debugvoidclam
