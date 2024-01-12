@@ -25,7 +25,14 @@ public class BuildUtils {
         }
     }
 
-    private void buildTaskWrapper(int x,int y,int z)
+    private void buildTaskWrapper(int x,int y,int z,int radius,World bukkitWorld,Material material,boolean removeBelt,float bottomCut, long delay){
+        Bukkit.getScheduler().runTaskLater(Main.getPlugin(Main.class), new Runnable() {
+            @Override
+            public void run() {
+                buildOctahedronShell(x,y,z,radius,bukkitWorld,material,removeBelt,bottomCut);
+            }
+        },delay);
+    }
 
     /*
     this is a script that combines the above method with other things to build a full voidclam of a certain size
@@ -33,34 +40,17 @@ public class BuildUtils {
     there will be a time delay between layers with the help of the Bukkit Scheduler and also a sound effect for each layer; the last layer will be repeated, but out of obsidian
     */
     public void buildVoidclamScript(int x,int y,int z,int radius,World bukkitWorld){
-
         for(int i=0;i<radius;i++){
-            //register the bukkittask i seconds later
             int finalI = i+1;
             //have the bottomcut 1 for sizes 1 through 5 and 0.5 otherwise
             float bottomCut = 1.0f;
             if (radius > 5) bottomCut = 0.5f;
             final float finalBottomCut = bottomCut;
-            Bukkit.getScheduler().runTaskLater(Main.getPlugin(Main.class), new Runnable() {
-                @Override
-                public void run() {
-                    //build the voidclam
-                    buildOctahedronShell(x,y,z,finalI,bukkitWorld,Material.NETHER_WART_BLOCK,false,finalBottomCut);
-                    //play a sound
-                    bukkitWorld.playSound(new Location(bukkitWorld, ((float) x), ((float) y), ((float) z)), Sound.BLOCK_CHORUS_FLOWER_GROW,1.0f,0.01f);
-                }
-            },i* 20L);
+            //register the bukkittask i seconds later
+            buildTaskWrapper(x,y,z,finalI,bukkitWorld,Material.NETHER_WART_BLOCK,false,finalBottomCut,finalI*20L);
         }
         //register the bukkittask i seconds later
-        Bukkit.getScheduler().runTaskLater(Main.getPlugin(Main.class), new Runnable() {
-            @Override
-            public void run() {
-                //build the voidclam
-                buildOctahedronShell(x,y,z,radius,bukkitWorld,Material.OBSIDIAN,true,0.0f);
-                //play a sound
-                bukkitWorld.playSound(new Location(bukkitWorld, ((float) x), ((float) y), ((float) z)), Sound.BLOCK_CHORUS_FLOWER_GROW,1.0f,0.01f);
-            }
-        },radius* 20L);
+        buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.OBSIDIAN,true,0.0f, radius *20L);
     }
 
 }

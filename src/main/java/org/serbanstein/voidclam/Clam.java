@@ -18,8 +18,13 @@ public class Clam {
     //server tick when the clam was created or resumed activity from isActive
     int startTick;
 
-    //Set<Location> lightsBlackList = new HashSet<>();
-    //short busyFlagPlaceEvent;
-    //short busyFlagMainCycle;
-    //int type; // 0 is stub, 1 is teen, 2 is broadcast, 3 is arming, 4 is Complex, -1 is Lightning rod
+    //location list that clears whenever a clam grows or repairs itself. It's populated with the light source blocks that it could not reach
+    Set<Location> lightsBlackList = new HashSet<>();
+
+    //flag that is true while the voidclam is responding to a block place event
+    boolean busyFlagPlaceEvent;
+
+    //flag that is true while the voidclam is active as a result of its regular lightSeek cycle
+    boolean busyFlagMainCycle;
+
 }
