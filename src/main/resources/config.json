@@ -1,0 +1,7 @@
+{
+  "spawn_naturally" : false,
+  "trap_intruders": false,
+  "kill_intruders": false,
+  "trap_intruder_delay_sec": 2,
+  "kill_intruder_delay_sec": 2
+}

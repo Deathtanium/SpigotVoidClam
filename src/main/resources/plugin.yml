@@ -1,0 +1,4 @@
+name: voidclam
+version: '${project.version}'
+main: org.serbanstein.voidclam.Main
+api-version: '1.20'
