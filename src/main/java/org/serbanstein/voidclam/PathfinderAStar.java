@@ -43,9 +43,9 @@ public class PathfinderAStar {
         List<PathfinderNode> open = new ArrayList<>();
         List<PathfinderNode> closed = new ArrayList<>();
 
-        PathfinderNode endNode = new PathfinderNode(end.getBlockX(),end.getBlockY(),end.getBlockZ(),null,clamID);
+        PathfinderNode endNode = new PathfinderNode(end.getBlockX(),end.getBlockY(),end.getBlockZ(),null,clamID,world.getName());
 
-        PathfinderNode current = new PathfinderNode(start.getBlockX(),start.getBlockY(),start.getBlockZ(),null,clamID);
+        PathfinderNode current = new PathfinderNode(start.getBlockX(),start.getBlockY(),start.getBlockZ(),null,clamID, world.getName());
         open.add(current);
         while(!open.isEmpty()){
             current = leastF(open);
@@ -60,7 +60,8 @@ public class PathfinderAStar {
                         current.y + vector.y,
                         current.z + vector.z,
                         current,
-                        clamID
+                        clamID,
+                        world.getName()
                 );
                 if(closed.contains(neighbor)){
                     continue;
@@ -104,9 +105,9 @@ public class PathfinderAStar {
         List<PathfinderNode> closed = new ArrayList<>();
         List<PathfinderNode> candidateList = new ArrayList<>();
 
-        PathfinderNode endNode = new PathfinderNode(end.getBlockX(),end.getBlockY(),end.getBlockZ(),null,clamID);
+        PathfinderNode endNode = new PathfinderNode(end.getBlockX(),end.getBlockY(),end.getBlockZ(),null,clamID,world.getName());
 
-        PathfinderNode current = new PathfinderNode(start.getBlockX(),start.getBlockY(),start.getBlockZ(),null,clamID);
+        PathfinderNode current = new PathfinderNode(start.getBlockX(),start.getBlockY(),start.getBlockZ(),null,clamID, world.getName());
         open.add(current);
         while(!open.isEmpty()){
             current = leastF(open);
@@ -121,7 +122,8 @@ public class PathfinderAStar {
                         current.y + vector.y,
                         current.z + vector.z,
                         current,
-                        clamID
+                        clamID,
+                        world.getName()
                 );
                 if(closed.contains(neighbor)){
                     continue;

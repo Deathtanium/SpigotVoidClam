@@ -1,5 +1,6 @@
 package org.serbanstein.voidclam;
 
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import java.util.HashSet;
 import java.util.Set;
@@ -16,7 +17,7 @@ public class Clam {
     //energy level, used to determine growth and maybe tendril activity
     float energy;
     //server tick when the clam was created or resumed activity from isActive
-    int startTick;
+    long startTick;
 
     //location list that clears whenever a clam grows or repairs itself. It's populated with the light source blocks that it could not reach
     Set<Location> lightsBlackList = new HashSet<>();
@@ -26,5 +27,16 @@ public class Clam {
 
     //flag that is true while the voidclam is active as a result of its regular lightSeek cycle
     boolean busyFlagMainCycle;
+
+    public Clam(int x, int y, int z, String world, int currentSize) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.world = world;
+        this.currentSize = currentSize;
+        this.isActive = true;
+        this.energy = 0;
+        this.startTick = Bukkit.getWorlds().get(0).getFullTime();
+    }
 
 }

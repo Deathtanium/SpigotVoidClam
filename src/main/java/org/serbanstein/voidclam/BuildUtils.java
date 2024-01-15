@@ -5,7 +5,7 @@ import org.bukkit.*;
 import java.util.Objects;
 
 public class BuildUtils {
-    public void buildOctahedronShell(int x, int y, int z, int radius, World bukkitWorld, Material material, boolean removeBelt, float bottomCut) {
+    public static void buildOctahedronShell(int x, int y, int z, int radius, World bukkitWorld, Material material, boolean removeBelt, float bottomCut) {
         //octahedron formula: |rel_x| + |rel_y| + |rel_z| = radius; <= for filling in the octahedron
         //iterate through all the blocks inside the octahedron and replace obsidian with air using the Spigot API
 
@@ -25,7 +25,7 @@ public class BuildUtils {
         }
     }
 
-    private void buildTaskWrapper(int x,int y,int z,int radius,World bukkitWorld,Material material,boolean removeBelt,float bottomCut, long delay){
+    private static void buildTaskWrapper(int x,int y,int z,int radius,World bukkitWorld,Material material,boolean removeBelt,float bottomCut, long delay){
         Bukkit.getScheduler().runTaskLater(Main.getPlugin(Main.class), new Runnable() {
             @Override
             public void run() {
@@ -39,7 +39,7 @@ public class BuildUtils {
     the voidclam will be build concentrically, from the inside and out, iterating over radii, out of NETHER_WART_BLOCK; the last layer will have removeBelt set to true
     there will be a time delay between layers with the help of the Bukkit Scheduler and also a sound effect for each layer; the last layer will be repeated, but out of obsidian
     */
-    public void buildVoidclamScript(int x,int y,int z,int radius,World bukkitWorld){
+    public static void buildVoidclamScript(int x,int y,int z,int radius,World bukkitWorld){
         for(int i=0;i<radius;i++){
             int finalI = i+1;
             //have the bottomcut 1 for sizes 1 through 5 and 0.5 otherwise

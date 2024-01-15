@@ -4,7 +4,8 @@ public class PathfinderNode {
     int x;
     int y;
     int z;
-    public PathfinderNode(int x, int y, int z, PathfinderNode parent, int clamID) {
+    String worldName;
+    public PathfinderNode(int x, int y, int z, PathfinderNode parent, int clamID, String worldName) {
         this.x = x; this.y = y; this.z = z;
         this.f = this.g = this.h = 0.0D;
         this.parent = parent;
