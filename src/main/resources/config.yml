@@ -1,0 +1,7 @@
+voidclam:
+  size2rangemultiplier: 4.0
+  trapintruders: true
+  killintruders: false #overrides trapintruders
+  maxclamsize: 15
+  lightseekmode: "randomweighted" #closest, random, randomweighted
+  energypersizetogrow: 4

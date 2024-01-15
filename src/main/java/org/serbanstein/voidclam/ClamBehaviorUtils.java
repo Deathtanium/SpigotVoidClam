@@ -8,11 +8,11 @@ import java.util.List;
 import java.util.Objects;
 
 import static org.serbanstein.voidclam.Main.clamList;
+import static org.serbanstein.voidclam.Main.config;
 
 public class ClamBehaviorUtils {
     public static List<Material> lightBlocks = new ArrayList<>();
     public static BukkitTask heartbeatSoundTask,seekLightTask,checkRepairGrowTask,buildPathTask;
-    public static int maxClamSize = 10;
     public static List<PathfinderNode> buildPathQueue = new ArrayList<>();
     public void populateLightList() {
         lightBlocks.add(Material.TORCH);
@@ -54,6 +54,35 @@ public class ClamBehaviorUtils {
     }
 
     public Location getRandomLight(Location loc, int radius, int clamID){
+        List<Location> lightList = getLocations(loc, radius);
+        if(!lightList.isEmpty()){
+            return lightList.get((int) (Math.random() * lightList.size()));
+        }
+        return null;
+    }
+
+    //getrandomlight but weighted by distance
+    public Location getRandomLightWeighted(Location loc, int radius, int clamID){
+        List<Location> lightList = getLocations(loc, radius);
+        if(!lightList.isEmpty()){
+            double[] weights = new double[lightList.size()];
+            double totalWeight = 0;
+            for(int i = 0; i < lightList.size(); i++){
+                weights[i] = 1/lightList.get(i).distance(loc);
+                totalWeight += weights[i];
+            }
+            double random = Math.random() * totalWeight;
+            for(int i = 0; i < lightList.size(); i++){
+                if(random < weights[i]){
+                    return lightList.get(i);
+                }
+                random -= weights[i];
+            }
+        }
+        return null;
+    }
+
+    private static List<Location> getLocations(Location loc, int radius) {
         List<Location> lightList = new ArrayList<>();
         for(int x = -radius; x <= radius; x++){
             for(int y = -radius; y <= radius; y++){
@@ -65,13 +94,8 @@ public class ClamBehaviorUtils {
                 }
             }
         }
-        if(!lightList.isEmpty()){
-            return lightList.get((int) (Math.random() * lightList.size()));
-        }
-        return null;
+        return lightList;
     }
-
-
 
     //repeating task that plays the conduit ambient sound for all the clams every few seconds
     public BukkitTask registerHeartbeatSoundTask(){
@@ -87,7 +111,7 @@ public class ClamBehaviorUtils {
                     );
                 }
             }
-        },0L,100L);
+        },0L,100L); //5s
     }
 
     //function that takes a clam id, start location, end location and a world and registers an ASYNC task that calculates a path between the two locations and places the result in the buildPathQueue
@@ -110,16 +134,39 @@ public class ClamBehaviorUtils {
             public void run() {
                 for(Clam clam:clamList){
                     if(!clam.busyFlagMainCycle){
-                        Location randomLight = getRandomLight(new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),clam.currentSize*4,clamList.indexOf(clam));
-                        if(randomLight != null){
-                            clam.busyFlagMainCycle = true;
+                        Location light;
+                        if(Objects.requireNonNull(config.getString("lightseekmode")).equalsIgnoreCase("nearest")){
+                            light = getNearestLight(new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),clam.currentSize*4,clamList.indexOf(clam));
 
-                            registerBuildPathTask(clamList.indexOf(clam),new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),randomLight,Bukkit.getWorld(clam.world));
+                        } else if (Objects.requireNonNull(config.getString("lightseekmode")).equalsIgnoreCase("random")) {
+                            light = getRandomLight(new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),clam.currentSize*4,clamList.indexOf(clam));
+
+                        } else if (Objects.requireNonNull(config.getString("lightseekmode")).equalsIgnoreCase("randomweighted")) {
+                            light = getRandomLightWeighted(new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),clam.currentSize*4,clamList.indexOf(clam));
                         }
+                        else {
+                            light = null;
+                        }
+                        if(light != null){
+                            clam.busyFlagMainCycle = true;
+                            registerBuildPathTask(clamList.indexOf(clam),new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),light,Bukkit.getWorld(clam.world));
+                        }
+                    }
                 }
             }
-        },0L,100L);
+        },0L,400L); //20s
     }
 
-
+    public BukkitTask registerCheckRepairGrowTask() {
+        return Bukkit.getScheduler().runTaskTimer(Main.getPlugin(Main.class), new Runnable() {
+            @Override
+            public void run() {
+                for (Clam clam : clamList) {
+                    boolean isMax = clam.currentSize < config.getInt("maxclamsize");
+                    boolean hasEnergy = clam.energy >= config.getInt("energypersizetogrow")*clam.currentSize;
+                    //todo: may want to check if it destroys valuable stuff in the process
+                }
+            }
+        }, 0L, 12000); //10m
+    }
 }
