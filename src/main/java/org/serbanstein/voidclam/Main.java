@@ -13,6 +13,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 import static org.serbanstein.voidclam.ClamBehaviorUtils.loadClams;
 import static org.serbanstein.voidclam.ClamBehaviorUtils.populateLightList;
@@ -50,6 +51,7 @@ public final class Main extends JavaPlugin {
         registerTasks();
         //open voidclams.jsonl and load the clams into the list
         clamList = loadClams();
+        Objects.requireNonNull(this.getCommand("createvoidclam")).setExecutor(new CommandCreate());
     }
 
 
@@ -66,15 +68,5 @@ public final class Main extends JavaPlugin {
         stopTasks();
     }
 
-    //register commands
-    @Override
-    public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
-        if (sender instanceof Player) {
-            Player player = (Player) sender;
-            // Here we need to give items to our player
-        }
 
-        // If the player (or console) uses our command correct, we can return true
-        return true;
-    }
 }

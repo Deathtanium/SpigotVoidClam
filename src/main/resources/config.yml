@@ -9,7 +9,7 @@ voidclam:
 
   vol_heartbeat: 5
   pitch_heartbeat: 0.01
-  ticks_heartbeat: 20
+  ticks_heartbeat: 100
 
   vol_buildpath: 5
   pitch_buildpath: 0.01

@@ -4,11 +4,12 @@ voidclam:
   killintruders: false #overrides trapintruders
   maxclamsize: 15
   lightseekmode: "randomweighted" #closest, random, randomweighted
+  seekrangemult: 4
   energypersizetogrow: 4
 
   vol_heartbeat: 5
   pitch_heartbeat: 0.01
-  ticks_heartbeat: 20
+  ticks_heartbeat: 100
 
   vol_buildpath: 5
   pitch_buildpath: 0.01

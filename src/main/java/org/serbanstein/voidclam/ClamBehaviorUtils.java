@@ -111,6 +111,10 @@ public class ClamBehaviorUtils {
             @Override
             public void run() {
                 for(Clam clam:clamList){
+                    if ((new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z)).getBlock().getType() != Material.NETHER_WART_BLOCK){
+                        clamList.remove(clam);
+                        continue;
+                    }
                     Objects.requireNonNull(Bukkit.getWorld(clam.world)).playSound(
                             new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),
                             Sound.BLOCK_CONDUIT_AMBIENT,
