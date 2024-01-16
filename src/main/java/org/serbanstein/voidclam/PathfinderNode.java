@@ -36,7 +36,4 @@ public class PathfinderNode extends Location {
         return node.getBlockY() == this.getBlockY() && node.getBlockX() == this.getBlockX() && node.getBlockZ() == this.getBlockZ();
     }
 
-    public float distanceTo(PathfinderNode node){
-        return (float) Math.sqrt(Math.pow(this.getBlockX()-node.getBlockX(),2)+Math.pow(this.getBlockY()-node.getBlockY(),2)+Math.pow(this.getBlockZ()-node.getBlockZ(),2));
-    }
 }

@@ -1,5 +1,6 @@
 package org.serbanstein.voidclam;
 
+import org.bukkit.Material;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -55,7 +56,6 @@ public final class Main extends JavaPlugin {
         initializeLists();
         registerTasks();
         //open voidclams.jsonl and load the clams into the list
-        System.out.println("Loaded " + clamList.size() + " clams");
         Objects.requireNonNull(this.getCommand("createvoidclam")).setExecutor(new CommandCreate());
         Objects.requireNonNull(this.getCommand("listclams")).setExecutor(new CommandListclams());
         Objects.requireNonNull(this.getCommand("tickrepairgrow")).setExecutor(new CommandTickrepairgrow());

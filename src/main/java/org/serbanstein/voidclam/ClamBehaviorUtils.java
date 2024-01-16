@@ -22,6 +22,7 @@ public class ClamBehaviorUtils {
     public static List<PathfinderNode> buildPathQueue = new ArrayList<>();
     public static void populateLightList() {
         lightBlocks.add(Material.TORCH);
+        lightBlocks.add(Material.WALL_TORCH);
         lightBlocks.add(Material.SOUL_TORCH);
         lightBlocks.add(Material.SOUL_WALL_TORCH);
         lightBlocks.add(Material.END_ROD);
@@ -113,10 +114,9 @@ public class ClamBehaviorUtils {
                 List<Clam> lstCopy = new ArrayList<>(Main.clamList);
                 for(Clam clam:lstCopy){
                     if ((new Location(Bukkit.getWorld(clam.worldName),clam.x,clam.y,clam.z)).getBlock().getType() != Material.NETHER_WART_BLOCK){
-                        System.out.println("clam at " + clam.x + " " + clam.y + " " + clam.z + " is not a nether wart block, removing");
-                        //Main.clamList.remove(clam);
-                        //saveClams();
-                        //continue;
+                        Main.clamList.remove(clam);
+                        saveClams();
+                        continue;
                     }
                     Objects.requireNonNull(Bukkit.getWorld(clam.worldName)).playSound(
                             new Location(Bukkit.getWorld(clam.worldName),clam.x,clam.y,clam.z),
@@ -135,7 +135,6 @@ public class ClamBehaviorUtils {
 
     //function that takes a clam id, start location, end location and a world and registers an ASYNC task that calculates a path between the two locations and places the result in the buildPathQueue
     public static void registerAsyncTask(int clamID, Clam clam, int clamSize, Location start, World world){
-        System.out.println("looking for light for clam " + clamID);
         getLightFunction getLight;
         Location light;
         if(Objects.requireNonNull(config.getString("lightseekmode")).equalsIgnoreCase("nearest")){
@@ -150,18 +149,15 @@ public class ClamBehaviorUtils {
         }
         light = getLight.call(start,clamSize*config.getInt("seekrangemult"),clamID);
         if(light != null) {
-            clam.lightsBlackList.add(light);
-            System.out.println("found light for clam " + clamID);
             asyncTasks.add(Bukkit.getScheduler().runTaskAsynchronously(Main.getPlugin(Main.class), new Runnable() {
                 @Override
                 public void run() {
                     PathfinderNode path = PathfinderAStar.singleBlockPathfind(clamID, start, light, world);
                     clam.busyFlagMainCycle = false;
                     if (path != null) {
-                        System.out.println("found path for clam " + clamID);
                         buildPathQueue.add(path);
                     }else{
-                        System.out.println("no path found for clam " + clamID);
+
                     }
                 }
             }));
@@ -178,7 +174,6 @@ public class ClamBehaviorUtils {
                 buildPathQueue.clear();
                 lstCopy.forEach(
                         pathfinderNode -> {
-                            System.out.println("building path for clam " + pathfinderNode.clamID);
                             int clamID = pathfinderNode.clamID;
                             World world = pathfinderNode.getWorld();
                             if(lightBlocks.contains(pathfinderNode.getBlock().getType())){

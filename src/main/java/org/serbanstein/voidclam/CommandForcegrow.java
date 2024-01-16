@@ -11,7 +11,7 @@ public class CommandForcegrow implements CommandExecutor {
             return false;
         }
         int clamID = Integer.parseInt(strings[0]);
-        if (clamID < 0 || clamID >= Main.clamList.size()) {
+        if (clamID < 0 || clamID > Main.clamList.size()) {
             return false;
         }
         Clam clam = Main.clamList.get(clamID);

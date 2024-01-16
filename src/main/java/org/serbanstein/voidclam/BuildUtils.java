@@ -53,7 +53,7 @@ public class BuildUtils {
         //buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.NETHER_WART_BLOCK,true,0.0f, radius *20L);
         float finalBottomCut = 1.0f;
         if (radius > 5) finalBottomCut = 0.75f;
-        buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.OBSIDIAN,true,finalBottomCut, radius*40L);
+        buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.OBSIDIAN,true,finalBottomCut, radius*20L);
     }
 
 }

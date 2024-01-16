@@ -6,8 +6,8 @@ import org.bukkit.World;
 
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
 
 public class PathfinderAStar {
     static List<PathfinderVector> vec = new ArrayList<>();
@@ -22,10 +22,11 @@ public class PathfinderAStar {
         vec.add(new PathfinderVector( 0, 0,-1));
         liquids.add(Material.WATER);
         liquids.add(Material.LAVA);
+        liquids.add(Material.AIR);
     }
     
     public static PathfinderNode leastF(List<PathfinderNode> list){
-        return list.stream().min((a,b)->Double.compare(a.f,b.f)).orElse(null);
+        return list.stream().min(Comparator.comparingDouble(a -> a.f)).orElse(null);
     }
 
     public static List<PathfinderNode> getNeighbors(PathfinderNode currentNode, int clamID) {
@@ -64,7 +65,6 @@ public class PathfinderAStar {
                 return current;
             }
             List<PathfinderNode> neighbors = getNeighbors(current, clamID);
-            System.out.println("neighbors size: " + neighbors.size());
             for(PathfinderNode neighbor : neighbors){
                 if (endNode.equals(neighbor)) {
                     return neighbor;
@@ -73,13 +73,14 @@ public class PathfinderAStar {
                     continue;
                 }
                 float cost = world.getBlockAt(neighbor).getType().getHardness()+0.5f;
-                if(cost>50f){
+                cost*=cost;
+                if(cost>2500f){
                     closed.add(neighbor);
                     continue;
                 }
                 //if liquid
                 if(liquids.contains(world.getBlockAt(neighbor).getType())){
-                    cost = 0.2f;
+                    cost = 2f;
                 }
                 if(getNeighbors(neighbor,clamID).stream().anyMatch(loc->(loc.getBlock().getType().isSolid() && loc.getBlock().getType() != Material.NETHER_WART_BLOCK))){
                     cost *= 0.2f;
@@ -87,22 +88,17 @@ public class PathfinderAStar {
                 if(world.getBlockAt(neighbor).getType() == Material.NETHER_WART_BLOCK){
                     cost = 0;
                 }
-                if(current.g + 0.0f < neighbor.g){
-                    neighbor.parent = current;
-                    neighbor.g = current.g + 0.0f;
-                    neighbor.h = neighbor.distanceTo(endNode);
-                    neighbor.f = neighbor.g + neighbor.h;
-                }
+                neighbor.parent = current;
+                neighbor.g = current.g + cost;
+                neighbor.h = neighbor.distance(endNode);
+                neighbor.f = neighbor.g + neighbor.h;
                 if(cost==0) {
                     open.add(neighbor);
                 }else{
-                    System.out.println("neighbor.f: " + neighbor.f);
                     candidateList.add(neighbor);
-                    closed.add(neighbor);
                 }
             }
         }
-        System.out.println("candidateList size: " + candidateList.size());
         return leastF(candidateList);
     }
 }

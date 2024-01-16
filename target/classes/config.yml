@@ -15,6 +15,6 @@ voidclam:
   pitch_buildpath: 0.01
   ticks_buildpath: 20
 
-  ticks_lightseek: 20
+  ticks_lightseek: 100
 
   ticks_repairgrow: 12000
