@@ -31,23 +31,12 @@ public class CommandCreate implements CommandExecutor {
                 y = Integer.parseInt(args[1]);
                 z = Integer.parseInt(args[2]);
                 //create a new voidclam at the specified location
-                Clam newClam = new Clam(x,y,z,"world",1);
+                Clam newClam = new Clam(x,y,z,"world",2);
                 Main.clamList.add(newClam);
                 //save the new clam to the file
-                try {
-                    JsonObject newClamJSON = new JsonObject();
-                    newClamJSON.addProperty("x",newClam.x);
-                    newClamJSON.addProperty("y",newClam.y);
-                    newClamJSON.addProperty("z",newClam.z);
-                    newClamJSON.addProperty("world",newClam.world);
-                    newClamJSON.addProperty("currentSize",newClam.currentSize);
-
-                    Files.write(voidclamFile.toPath(),(newClamJSON.toString()+"\n").getBytes(), StandardOpenOption.APPEND);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
+                ClamBehaviorUtils.saveClams();
                 //build the voidclam
-                BuildUtils.buildVoidclamScript(x,y,z,3, Bukkit.getWorld("world"));
+                BuildUtils.buildVoidclamScript(x,y,z,newClam.currentSize, Bukkit.getWorld("world"));
                 return true;
             } catch (NumberFormatException e) {
                 return false;

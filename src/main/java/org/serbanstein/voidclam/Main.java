@@ -14,6 +14,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.serbanstein.voidclam.ClamBehaviorUtils.loadClams;
 import static org.serbanstein.voidclam.ClamBehaviorUtils.populateLightList;
@@ -23,7 +24,7 @@ import static org.serbanstein.voidclam.ClamBehaviorUtils.populateLightList;
 public final class Main extends JavaPlugin {
     public static BukkitTask heartbeatSoundTask,seekLightTask,checkRepairGrowTask,buildPathExecutorTask;
     //dynamic list for keeping track of the entities
-    public static List<Clam> clamList = new ArrayList<>();
+    public static CopyOnWriteArrayList<Clam> clamList;
     public static FileConfiguration config;
     public static File voidclamFile;
     public void registerTasks(){
@@ -44,14 +45,17 @@ public final class Main extends JavaPlugin {
                 e.printStackTrace();
             }
         }
-
+        clamList = new CopyOnWriteArrayList<>();
+        loadClams();
+        System.out.println("Loaded " + clamList.size() + " clams");
         saveDefaultConfig();
         config = getConfig();
         populateLightList();
         registerTasks();
         //open voidclams.jsonl and load the clams into the list
-        clamList = loadClams();
+        System.out.println("Loaded " + clamList.size() + " clams");
         Objects.requireNonNull(this.getCommand("createvoidclam")).setExecutor(new CommandCreate());
+        Objects.requireNonNull(this.getCommand("listclams")).setExecutor(new CommandListclams());
     }
 
 

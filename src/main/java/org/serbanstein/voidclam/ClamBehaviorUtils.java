@@ -11,14 +11,14 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Function;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-import static org.serbanstein.voidclam.Main.clamList;
+
+//import static org.serbanstein.voidclam.Main.clamList;
 import static org.serbanstein.voidclam.Main.config;
 
 public class ClamBehaviorUtils {
     public static List<Material> lightBlocks = new ArrayList<>();
-    public static BukkitTask heartbeatSoundTask,seekLightTask,checkRepairGrowTask,buildPathTask;
     public static List<PathfinderNode> buildPathQueue = new ArrayList<>();
     public static void populateLightList() {
         lightBlocks.add(Material.TORCH);
@@ -110,10 +110,13 @@ public class ClamBehaviorUtils {
         return Bukkit.getScheduler().runTaskTimer(Main.getPlugin(Main.class), new Runnable() {
             @Override
             public void run() {
-                for(Clam clam:clamList){
+                List<Clam> lstCopy = new ArrayList<>(Main.clamList);
+                for(Clam clam:lstCopy){
                     if ((new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z)).getBlock().getType() != Material.NETHER_WART_BLOCK){
-                        clamList.remove(clam);
-                        continue;
+                        System.out.println("clam at " + clam.x + " " + clam.y + " " + clam.z + " is not a nether wart block, removing");
+                        //Main.clamList.remove(clam);
+                        //saveClams();
+                        //continue;
                     }
                     Objects.requireNonNull(Bukkit.getWorld(clam.world)).playSound(
                             new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),
@@ -131,7 +134,8 @@ public class ClamBehaviorUtils {
     }
 
     //function that takes a clam id, start location, end location and a world and registers an ASYNC task that calculates a path between the two locations and places the result in the buildPathQueue
-    public static void registerAsyncBuildPathTask(int clamID, int clamSize, Location start, World world){
+    public static void registerAsyncTask(int clamID, Clam clam, int clamSize, Location start, World world){
+        System.out.println("looking for light for clam " + clamID);
         getLightFunction getLight;
         Location light;
         if(Objects.requireNonNull(config.getString("lightseekmode")).equalsIgnoreCase("nearest")){
@@ -146,16 +150,19 @@ public class ClamBehaviorUtils {
         }
         light = getLight.call(start,clamSize*config.getInt("seekrangemult"),clamID);
         if(light != null) {
+            System.out.println("found light for clam " + clamID);
             asyncTasks.add(Bukkit.getScheduler().runTaskAsynchronously(Main.getPlugin(Main.class), new Runnable() {
                 @Override
                 public void run() {
                     PathfinderNode path = PathfinderAStar.singleBlockPathfind(clamID, start, light, world);
-                    clamList.get(clamID).busyFlagMainCycle = false;
+                    clam.busyFlagMainCycle = false;
                     if (path != null) {
                         buildPathQueue.add(path);
                     }
                 }
             }));
+        }else{
+            clam.busyFlagMainCycle = false;
         }
     }
 
@@ -181,14 +188,14 @@ public class ClamBehaviorUtils {
         },0L,config.getLong("ticks_buildpath"));
     }
 
-    public static BukkitTask  registerLightSeekTask(){
+    public static BukkitTask registerLightSeekTask(){
         return Bukkit.getScheduler().runTaskTimer(Main.getPlugin(Main.class), new Runnable() {
             @Override
             public void run() {
-                for(Clam clam:clamList){
+                for(Clam clam:Main.clamList){
                     if(!clam.busyFlagMainCycle){
                         clam.busyFlagMainCycle = true;
-                        registerAsyncBuildPathTask(clamList.indexOf(clam),clam.currentSize,new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),Bukkit.getWorld(clam.world));
+                        registerAsyncTask(Main.clamList.indexOf(clam),clam,clam.currentSize,new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),Bukkit.getWorld(clam.world));
                     }
                 }
             }
@@ -199,7 +206,7 @@ public class ClamBehaviorUtils {
         return Bukkit.getScheduler().runTaskTimer(Main.getPlugin(Main.class), new Runnable() {
             @Override
             public void run() {
-                for (Clam clam : clamList) {
+                for (Clam clam : Main.clamList) {
                     boolean isMax = clam.currentSize < config.getInt("maxclamsize");
                     boolean hasEnergy = clam.energy >= config.getInt("energypersizetogrow")*clam.currentSize;
                     //todo: may want to check if it destroys valuable stuff in the process
@@ -213,46 +220,56 @@ public class ClamBehaviorUtils {
                 }
                 saveClams();
             }
-        }, 0L, config.getLong("ticks_repairgrow")); //10m
+        }, config.getLong("ticks_repairgrow"),config.getLong("ticks_repairgrow")); //10m
     }
 
-    public static List<Clam> loadClams(){
-        List<Clam> clamList = new ArrayList<>();
+    public static void loadClams(){
+        CopyOnWriteArrayList<Clam> clamList = new CopyOnWriteArrayList<>();
         //open voidclams.jsonl and load the clams into the list
         Main.getPlugin(Main.class);
         File file = Main.voidclamFile;
+        Main.clamList.clear();
+
         //on each line is a json object with the fields x,y,z,worldname,size
         try {
             List<String> lines = Files.readAllLines(file.toPath());
             for(String line:lines){
+
                 JsonObject obj = JsonParser.parseString(line).getAsJsonObject();
                 int x = obj.get("x").getAsInt();
                 int y = obj.get("y").getAsInt();
                 int z = obj.get("z").getAsInt();
                 String worldname = obj.get("worldname").getAsString();
                 int size = obj.get("size").getAsInt();
-                clamList.add(new Clam(x,y,z,worldname,size));
+                Clam clam = new Clam(x,y,z,worldname,size);
+                Main.clamList.add(clam);
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
-
-        return clamList;
     }
 
     public static void saveClams(){
-        clamList.forEach(clam -> {
+        //overwrite to clear the file
+        try {
+            Files.write(Main.voidclamFile.toPath(), "".getBytes());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        StringBuilder bigString = new StringBuilder();
+        for(Clam clam:Main.clamList){
             JsonObject obj = new JsonObject();
             obj.addProperty("x",clam.x);
             obj.addProperty("y",clam.y);
             obj.addProperty("z",clam.z);
             obj.addProperty("worldname",clam.world);
             obj.addProperty("size",clam.currentSize);
-            try {
-                Files.write(Main.voidclamFile.toPath(),(obj.toString()+"\n").getBytes(), StandardOpenOption.APPEND);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        });
+            bigString.append(obj.toString()).append("\n");
+        }
+        try {
+            Files.write(Main.voidclamFile.toPath(), bigString.toString().getBytes(), StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 }

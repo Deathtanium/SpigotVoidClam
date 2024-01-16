@@ -40,17 +40,20 @@ public class BuildUtils {
     there will be a time delay between layers with the help of the Bukkit Scheduler and also a sound effect for each layer; the last layer will be repeated, but out of obsidian
     */
     public static void buildVoidclamScript(int x,int y,int z,int radius,World bukkitWorld){
-        for(int i=0;i<radius;i++){
-            int finalI = i+1;
+        for(int i=0;i<=radius;i++){
+            int finalI = i;
             //have the bottomcut 1 for sizes 1 through 5 and 0.5 otherwise
             float bottomCut = 1.0f;
             if (radius > 5) bottomCut = 0.75f;
             final float finalBottomCut = bottomCut;
             //register the bukkittask i seconds later
-            buildTaskWrapper(x,y,z,finalI,bukkitWorld,Material.NETHER_WART_BLOCK,finalI == radius,finalBottomCut,finalI*20L);
+            buildTaskWrapper(x,y,z,finalI,bukkitWorld,Material.NETHER_WART_BLOCK,finalI >= radius-1,finalBottomCut,finalI*20L);
         }
         //register the bukkittask i seconds later
-        buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.OBSIDIAN,true,0.0f, radius *20L);
+        //buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.NETHER_WART_BLOCK,true,0.0f, radius *20L);
+        float finalBottomCut = 1.0f;
+        if (radius > 5) finalBottomCut = 0.75f;
+        buildTaskWrapper(x,y,z, radius,bukkitWorld,Material.OBSIDIAN,true,finalBottomCut, radius*40L);
     }
 
 }

@@ -8,3 +8,8 @@ commands:
     description: Create a voidclam at x y z in your world
     usage: /<command> <x> <y> <z>
     permission: voidclam.create
+
+  listclams:
+    description: List all voidclams in your world
+    usage: /<command>
+    permission: voidclam.list
