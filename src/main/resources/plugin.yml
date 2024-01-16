@@ -13,3 +13,13 @@ commands:
     description: List all voidclams in your world
     usage: /<command>
     permission: voidclam.list
+
+  tickrepairgrow:
+    description: Trigger repair/grow check
+    usage: /<command>
+    permission: voidclam.tickrepairgrow
+
+  forcegrow:
+    description: Force a voidclam to increase size by 1
+    usage: /<command> <id>
+    permission: voidclam.forcegrow

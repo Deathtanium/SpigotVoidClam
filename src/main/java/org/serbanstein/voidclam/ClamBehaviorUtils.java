@@ -112,17 +112,17 @@ public class ClamBehaviorUtils {
             public void run() {
                 List<Clam> lstCopy = new ArrayList<>(Main.clamList);
                 for(Clam clam:lstCopy){
-                    if ((new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z)).getBlock().getType() != Material.NETHER_WART_BLOCK){
+                    if ((new Location(Bukkit.getWorld(clam.worldName),clam.x,clam.y,clam.z)).getBlock().getType() != Material.NETHER_WART_BLOCK){
                         System.out.println("clam at " + clam.x + " " + clam.y + " " + clam.z + " is not a nether wart block, removing");
                         //Main.clamList.remove(clam);
                         //saveClams();
                         //continue;
                     }
-                    Objects.requireNonNull(Bukkit.getWorld(clam.world)).playSound(
-                            new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),
+                    Objects.requireNonNull(Bukkit.getWorld(clam.worldName)).playSound(
+                            new Location(Bukkit.getWorld(clam.worldName),clam.x,clam.y,clam.z),
                             Sound.BLOCK_CONDUIT_AMBIENT,
                             SoundCategory.BLOCKS,
-                            ((float)config.getDouble("vol_heartbeat")),((float)config.getDouble("pitch_heartbeat"))
+                            ((float)clam.currentSize),((float)config.getDouble("pitch_heartbeat"))
                     );
                 }
             }
@@ -150,6 +150,7 @@ public class ClamBehaviorUtils {
         }
         light = getLight.call(start,clamSize*config.getInt("seekrangemult"),clamID);
         if(light != null) {
+            clam.lightsBlackList.add(light);
             System.out.println("found light for clam " + clamID);
             asyncTasks.add(Bukkit.getScheduler().runTaskAsynchronously(Main.getPlugin(Main.class), new Runnable() {
                 @Override
@@ -174,13 +175,15 @@ public class ClamBehaviorUtils {
                 buildPathQueue.clear();
                 lstCopy.forEach(
                         pathfinderNode -> {
-                            while (pathfinderNode != null) {
-                                World world = Objects.requireNonNull(Bukkit.getWorld(pathfinderNode.worldName));
-                                Location loc = new Location(world, pathfinderNode.x, pathfinderNode.y, pathfinderNode.z);
-                                loc.getBlock().setType(Material.NETHER_WART_BLOCK);
-                                world.playSound(loc, Sound.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, ((float) config.getDouble("vol_buildpath")), ((float) config.getDouble("pitch_buildpath")));
-                                pathfinderNode = pathfinderNode.parent;
+                            int clamID = pathfinderNode.clamID;
+                            World world = Objects.requireNonNull(Bukkit.getWorld(pathfinderNode.worldName));
+                            Location loc = new Location(world, pathfinderNode.x, pathfinderNode.y, pathfinderNode.z);
+                            if(lightBlocks.contains(loc.getBlock().getType())){
+                                Main.clamList.get(clamID).energy += 1;
                             }
+                            loc.getBlock().setType(Material.NETHER_WART_BLOCK);
+                            world.playSound(loc, Sound.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, ((float) config.getDouble("vol_buildpath")), ((float) config.getDouble("pitch_buildpath")));
+                            Main.clamList.get(clamID).lightsBlackList.remove(loc);
                         }
                 );
                 lstCopy.clear();
@@ -195,30 +198,34 @@ public class ClamBehaviorUtils {
                 for(Clam clam:Main.clamList){
                     if(!clam.busyFlagMainCycle){
                         clam.busyFlagMainCycle = true;
-                        registerAsyncTask(Main.clamList.indexOf(clam),clam,clam.currentSize,new Location(Bukkit.getWorld(clam.world),clam.x,clam.y,clam.z),Bukkit.getWorld(clam.world));
+                        registerAsyncTask(Main.clamList.indexOf(clam),clam,clam.currentSize,new Location(Bukkit.getWorld(clam.worldName),clam.x,clam.y,clam.z),Bukkit.getWorld(clam.worldName));
                     }
                 }
             }
         },0L,config.getLong("ticks_lightseek"));
     }
 
+    public static void f_repairgrowtask(){
+        for (Clam clam : Main.clamList) {
+            boolean isMax = clam.currentSize < config.getInt("maxclamsize");
+            boolean hasEnergy = clam.energy >= config.getInt("energypersizetogrow")*clam.currentSize;
+            //todo: may want to check if it destroys valuable stuff in the process
+            if (!isMax && hasEnergy) {
+                //grow
+                clam.currentSize++;
+                clam.energy = 0;
+            }
+            clam.lightsBlackList.clear();
+            BuildUtils.buildVoidclamScript(clam.x, clam.y, clam.z, clam.currentSize, Bukkit.getWorld(clam.worldName));
+        }
+        saveClams();
+    }
+
     public static BukkitTask registerCheckRepairGrowTask() {
         return Bukkit.getScheduler().runTaskTimer(Main.getPlugin(Main.class), new Runnable() {
             @Override
             public void run() {
-                for (Clam clam : Main.clamList) {
-                    boolean isMax = clam.currentSize < config.getInt("maxclamsize");
-                    boolean hasEnergy = clam.energy >= config.getInt("energypersizetogrow")*clam.currentSize;
-                    //todo: may want to check if it destroys valuable stuff in the process
-                    if (!isMax && hasEnergy) {
-                        //grow
-                        clam.currentSize++;
-                        clam.energy = 0;
-                    }
-                    clam.lightsBlackList.clear();
-                    BuildUtils.buildVoidclamScript(clam.x, clam.y, clam.z, clam.currentSize, Bukkit.getWorld(clam.world));
-                }
-                saveClams();
+                f_repairgrowtask();
             }
         }, config.getLong("ticks_repairgrow"),config.getLong("ticks_repairgrow")); //10m
     }
@@ -262,7 +269,7 @@ public class ClamBehaviorUtils {
             obj.addProperty("x",clam.x);
             obj.addProperty("y",clam.y);
             obj.addProperty("z",clam.z);
-            obj.addProperty("worldname",clam.world);
+            obj.addProperty("worldname",clam.worldName);
             obj.addProperty("size",clam.currentSize);
             bigString.append(obj.toString()).append("\n");
         }

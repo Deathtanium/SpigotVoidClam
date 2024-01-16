@@ -9,7 +9,7 @@ public class Clam {
     //position
     int x,y,z;
     //world name
-    String world;
+    String worldName;
     //radius
     int currentSize;
     //this flag toggles growth and tendril activity
@@ -32,7 +32,7 @@ public class Clam {
         this.x = x;
         this.y = y;
         this.z = z;
-        this.world = world;
+        this.worldName = world;
         this.currentSize = currentSize;
         this.isActive = true;
         this.energy = 0;

@@ -56,6 +56,8 @@ public final class Main extends JavaPlugin {
         System.out.println("Loaded " + clamList.size() + " clams");
         Objects.requireNonNull(this.getCommand("createvoidclam")).setExecutor(new CommandCreate());
         Objects.requireNonNull(this.getCommand("listclams")).setExecutor(new CommandListclams());
+        Objects.requireNonNull(this.getCommand("tickrepairgrow")).setExecutor(new CommandTickrepairgrow());
+        Objects.requireNonNull(this.getCommand("forcegrow")).setExecutor(new CommandForcegrow());
     }
 
 
