@@ -1,6 +1,6 @@
 package org.serbanstein.voidclam;
 
-import org.json.*;
+import com.google.gson.*;
 import org.bukkit.*;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -225,14 +225,13 @@ public class ClamBehaviorUtils {
         try {
             List<String> lines = Files.readAllLines(file.toPath());
             for(String line:lines){
-                JSONObject obj = new JSONObject(line);
-                clamList.add(new Clam(
-                        obj.getInt("x"),
-                        obj.getInt("y"),
-                        obj.getInt("z"),
-                        obj.getString("worldname"),
-                        obj.getInt("size")
-                ));
+                JsonObject obj = JsonParser.parseString(line).getAsJsonObject();
+                int x = obj.get("x").getAsInt();
+                int y = obj.get("y").getAsInt();
+                int z = obj.get("z").getAsInt();
+                String worldname = obj.get("worldname").getAsString();
+                int size = obj.get("size").getAsInt();
+                clamList.add(new Clam(x,y,z,worldname,size));
             }
         } catch (IOException e) {
             e.printStackTrace();
@@ -243,12 +242,12 @@ public class ClamBehaviorUtils {
 
     public static void saveClams(){
         clamList.forEach(clam -> {
-            JSONObject obj = new JSONObject();
-            obj.put("x",clam.x);
-            obj.put("y",clam.y);
-            obj.put("z",clam.z);
-            obj.put("worldname",clam.world);
-            obj.put("size",clam.currentSize);
+            JsonObject obj = new JsonObject();
+            obj.addProperty("x",clam.x);
+            obj.addProperty("y",clam.y);
+            obj.addProperty("z",clam.z);
+            obj.addProperty("worldname",clam.world);
+            obj.addProperty("size",clam.currentSize);
             try {
                 Files.write(Main.voidclamFile.toPath(),(obj.toString()+"\n").getBytes(), StandardOpenOption.APPEND);
             } catch (IOException e) {

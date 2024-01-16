@@ -11,9 +11,10 @@ import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 
 import org.bukkit.entity.Player;
-import org.json.*;
+import com.google.gson.*;
 
 import static org.serbanstein.voidclam.Main.voidclamFile;
+
 
 public class CommandCreate implements CommandExecutor {
     // This method is called, when somebody uses our command
@@ -34,15 +35,13 @@ public class CommandCreate implements CommandExecutor {
                 Main.clamList.add(newClam);
                 //save the new clam to the file
                 try {
-                    JSONObject newClamJSON = new JSONObject();
-                    newClamJSON.put("x",x);
-                    newClamJSON.put("y",y);
-                    newClamJSON.put("z",z);
-                    newClamJSON.put("world", Objects.requireNonNull(((Player) sender).getLocation().getWorld()).getName());
-                    newClamJSON.put("currentSize",3);
-                    newClamJSON.put("isActive",true);
-                    newClamJSON.put("energy",0);
-                    newClamJSON.put("startTick",Bukkit.getWorlds().get(0).getFullTime());
+                    JsonObject newClamJSON = new JsonObject();
+                    newClamJSON.addProperty("x",newClam.x);
+                    newClamJSON.addProperty("y",newClam.y);
+                    newClamJSON.addProperty("z",newClam.z);
+                    newClamJSON.addProperty("world",newClam.world);
+                    newClamJSON.addProperty("currentSize",newClam.currentSize);
+
                     Files.write(voidclamFile.toPath(),(newClamJSON.toString()+"\n").getBytes(), StandardOpenOption.APPEND);
                 } catch (IOException e) {
                     e.printStackTrace();
