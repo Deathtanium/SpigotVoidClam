@@ -158,7 +158,10 @@ public class ClamBehaviorUtils {
                     PathfinderNode path = PathfinderAStar.singleBlockPathfind(clamID, start, light, world);
                     clam.busyFlagMainCycle = false;
                     if (path != null) {
+                        System.out.println("found path for clam " + clamID);
                         buildPathQueue.add(path);
+                    }else{
+                        System.out.println("no path found for clam " + clamID);
                     }
                 }
             }));
@@ -175,15 +178,15 @@ public class ClamBehaviorUtils {
                 buildPathQueue.clear();
                 lstCopy.forEach(
                         pathfinderNode -> {
+                            System.out.println("building path for clam " + pathfinderNode.clamID);
                             int clamID = pathfinderNode.clamID;
-                            World world = Objects.requireNonNull(Bukkit.getWorld(pathfinderNode.worldName));
-                            Location loc = new Location(world, pathfinderNode.x, pathfinderNode.y, pathfinderNode.z);
-                            if(lightBlocks.contains(loc.getBlock().getType())){
+                            World world = pathfinderNode.getWorld();
+                            if(lightBlocks.contains(pathfinderNode.getBlock().getType())){
                                 Main.clamList.get(clamID).energy += 1;
                             }
-                            loc.getBlock().setType(Material.NETHER_WART_BLOCK);
-                            world.playSound(loc, Sound.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, ((float) config.getDouble("vol_buildpath")), ((float) config.getDouble("pitch_buildpath")));
-                            Main.clamList.get(clamID).lightsBlackList.remove(loc);
+                            pathfinderNode.getBlock().setType(Material.NETHER_WART_BLOCK);
+                            world.playSound(pathfinderNode, Sound.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, ((float) config.getDouble("vol_buildpath")), ((float) config.getDouble("pitch_buildpath")));
+                            Main.clamList.get(clamID).lightsBlackList.remove(pathfinderNode);
                         }
                 );
                 lstCopy.clear();
@@ -246,9 +249,11 @@ public class ClamBehaviorUtils {
                 int x = obj.get("x").getAsInt();
                 int y = obj.get("y").getAsInt();
                 int z = obj.get("z").getAsInt();
+                long energy = obj.get("energy").getAsLong();
                 String worldname = obj.get("worldname").getAsString();
                 int size = obj.get("size").getAsInt();
                 Clam clam = new Clam(x,y,z,worldname,size);
+                clam.energy = energy;
                 Main.clamList.add(clam);
             }
         } catch (IOException e) {
@@ -271,6 +276,7 @@ public class ClamBehaviorUtils {
             obj.addProperty("z",clam.z);
             obj.addProperty("worldname",clam.worldName);
             obj.addProperty("size",clam.currentSize);
+            obj.addProperty("energy",clam.energy);
             bigString.append(obj.toString()).append("\n");
         }
         try {

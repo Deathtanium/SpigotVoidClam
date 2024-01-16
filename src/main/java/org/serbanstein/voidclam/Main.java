@@ -18,6 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.serbanstein.voidclam.ClamBehaviorUtils.loadClams;
 import static org.serbanstein.voidclam.ClamBehaviorUtils.populateLightList;
+import static org.serbanstein.voidclam.PathfinderAStar.initializeLists;
 
 
 //this plugin adds a special type of immobile entity to minecraft
@@ -51,6 +52,7 @@ public final class Main extends JavaPlugin {
         saveDefaultConfig();
         config = getConfig();
         populateLightList();
+        initializeLists();
         registerTasks();
         //open voidclams.jsonl and load the clams into the list
         System.out.println("Loaded " + clamList.size() + " clams");

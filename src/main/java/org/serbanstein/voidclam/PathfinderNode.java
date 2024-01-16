@@ -1,12 +1,12 @@
 package org.serbanstein.voidclam;
 
-public class PathfinderNode {
-    int x;
-    int y;
-    int z;
-    String worldName;
-    public PathfinderNode(int x, int y, int z, PathfinderNode parent, int clamID, String worldName) {
-        this.x = x; this.y = y; this.z = z;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.World;
+
+public class PathfinderNode extends Location {
+    public PathfinderNode(World world, int x, int y, int z, PathfinderNode parent, int clamID) {
+        super(world, x, y, z);
         this.f = this.g = this.h = 0.0D;
         this.parent = parent;
     }
@@ -15,6 +15,13 @@ public class PathfinderNode {
     double h;
     int clamID;
     PathfinderNode parent;
+
+    public PathfinderNode(Location end, PathfinderNode parent, int clamID) {
+        super(end.getWorld(), end.getBlockX(), end.getBlockY(), end.getBlockZ());
+        this.f = this.g = this.h = 0.0D;
+        this.parent = parent;
+        this.clamID = clamID;
+    }
 
     //override equals method to compare nodes
     @Override
@@ -26,10 +33,10 @@ public class PathfinderNode {
             return false;
         }
         PathfinderNode node = (PathfinderNode) o;
-        return node.x == this.x && node.y == this.y && node.z == this.z;
+        return node.getBlockY() == this.getBlockY() && node.getBlockX() == this.getBlockX() && node.getBlockZ() == this.getBlockZ();
     }
 
     public float distanceTo(PathfinderNode node){
-        return (float) Math.sqrt(Math.pow(this.x - node.x, 2) + Math.pow(this.y - node.y, 2) + Math.pow(this.z - node.z, 2));
+        return (float) Math.sqrt(Math.pow(this.getBlockX()-node.getBlockX(),2)+Math.pow(this.getBlockY()-node.getBlockY(),2)+Math.pow(this.getBlockZ()-node.getBlockZ(),2));
     }
 }
