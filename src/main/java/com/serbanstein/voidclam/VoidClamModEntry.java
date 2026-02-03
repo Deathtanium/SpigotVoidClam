@@ -24,7 +24,7 @@ public class VoidClamModEntry implements ModInitializer {
     private static final int TICK_REACH = 20;              // auto-reach (search for lights) every second
     private static final int TICK_TARGETS = 20;            // drain path queue every second
     private static final int TICK_HEARTBEAT = 4 * 20;      // heartbeat every 4s
-    private static final int TICK_OMNI_PULSE = 30 * 20;    // omnidirectional pulse every ~30s
+    private static final int TICK_OMNI_PULSE = 5 * 20;     // omnidirectional pulse every ~5s
     private static final int TICK_AUTO_GROW = 5 * 60 * 20; // auto-repair/grow every 5 min
     private static final int OP_LEVEL = 2;                 // commands hidden unless player has this OP level
 

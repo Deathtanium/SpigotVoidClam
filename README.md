@@ -1,6 +1,6 @@
 # VoidClam (Fabric)
 
-Server-side-only Fabric mod (1.20.1). Port of the Spigot VoidClam plugin: spreading SIVA-like organisms that feed on light sources and convert blocks.
+Server-side-only Fabric mod (1.21.1). Port of the Spigot VoidClam plugin: spreading SIVA-like organisms that feed on light sources and convert blocks.
 
 ## What’s preserved
 
@@ -10,24 +10,19 @@ Server-side-only Fabric mod (1.20.1). Port of the Spigot VoidClam plugin: spread
 
 ## Build
 
-Requires Java 17+.
+Requires **Java 17+**. The Gradle wrapper (Gradle 9.2.1) is included.
 
-1. **Gradle wrapper** (if you have Gradle installed):
-   ```bash
-   gradle wrapper
-   ```
-   If not, copy `gradlew`, `gradlew.bat`, and `gradle/wrapper/` from [Fabric Example Mod](https://github.com/FabricMC/fabric-example-mod) (1.20.1 branch).
+```bash
+./gradlew build
+```
 
-2. **Build:**
-   ```bash
-   ./gradlew build
-   ```
-   Output: `build/libs/voidclam-1.0.0.jar`.
+Output: `build/libs/voidclam-1.0.0.jar`.
 
-3. **Run server (optional):**
-   ```bash
-   ./gradlew runServer
-   ```
+To run the server (optional):
+
+```bash
+./gradlew runServer
+```
 
 ## Commands (OP level 2; hidden from non-OPs)
 

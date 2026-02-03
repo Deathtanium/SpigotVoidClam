@@ -100,17 +100,19 @@ public final class Pathfinder {
                 BlockPos nextPos = new BlockPos(nextNode.x, nextNode.y, nextNode.z);
                 BlockState bl = world.getBlockState(nextPos);
                 double cst;
-                if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
+                if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(Blocks.WARPED_WART_BLOCK)) {
                     cst = 0;
                 } else if (bl.getBlock() instanceof BlockEntityProvider) {
                     cst = 2500; // tile entities are insurpassible
-                } else if (VoidClamMod.isBaseCost(bl.getBlock()) || getHardness(world, nextPos, bl) <= 0.2f) {
-                    // Prefer: on ground > next to solid(s) > suspended in air. Stickiness when not on ground = number of adjacent solids.
-                    cst = costForAirlikeBlock(world, nextPos);
+                } else if (getHardness(world, nextPos, bl) > 5) {
+                    cst = 2500;
+                } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, nextPos) && isSolid(world, nextPos.down()))) {
+                    cst = 1;
+                } else if (isAirLike(bl, world, nextPos)) {
+                    int b = countAdjacentNotWaterAirWart(world, nextPos);
+                    cst = 6 - b;
                 } else {
-                    float hard = getHardness(world, nextPos, bl);
-                    if (hard > 5) cst = 2500;
-                    else cst = 10 + hard * 10;
+                    cst = 10 + getBlastResistance(bl);
                 }
 
                 nextNode.g = cst;
@@ -142,6 +144,14 @@ public final class Pathfinder {
         }
     }
 
+    private static float getBlastResistance(BlockState state) {
+        try {
+            return state.getBlock().getBlastResistance();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     /** True if block at pos is "solid" for tendril stickiness (not air/fluid/soft/wart). */
     private static boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
@@ -150,20 +160,24 @@ public final class Pathfinder {
         return getHardness(world, pos, state) > 0.2f;
     }
 
-    /**
-     * Cost for air/fluid/soft blocks: prefer on ground > next to solid(s) > suspended.
-     * If not on ground, stickiness = number of adjacent solid blocks (more solids = lower cost).
-     */
-    private static double costForAirlikeBlock(World world, BlockPos pos) {
-        BlockPos below = pos.down();
-        if (isSolid(world, below)) return 0.05; // on ground: most preferred
-        int adjacentSolids = 0;
+    /** True if block is traversable without breaking (air, baseCost, or soft hardness). */
+    private static boolean isAirLike(BlockState state, World world, BlockPos pos) {
+        return VoidClamMod.isBaseCost(state.getBlock()) || getHardness(world, pos, state) <= 0.2f;
+    }
+
+    /** True if block is water, air, or nether wart (for adjacent count B). */
+    private static boolean isWaterAirOrWart(BlockState state) {
+        return state.isOf(Blocks.WATER) || state.isAir()
+            || state.isOf(Blocks.NETHER_WART_BLOCK) || state.isOf(Blocks.WARPED_WART_BLOCK);
+    }
+
+    /** Number of adjacent blocks (6-neighborhood) that are not water/air/nether wart. */
+    private static int countAdjacentNotWaterAirWart(World world, BlockPos pos) {
+        int b = 0;
         for (Cursor c : xc) {
-            if (isSolid(world, pos.add(c.x, c.y, c.z))) adjacentSolids++;
+            if (!isWaterAirOrWart(world.getBlockState(pos.add(c.x, c.y, c.z)))) b++;
         }
-        // 0 adjacent -> 10 (suspended); 6 adjacent -> 0.1 (surrounded by solids)
-        double cst = 10.0 - adjacentSolids * (10.0 - 0.1) / 6.0;
-        return Math.max(0.1, Math.min(10.0, cst));
+        return b;
     }
 
     // --- Container logic: off-thread BFS, max range = light search radius (capped by step limit) ---
