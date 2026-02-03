@@ -1,19 +1,26 @@
 package com.serbanstein.voidclam;
 
-import org.bukkit.Location;
+import net.minecraft.util.math.BlockPos;
+
 import java.util.HashSet;
 import java.util.Set;
 
+/**
+ * One VoidClam module (SIVA node). Types: 0 stub, 1 teen, 2 broadcast, 3 arming, 4 complex, -1 lightning rod.
+ */
 public class Module {
-	int type; // 0 is stub, 1 is teen, 2 is broadcast, 3 is arming, 4 is Complex, -1 is Lightning rod
-	int x;
-	int y;
-	int z;
-	int currentSize;
-	int status; 	//hibernation status: 1 is awake, 0 is asleep
-	int energy;
-	int age;  			//the age will be counted since the last call of /startpassive or since the last phase change
-	Set<Location> lightsBlackList = new HashSet<>();
-	short busyFlagPlaceEvent;
-	short busyFlagMainCycle;
+    public int type;
+    public int x;
+    public int y;
+    public int z;
+    public int currentSize;
+    /** 1 = awake, 0 = asleep */
+    public int status;
+    public int energy;
+    /** Age since last phase change / startpassive */
+    public int age;
+    /** Positions of light sources we've failed or are ignoring for this cycle */
+    public final Set<BlockPos> lightsBlackList = new HashSet<>();
+    public short busyFlagPlaceEvent;
+    public short busyFlagMainCycle;
 }

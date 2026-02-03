@@ -1,0 +1,53 @@
+plugins {
+    id 'fabric-loom' version '1.14-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.findProperty('mod.version') ?: '1.0.0'
+group = project.findProperty('maven.group') ?: 'com.serbanstein'
+
+base {
+    archivesName = project.findProperty('archives.base.name') ?: 'voidclam'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://maven.fabricmc.net/' }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.findProperty('minecraft.version')}"
+    mappings "net.fabricmc:yarn:${project.findProperty('yarn.mappings')}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.findProperty('loader.version')}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.findProperty('fabric.version')}"
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filteringCharset 'UTF-8'
+    filesMatching('fabric.mod.json') {
+        expand 'version': project.version
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+}
+
+jar {
+    from('LICENSE') {
+        rename { "${it}_${project.archivesBaseName}" }
+    }
+}
+
+loom {
+    runs {
+        server {
+            server()
+            vmArgs '-Dfabric.api.gametest=1'
+            runDir 'run'
+        }
+    }
+}

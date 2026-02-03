@@ -1,210 +1,199 @@
 package com.serbanstein.voidclam;
 
-import org.bukkit.Bukkit;
-import org.bukkit.Location;
-import org.bukkit.Material;
-import org.bukkit.Sound;
-import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
+import net.minecraft.block.Blocks;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvents;
+import net.minecraft.util.math.BlockPos;
 
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-import static org.bukkit.Bukkit.getWorld;
+/**
+ * VoidClam block building and reach (pathfind) logic. Preserves original behaviour and busy-flag locks.
+ */
+public final class CommandToolbox {
+    /** Shared executor for pathfinding (reach + block-place) so it doesn't block main thread. */
+    static final ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
 
-public class CommandToolbox extends JavaPlugin {
+    /** Run pathfinding off-thread (used by clamReach and VoidClamMod.onLightPlaced). */
+    public static void submitPathfinding(Runnable task) {
+        pathfinderExecutor.execute(task);
+    }
 
-    public static void makestub(int x,int y,int z){
+    public static void buildStub(ServerWorld world, int x, int y, int z) {
         for (int ix = x - 1; ix <= x + 1; ix++) {
             for (int iy = y - 2; iy <= y + 2; iy++) {
                 for (int iz = z - 1; iz <= z + 1; iz++) {
                     boolean black = !(((iy != y + 2 && iy != y - 2) || iz != z || ix != x)
-                            && ((iy != y - 1 && iy != y + 1) || ((iz != z || (ix != x + 1 && ix != x - 1))
-                            && (ix != x || (iz != z + 1 && iz != z - 1)))));
+                        && ((iy != y - 1 && iy != y + 1) || ((iz != z || (ix != x + 1 && ix != x - 1))
+                        && (ix != x || (iz != z + 1 && iz != z - 1)))));
                     boolean red = (ix == x && iz == z && iy < y + 2 && iy > y - 2);
                     final int ux = ix, uy = iy, uz = iz;
                     if (red || black) {
-                        Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(Main.getPlugin(Main.class), () -> {
-                            Objects.requireNonNull(Bukkit.getServer().getWorld(Main.worldName)).getBlockAt(ux, uy, uz).setType(Material.NETHER_WART_BLOCK);
-                            Objects.requireNonNull(getWorld(Main.worldName)).playSound(new Location(Bukkit.getWorld(Main.worldName),ux,uy,uz),
-                                    Sound.valueOf("BLOCK_CHORUS_FLOWER_GROW"),3,0.01f);
-                        }, (Math.abs(iy - y) * 20L));
+                        long delay = Math.abs(iy - y) * 20L;
+                        VoidClamMod.scheduleDelayed(world, delay, () -> {
+                            world.setBlockState(new BlockPos(ux, uy, uz), Blocks.NETHER_WART_BLOCK.getDefaultState());
+                            world.playSound(null, ux + 0.5, uy + 0.5, uz + 0.5,
+                                SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
+                        });
                     }
                     if (black) {
-                        Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(Main.getPlugin(Main.class), () -> {
-                            Objects.requireNonNull(Bukkit.getServer().getWorld((Main.worldName))).getBlockAt(ux, uy, uz).setType(Material.OBSIDIAN);
-                            Objects.requireNonNull(getWorld(Main.worldName)).playSound(new Location(Bukkit.getWorld(Main.worldName),ux,uy,uz),
-                                    Sound.valueOf("BLOCK_CHORUS_FLOWER_GROW"),3,0.01f);
-                        }, (Math.abs(iy - y) * 30L));
-                    }}}}
-
-        Main.moduleNumber++;
-        (Main.modules[Main.moduleNumber]) = new Module();
-        (Main.modules[Main.moduleNumber]).type = 1;
-        (Main.modules[Main.moduleNumber]).x = x;
-        (Main.modules[Main.moduleNumber]).y = y;
-        (Main.modules[Main.moduleNumber]).z = z;
-        (Main.modules[Main.moduleNumber]).currentSize = 1;
-        (Main.modules[Main.moduleNumber]).status = 1;
-        (Main.modules[Main.moduleNumber]).energy = 0;
-        (Main.modules[Main.moduleNumber]).age = 0;
-
-        Main.saveToFile();
+                        long delay = Math.abs(iy - y) * 30L;
+                        VoidClamMod.scheduleDelayed(world, delay, () -> {
+                            world.setBlockState(new BlockPos(ux, uy, uz), Blocks.OBSIDIAN.getDefaultState());
+                            world.playSound(null, ux + 0.5, uy + 0.5, uz + 0.5,
+                                SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
+                        });
+                    }
+                }
+            }
+        }
     }
 
-
-    public static void buildShell(int x,int y,int z,int tsize,Material mat){
-        int iy;
-        for (iy = y + tsize - 1; iy >= y + 1; iy--) {
+    public static void buildShell(ServerWorld world, int x, int y, int z, int tsize, net.minecraft.block.Block mat) {
+        net.minecraft.block.BlockState state = mat.getDefaultState();
+        for (int iy = y + tsize - 1; iy >= y + 1; iy--) {
             int k = Math.abs(iy - y);
-            int j;
-            for (j = x - tsize + 1 + k; j <= x; j++) {
+            for (int j = x - tsize + 1 + k; j <= x; j++) {
                 int iz = z - tsize + 1 + k + Math.abs(j - x);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
-
-            for (j = x - tsize + 1 + k; j <= x; j++) {
+            for (int j = x - tsize + 1 + k; j <= x; j++) {
                 int iz = z + tsize - 1 - k - Math.abs(j - x);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
-            for (j = x + tsize - 1 - k; j >= x; j--) {
+            for (int j = x + tsize - 1 - k; j >= x; j--) {
                 int iz = z - tsize + 1 + k + Math.abs(j - x);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
-            for (j = x + tsize - 1 - k; j >= x; j--) {
+            for (int j = x + tsize - 1 - k; j >= x; j--) {
                 int iz = z + tsize - 1 - k - Math.abs(x - j);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
         }
-        for (iy = y - tsize / 2; iy <= y - 1; iy++) {
+        for (int iy = y - tsize / 2; iy <= y - 1; iy++) {
             int k = Math.abs(iy - y);
-            int j;
-            for (j = x - tsize + 1 + k; j <= x; j++) {
+            for (int j = x - tsize + 1 + k; j <= x; j++) {
                 int iz = z - tsize + 1 + k + Math.abs(j - x);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
-            for (j = x - tsize + 1 + k; j <= x; j++) {
+            for (int j = x - tsize + 1 + k; j <= x; j++) {
                 int iz = z + tsize - 1 - k - Math.abs(j - x);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
-            for (j = x + tsize - 1 - k; j >= x; j--) {
+            for (int j = x + tsize - 1 - k; j >= x; j--) {
                 int iz = z - tsize + 1 + k + Math.abs(j - x);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
-
-            for (j = x + tsize - 1 - k; j >= x; j--) {
+            for (int j = x + tsize - 1 - k; j >= x; j--) {
                 int iz = z + tsize - 1 - k - Math.abs(x - j);
-                Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(j, iy, iz).setType(mat);
+                world.setBlockState(new BlockPos(j, iy, iz), state);
             }
         }
     }
 
-    public static void clamReSize(int tno,int tsize) {
-        int ctype = Main.modules[tno].type;
-        Material mat = Material.NETHER_WART_BLOCK;
-        if(ctype == 2) mat = Material.WARPED_WART_BLOCK;
-        int csize = Main.modules[tno].currentSize;
-        int x = (Main.modules[tno]).x, y = (Main.modules[tno]).y, z = (Main.modules[tno]).z;
-        int i,timer=0;
+    public static void clamReSize(ServerWorld world, int tno, int tsize) {
+        Module[] modules = VoidClamMod.getModules();
+        if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
+        Module m = modules[tno];
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        int ctype = m.type;
+        net.minecraft.block.Block mat = Blocks.NETHER_WART_BLOCK;
+        if (ctype == 2) mat = Blocks.WARPED_WART_BLOCK;
+        int csize = m.currentSize;
+        int x = m.x, y = m.y, z = m.z;
+        int timer = 0;
 
-        for(i = 1;i<=tsize;i+=2){
-            final int i_final=i;
-            Bukkit.getScheduler().runTaskLater(Main.getPlugin(Main.class), () -> {
-                buildShell(x,y,z,i_final,Material.NETHER_WART_BLOCK);
-                Objects.requireNonNull(getWorld(Main.worldName)).playSound(new Location(getWorld(Main.worldName),x,y,z), Sound.valueOf("BLOCK_CHORUS_FLOWER_GROW"), 3, 0.01f);
-            },(timer++)*10);
+        for (int i = 1; i <= tsize; i += 2) {
+            final int iFinal = i;
+            VoidClamMod.scheduleDelayed(world, timer * 10L, () -> {
+                buildShell(world, x, y, z, iFinal, Blocks.NETHER_WART_BLOCK);
+                world.playSound(null, x + 0.5, y + 0.5, z + 0.5,
+                    SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
+            });
+            timer++;
         }
 
-        for(int ix=(x - csize);ix<=(x + csize);ix++){
-            for(int iy=(y - csize - 1);iy<=(y + csize + 1);iy++) {
-                for(int iz=(z - csize);iz<=(z + csize);iz++) {
-                    if(Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(ix,iy,iz).getType() == Material.OBSIDIAN)
-                        Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(ix,iy,iz).setType(mat);
-                }}}
-
-        for (i = y + csize; i <= y + tsize - 1; i++) {
-            Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(x, i, z).setType(mat);
-        }
-        for (i = y - csize; i >= y - tsize + 1; i--) {
-            Objects.requireNonNull(Bukkit.getWorld(Main.worldName)).getBlockAt(x, i, z).setType(mat);
+        for (int ix = x - csize; ix <= x + csize; ix++) {
+            for (int iy = y - csize - 1; iy <= y + csize + 1; iy++) {
+                for (int iz = z - csize; iz <= z + csize; iz++) {
+                    BlockPos pos = new BlockPos(ix, iy, iz);
+                    if (world.getBlockState(pos).isOf(Blocks.OBSIDIAN))
+                        world.setBlockState(pos, mat.getDefaultState());
+                }
+            }
         }
 
-        final int tsize_final = tsize;
+        for (int i = y + csize; i <= y + tsize - 1; i++)
+            world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        for (int i = y - csize; i >= y - tsize + 1; i--)
+            world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
 
-        Bukkit.getScheduler().runTaskLater(Main.getPlugin(Main.class), () -> buildShell(x,y,z,tsize_final,Material.OBSIDIAN),(timer)* 20L);
+        VoidClamMod.scheduleDelayed(world, timer * 20L, () -> buildShell(world, x, y, z, tsize, Blocks.OBSIDIAN));
 
-        (Main.modules[tno]).currentSize = tsize;
-        tsize -= 2;
+        m.currentSize = tsize;
+        VoidClamMod.save(world.getServer());
 
-        //crown code, if I come back to it
-        int ix;
-        for (ix = x - tsize + 1; ix <= x; ix++) {
-            int iz = z - tsize + 1 + Math.abs(ix - x);
-            Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(ix, y, iz).setType(mat);
+        int ts = tsize - 2;
+        for (int ix = x - ts + 1; ix <= x; ix++) {
+            int iz = z - ts + 1 + Math.abs(ix - x);
+            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
-        for (ix = x - tsize + 1; ix <= x; ix++) {
-            int iz = z + tsize - 1 - Math.abs(ix - x);
-            Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(ix, y, iz).setType(mat);
+        for (int ix = x - ts + 1; ix <= x; ix++) {
+            int iz = z + ts - 1 - Math.abs(ix - x);
+            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
-        for (ix = x + tsize - 1; ix >= x; ix--) {
-            int iz = z - tsize + 1 + Math.abs(ix - x);
-            Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(ix, y, iz).setType(mat);
+        for (int ix = x + ts - 1; ix >= x; ix--) {
+            int iz = z - ts + 1 + Math.abs(ix - x);
+            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
-        for (ix = x + tsize - 1; ix >= x; ix--) {
-            int iz = z + tsize - 1 - Math.abs(x - ix);
-            Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(ix, y, iz).setType(mat);
+        for (int ix = x + ts - 1; ix >= x; ix--) {
+            int iz = z + ts - 1 - Math.abs(x - ix);
+            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
-        Main.saveToFile();
     }
 
-    public static void clamReach(int tno) {
-        if(Main.modules[tno].busyFlagMainCycle==0) {
-            Main.modules[tno].busyFlagMainCycle = 1;
+    /** Start pathfinding to nearest light for module tno. Uses executor + queue like original async. No-op if module chunk not loaded. */
+    public static void clamReach(ServerWorld world, int tno) {
+        Module[] modules = VoidClamMod.getModules();
+        if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
+        Module m = modules[tno];
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (m.busyFlagMainCycle != 0) return;
+        m.busyFlagMainCycle = 1;
 
-            Main.aSyncTasks.add(new BukkitRunnable() {	//runs async due to A* and large area searches
-                public void run() {					//no, trust me, plugin's unusable if this is sync
+        submitPathfinding(() -> {
+            try {
+                int x = m.x, y = m.y, z = m.z, cSize = m.currentSize;
+                BlockPos modPos = new BlockPos(x, y, z);
+                BlockPos closest = null;
+                double closestDist = Double.MAX_VALUE;
 
-                    int x,y,z,ix,iy,iz,cSize;
-                    x = Main.modules[tno].x;
-                    y = Main.modules[tno].y;
-                    z = Main.modules[tno].z;
-                    cSize = Main.modules[tno].currentSize;
-                    //pick closest light block from module's lightsMap
-                    Location closest = new Location(getWorld(Main.worldName),0,-1,0);
-                    Location modloc = new Location(getWorld(Main.worldName),x,y,z);
-
-                    for(iy=y-4*cSize;iy<=y+4*cSize;iy++)
-                    {
-                        for(ix=x-4*cSize;ix<=x+4*cSize;ix++)
-                        {
-                            for(iz=z-4*cSize;iz<=z+4*cSize;iz++)
-                            {
-                                Location loc = new Location(Bukkit.getWorld(Main.worldName),ix,iy,iz);
-                                if(Main.lights.contains(Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(ix,iy,iz).getType()) && !(Main.modules[tno].lightsBlackList.contains(loc)))
-                                    if(modloc.distance(loc)<modloc.distance(closest) || closest.getY() == -1) closest = loc;
+                for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
+                    for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
+                        for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
+                            BlockPos pos = new BlockPos(ix, iy, iz);
+                            if (!VoidClamMod.isLight(world.getBlockState(pos).getBlock())) continue;
+                            if (m.lightsBlackList.contains(pos)) continue;
+                            double dist = modPos.getSquaredDistance(pos);
+                            if (dist < closestDist) {
+                                closestDist = dist;
+                                closest = pos;
                             }
                         }
                     }
-
-                    if(closest.getY()!=-1 && !Main.modules[tno].lightsBlackList.contains(closest)){	//if valid candidate is found
-                        //Bukkit.broadcastMessage(tno+" "+(int)closest.getX()+" "+(int)closest.getY()+" "+(int)closest.getZ());
-                        Main.modules[tno].lightsBlackList.add(closest);
-                        if(Pathfinder.calculatePath(tno,x,y,z,(int)closest.getX(),(int)closest.getY(),(int)closest.getZ())) {
-                            Main.modules[tno].energy++;
-                        }
-                    }
-                    Main.modules[tno].busyFlagMainCycle = 0;
                 }
-            }.runTaskAsynchronously(Main.getPlugin(Main.class)));
-        }
-    }
 
-    public static void clamKill(int tno){
-        for (int i = tno; i < Main.moduleNumber; i++) {
-            Module swap = Main.modules[i];
-            Main.modules[i] = Main.modules[i + 1];
-            Main.modules[i + 1] = swap;
-        }
-        Main.modules[Main.moduleNumber] = new Module();
-        Main.moduleNumber--;
+                if (closest != null && !m.lightsBlackList.contains(closest)) {
+                    m.lightsBlackList.add(closest.toImmutable());
+                    Pathfinder.calculatePath(world, tno, x, y, z, closest.getX(), closest.getY(), closest.getZ());
+                    // energy granted only when light is eaten in buildPath
+                }
+            } finally {
+                m.busyFlagMainCycle = 0;
+            }
+        });
     }
 }

@@ -1,173 +1,365 @@
 package com.serbanstein.voidclam;
 
-import java.util.*;
+import net.minecraft.block.BlockEntityProvider;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.BarrelBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvents;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.world.World;
 
-import org.bukkit.Bukkit;
-import org.bukkit.Location;
-import org.bukkit.Material;
-import org.bukkit.Sound;
-import org.bukkit.inventory.ItemStack;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
 
-import static org.bukkit.Bukkit.getPlayer;
-import static org.bukkit.Bukkit.getWorld;
+public final class Pathfinder {
+    static final List<Cursor> xc = new ArrayList<>();
+    static final List<Cursor> yc = new ArrayList<>();
 
-public class Pathfinder {
-	static List<Cursor> xc = new ArrayList<>();
-	static List<Cursor> yc = new ArrayList<>();
-	//decides which path candidate has the lowest estimated cost
-	public static Node leastF(List<Node> list) {
-		double minf = 100000;
-		Node mini = null;
-		for (Node n : list) {
-			if (n.f < minf) {
-				minf = n.f;
-				mini = n;
-			}
-		}
-		return mini;
-	}
+    static {
+        xc.add(new Cursor(1, 0, 0));
+        xc.add(new Cursor(-1, 0, 0));
+        xc.add(new Cursor(0, 1, 0));
+        xc.add(new Cursor(0, -1, 0));
+        xc.add(new Cursor(0, 0, 1));
+        xc.add(new Cursor(0, 0, -1));
+        yc.add(new Cursor(1, 0, 0));
+        yc.add(new Cursor(-1, 0, 0));
+        yc.add(new Cursor(0, 1, 0));
+        yc.add(new Cursor(0, -1, 0));
+        yc.add(new Cursor(0, 0, 1));
+        yc.add(new Cursor(0, 0, -1));
+    }
 
-	//returns node that exists in provided list, null otherwise
-	public static Node nodeExists(List<Node> list, Node firstNode) {
-		if(!list.isEmpty()) for (Node n : list) {
-			if (n.x == firstNode.x && n.y == firstNode.y && n.z == firstNode.z)
-				return n;
-		} else return null;
-		return null;
-	}
+    public static Node leastF(List<Node> list) {
+        double minf = 100_000;
+        Node mini = null;
+        for (Node n : list) {
+            if (n.f < minf) {
+                minf = n.f;
+                mini = n;
+            }
+        }
+        return mini;
+    }
 
-	public static boolean calculatePath(int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
+    public static Node nodeExists(List<Node> list, Node firstNode) {
+        if (list.isEmpty()) return null;
+        for (Node n : list) {
+            if (n.x == firstNode.x && n.y == firstNode.y && n.z == firstNode.z)
+                return n;
+        }
+        return null;
+    }
 
-		List<Node> open = new ArrayList<>();
-		List<Node> closed = new ArrayList<>();
+    public static boolean calculatePath(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
+        if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
+        List<Node> open = new ArrayList<>();
+        List<Node> closed = new ArrayList<>();
 
-		//double cst = 0;
-		Node firstNode = new Node(sx, sy, sz, null,tno);	//starting node; first added the open list
-		//g is material cost, h is Pythagorean distance, f is the sum between g and h
-		firstNode.g = 0; //initializing the values 
-		firstNode.h = Math.pow((firstNode.x - gx), 2) + Math.pow((firstNode.y - gy), 2) + Math.pow((firstNode.z - gz), 2);
-		firstNode.f = firstNode.h;
-		open.add(firstNode); //adding it to the open list
+        Node firstNode = new Node(sx, sy, sz, null, tno);
+        firstNode.g = 0;
+        firstNode.h = Math.pow(firstNode.x - gx, 2) + Math.pow(firstNode.y - gy, 2) + Math.pow(firstNode.z - gz, 2);
+        firstNode.f = firstNode.h;
+        open.add(firstNode);
 
-		while (!open.isEmpty() && Main.getPlugin(Main.class).isEnabled()) {
+        Module[] modules = VoidClamMod.getModules();
+        int moduleNumber = VoidClamMod.getModuleNumber();
 
-			Node nextCheapestNode = leastF(open);
-			open.remove(nextCheapestNode);
-			//Collections.shuffle(x);
-			//now, going through the cursor list (6 directions, no diagonals)
-			for (Cursor c : xc) {
+        while (!open.isEmpty()) {
+            Node nextCheapestNode = leastF(open);
+            open.remove(nextCheapestNode);
 
-				Node nextNode = new Node(nextCheapestNode.x + c.x, nextCheapestNode.y + c.y, nextCheapestNode.z + c.z, nextCheapestNode,tno);
+            for (Cursor c : xc) {
+                Node nextNode = new Node(
+                    nextCheapestNode.x + c.x,
+                    nextCheapestNode.y + c.y,
+                    nextCheapestNode.z + c.z,
+                    nextCheapestNode,
+                    tno
+                );
 
-				//if the neighboring node is the target
-				if (nextNode.x == gx && nextNode.y == gy && nextNode.z == gz) {
-					Node toAdd;
-					toAdd = nextNode;
-					toAdd.tno = tno;
-					Main.targets.add(toAdd);
-					return true;
-				}
-				else {
-					double cst;
-					Material bl = Objects.requireNonNull(Bukkit.getServer().getWorld(Main.worldName)).getBlockAt(nextNode.x,nextNode.y,nextNode.z).getType();
-					if(bl==Material.NETHER_WART_BLOCK){
-						cst = 0;
-					} else if (Main.baseCost.contains(bl) || bl.getHardness()<=0.2) {
-						cst = 10;
-						for(Cursor cc : yc){
-							//would rather stick to walls than suspending tendrils mid-air
-							Material mat = Objects.requireNonNull(Bukkit.getServer().getWorld(Main.worldName)).getBlockAt(nextNode.x+cc.x,nextNode.y+cc.y,nextNode.z+cc.z).getType();
-							if(!(mat.getHardness()<=0.2 || Main.baseCost.contains(mat) || mat==Material.NETHER_WART_BLOCK)){
-								cst = 0.1;
-							}
-						}
-					} else {
-						if(bl.getHardness() > 5) cst = 2500;
-						else {
-							cst = 10+bl.getHardness()*10;
-						}
-					}
-					final double finalcst = cst;
-					/*
-					//this below is to avoid pets, animals, armor stands, item frames bla bla
-					Collection<Entity> coll = Objects.requireNonNull(getWorld(Main.worldName)).getNearbyEntities(new Location(Bukkit.getWorld(Main.worldName),nextNode.x,nextNode.y,nextNode.z),2,2,2);
-					if(!coll.isEmpty()){
-						cst = 2500;
-					}*/
-					//this shit does not work and is a performance nightmare
+                if (nextNode.x == gx && nextNode.y == gy && nextNode.z == gz) {
+                    VoidClamMod.enqueueTarget(nextNode);
+                    return true;
+                }
 
-					//g is cst, h is Manhattan distance, f is the sum between g and h
-					nextCheapestNode.g += cst;
-					nextNode.g = cst;
-					nextNode.h = Math.abs(nextNode.x - gx) + Math.abs(nextNode.y - gy) + Math.abs(nextNode.z - gz);
-					nextNode.f = nextNode.g + nextNode.h;
+                BlockPos nextPos = new BlockPos(nextNode.x, nextNode.y, nextNode.z);
+                BlockState bl = world.getBlockState(nextPos);
+                double cst;
+                if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
+                    cst = 0;
+                } else if (bl.getBlock() instanceof BlockEntityProvider) {
+                    cst = 2500; // tile entities are insurpassible
+                } else if (VoidClamMod.isBaseCost(bl.getBlock()) || getHardness(world, nextPos, bl) <= 0.2f) {
+                    // Prefer: on ground > next to solid(s) > suspended in air. Stickiness when not on ground = number of adjacent solids.
+                    cst = costForAirlikeBlock(world, nextPos);
+                } else {
+                    float hard = getHardness(world, nextPos, bl);
+                    if (hard > 5) cst = 2500;
+                    else cst = 10 + hard * 10;
+                }
 
-					Node tempNode1 = nodeExists(open, nextNode);
-					Node tempNode2 = nodeExists(closed, nextNode);
-					if (!(Math.abs(nextNode.x-Main.modules[tno].x)>4*Main.modules[tno].currentSize || Math.abs(nextNode.y-Main.modules[tno].y)>5*Main.modules[tno].currentSize || Math.abs(nextNode.z-Main.modules[tno].z)>5*Main.modules[tno].currentSize) &&
-							!(tempNode1!=null && tempNode1.f <= nextNode.f) &&
-							!(tempNode2!=null && tempNode2.f <= nextNode.f) &&
-							(cst!=2500))
-						open.add(nextNode);
-					nextCheapestNode.g-=cst;
-				}
-			}
-			closed.add(nextCheapestNode);
-		}
-		closed.clear();
-		return false;
-	}
+                nextNode.g = cst;
+                nextNode.h = Math.abs(nextNode.x - gx) + Math.abs(nextNode.y - gy) + Math.abs(nextNode.z - gz);
+                nextNode.f = nextNode.g + nextNode.h;
 
-	//path builder function
-	public static void buildpath(Node gnode) {
-		if (gnode.f < 2500) {
-			Node firstNode = gnode, copy = gnode;
-			int x = Main.modules[gnode.tno].x, y = Main.modules[gnode.tno].y, z = Main.modules[gnode.tno].z;
-			long timer = 2;
-			while (copy.parent != null) {
-				timer += 2;
-				copy = copy.parent;
-			}
-			Random r = new Random();
+                Node tempNode1 = nodeExists(open, nextNode);
+                Node tempNode2 = nodeExists(closed, nextNode);
+                if (tno <= moduleNumber && modules[tno] != null &&
+                    !(Math.abs(nextNode.x - modules[tno].x) > 4 * modules[tno].currentSize
+                        || Math.abs(nextNode.y - modules[tno].y) > 5 * modules[tno].currentSize
+                        || Math.abs(nextNode.z - modules[tno].z) > 5 * modules[tno].currentSize) &&
+                    (tempNode1 == null || tempNode1.f > nextNode.f) &&
+                    (tempNode2 == null || tempNode2.f > nextNode.f) &&
+                    cst != 2500) {
+                    open.add(nextNode);
+                }
+            }
+            closed.add(nextCheapestNode);
+        }
+        return false;
+    }
 
-			Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(Main.getPlugin(Main.class), () -> Main.modules[gnode.tno].lightsBlackList.remove(new Location(getWorld(Main.worldName), gnode.x, gnode.y, gnode.z)), timer);
+    private static float getHardness(World world, BlockPos pos, BlockState state) {
+        try {
+            return state.getHardness(world, pos);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
 
-			int []stamina = new int[1];
-			stamina[0]=Main.modules[gnode.tno].currentSize;
-			int []blocked = new int[1];
-			while (firstNode.parent != null && blocked[0]==0) {
-				final Node refnode2 = firstNode;
-				Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(Main.getPlugin(Main.class), () -> {
-					if(blocked[0]==0) {
-						Material mat = Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(refnode2.x, refnode2.y, refnode2.z).getType();
-						int cst = 0;
-						if(mat == Material.NETHER_WART_BLOCK) cst =0;
-						else if(mat == Material.AIR || mat == Material.WATER || mat == Material.LAVA) cst = 1;
-						else cst = (int)Math.floor(mat.getHardness())*2;
-						if(refnode2==gnode) cst=0;
-						/*if (!(refnode2==gnode || mat == Material.AIR || mat == Material.WATER || mat == Material.LAVA || mat == Material.NETHER_WART_BLOCK)) {
-							blocked[0]=1;
-							Main.modules[refnode2.tno+1].lightsBlackList.add(new Location(getWorld(Main.worldName),gnode.x,gnode.y,gnode.z));
-							Main.modules[refnode2.tno+1].energy--;
-						}else*/
-						if(stamina[0]-cst<0){
-							blocked[0]=1;
-							if(!(mat == Material.AIR || mat == Material.WATER || mat == Material.LAVA)) Main.modules[gnode.tno].lightsBlackList.add(new Location(getWorld(Main.worldName),gnode.x,gnode.y,gnode.z));
-							Main.modules[gnode.tno].energy--;
-						}else{
-							stamina[0]-=cst;
-						}
-						if(refnode2 == gnode && !Main.lights.contains(mat))
-							Main.modules[gnode.tno].energy--;
-						Objects.requireNonNull(getWorld(Main.worldName)).getBlockAt(refnode2.x, refnode2.y, refnode2.z).setType(Material.NETHER_WART_BLOCK);
-						Objects.requireNonNull(getWorld(Main.worldName)).playSound(new Location(getWorld(Main.worldName), refnode2.x, refnode2.y, refnode2.z), Sound.valueOf("BLOCK_CHORUS_FLOWER_GROW"), 1, 0.01f);
-						if (!(refnode2 == gnode || mat == Material.AIR || mat == Material.WATER || mat == Material.LAVA || mat == Material.NETHER_WART_BLOCK))
-							Objects.requireNonNull(getWorld(Main.worldName)).dropItemNaturally(new Location(getWorld(Main.worldName),refnode2.x, refnode2.y,refnode2.z),new ItemStack(mat,1));
-					}
-				}, (timer));
-				timer -= 2;
-				firstNode = firstNode.parent;
-			}
-		}
-	}
+    /** True if block at pos is "solid" for tendril stickiness (not air/fluid/soft/wart). */
+    private static boolean isSolid(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (state.isOf(Blocks.NETHER_WART_BLOCK) || state.isOf(Blocks.WARPED_WART_BLOCK)) return false;
+        if (VoidClamMod.isBaseCost(state.getBlock())) return false;
+        return getHardness(world, pos, state) > 0.2f;
+    }
+
+    /**
+     * Cost for air/fluid/soft blocks: prefer on ground > next to solid(s) > suspended.
+     * If not on ground, stickiness = number of adjacent solid blocks (more solids = lower cost).
+     */
+    private static double costForAirlikeBlock(World world, BlockPos pos) {
+        BlockPos below = pos.down();
+        if (isSolid(world, below)) return 0.05; // on ground: most preferred
+        int adjacentSolids = 0;
+        for (Cursor c : xc) {
+            if (isSolid(world, pos.add(c.x, c.y, c.z))) adjacentSolids++;
+        }
+        // 0 adjacent -> 10 (suspended); 6 adjacent -> 0.1 (surrounded by solids)
+        double cst = 10.0 - adjacentSolids * (10.0 - 0.1) / 6.0;
+        return Math.max(0.1, Math.min(10.0, cst));
+    }
+
+    // --- Container logic: off-thread BFS, max range = light search radius (capped by step limit) ---
+    private static final int CONTAINER_SNAPSHOT_MAX_STEPS = 4096;
+    private static final byte TYPE_OTHER = 0;
+    private static final byte TYPE_NETHER_WART = 1;
+    private static final byte TYPE_WARPED_WART = 2;
+    private static final byte TYPE_CONTAINER = 3;
+    private static final int[] DX = {1, -1, 0, 0, 0, 0};
+    private static final int[] DY = {0, 0, 1, -1, 0, 0};
+    private static final int[] DZ = {0, 0, 0, 0, 1, -1};
+
+    private static boolean isContainerBlock(net.minecraft.block.Block block) {
+        return block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL;
+    }
+
+    /** Build snapshot on main thread: BFS from start, max steps = light search radius (capped). Returns (pos -> type). */
+    private static Map<Long, Byte> buildContainerSnapshot(ServerWorld world, BlockPos start, int cSize) {
+        int maxSteps = CONTAINER_SNAPSHOT_MAX_STEPS; // light search radius volume is huge; cap to avoid main-thread hang
+        Map<Long, Byte> map = new HashMap<>();
+        Set<Long> seen = new HashSet<>();
+        Queue<Long> queue = new ArrayDeque<>();
+        long startLong = start.asLong();
+        queue.add(startLong);
+        seen.add(startLong);
+        int steps = 0;
+        while (!queue.isEmpty() && steps < maxSteps) {
+            long cur = queue.poll();
+            steps++;
+            BlockPos pos = BlockPos.fromLong(cur);
+            BlockState state = world.getBlockState(pos);
+            byte type;
+            if (state.isOf(Blocks.NETHER_WART_BLOCK)) type = TYPE_NETHER_WART;
+            else if (state.isOf(Blocks.WARPED_WART_BLOCK)) type = TYPE_WARPED_WART;
+            else if (isContainerBlock(state.getBlock())) type = TYPE_CONTAINER;
+            else type = TYPE_OTHER;
+            map.put(cur, type);
+            // From start (break pos) we can step to neighbors even though block isn't wart yet; else only step from wart
+            if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
+            for (int i = 0; i < 6; i++) {
+                long next = BlockPos.fromLong(cur).add(DX[i], DY[i], DZ[i]).asLong();
+                if (seen.add(next)) queue.add(next);
+            }
+        }
+        return map;
+    }
+
+    /** Runs off-thread: BFS on snapshot from start, returns container positions in BFS order. */
+    private static List<Long> runContainerBfsOnSnapshot(Map<Long, Byte> snapshot, long startLong) {
+        List<Long> containers = new ArrayList<>();
+        Set<Long> seen = new HashSet<>();
+        Queue<Long> queue = new ArrayDeque<>();
+        queue.add(startLong);
+        seen.add(startLong);
+        while (!queue.isEmpty()) {
+            long cur = queue.poll();
+            Byte type = snapshot.get(cur);
+            if (type == null) continue;
+            if (type == TYPE_CONTAINER) containers.add(cur);
+            // From start (break pos) we can step to neighbors; else only step from wart
+            if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
+            BlockPos pos = BlockPos.fromLong(cur);
+            for (int i = 0; i < 6; i++) {
+                long next = pos.add(DX[i], DY[i], DZ[i]).asLong();
+                if (snapshot.containsKey(next) && seen.add(next)) queue.add(next);
+            }
+        }
+        return containers;
+    }
+
+    /** Main thread: try insert into containers; if none, create barrel at breakPos. Replaces breakPos with wart when stored in existing container. */
+    private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, ItemStack toStore) {
+        for (long l : containerPositions) {
+            if (toStore.isEmpty()) break;
+            tryInsertInto(world, BlockPos.fromLong(l), toStore);
+        }
+        if (!toStore.isEmpty()) {
+            createBarrelAndInsert(world, breakPos, toStore);
+        } else {
+            int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, breakPos);
+            world.setBlockState(breakPos, Blocks.NETHER_WART_BLOCK.getDefaultState());
+            world.playSound(null, breakPos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+            TendrilPulseManager.startPulse(world, breakPos, packedBrightness, () -> {});
+        }
+    }
+
+    private static boolean tryInsertInto(ServerWorld world, BlockPos pos, ItemStack stack) {
+        if (stack.isEmpty()) return true;
+        BlockEntity be = world.getBlockEntity(pos);
+        if (!(be instanceof Inventory inv)) return false;
+        int size = inv.size();
+        for (int i = 0; i < size && !stack.isEmpty(); i++) {
+            ItemStack inSlot = inv.getStack(i);
+            if (inSlot.isEmpty()) {
+                int toPut = Math.min(stack.getCount(), inv.getMaxCountPerStack());
+                ItemStack put = stack.copy();
+                put.setCount(toPut);
+                inv.setStack(i, put);
+                stack.decrement(toPut);
+            } else if (ItemStack.areItemsEqual(inSlot, stack)) {
+                int max = Math.min(inv.getMaxCountPerStack(), inSlot.getMaxCount());
+                int canAdd = max - inSlot.getCount();
+                if (canAdd > 0) {
+                    int toAdd = Math.min(canAdd, stack.getCount());
+                    inSlot.increment(toAdd);
+                    stack.decrement(toAdd);
+                }
+            }
+        }
+        if (be != null) be.markDirty();
+        return stack.isEmpty();
+    }
+
+    private static void createBarrelAndInsert(ServerWorld world, BlockPos pos, ItemStack stack) {
+        BlockState barrelState = Blocks.BARREL.getDefaultState().with(BarrelBlock.FACING, Direction.NORTH);
+        world.setBlockState(pos, barrelState);
+        BlockEntity be = world.getBlockEntity(pos);
+        if (be instanceof BarrelBlockEntity) {
+            tryInsertInto(world, pos, stack);
+        } else {
+            net.minecraft.block.Block.dropStack(world, pos, stack);
+        }
+    }
+
+    public static void buildPath(ServerWorld world, Node gnode) {
+        if (gnode.f >= 2500) return;
+        Module[] modules = VoidClamMod.getModules();
+        Module mod = modules[gnode.tno];
+        if (mod == null || !world.isChunkLoaded(mod.x >> 4, mod.z >> 4)) return;
+        Node firstNode = gnode;
+        Node copy = gnode;
+        long timer = 2;
+        while (copy.parent != null) {
+            timer += 2;
+            copy = copy.parent;
+        }
+
+        BlockPos goalPos = new BlockPos(gnode.x, gnode.y, gnode.z);
+        VoidClamMod.scheduleDelayed(world, timer, () ->
+            VoidClamMod.removeLightsBlackList(gnode.tno, goalPos));
+
+        int[] stamina = new int[]{modules[gnode.tno].currentSize};
+        int[] blocked = new int[1];
+        int[] pathStopped = new int[1]; // set when block-to-break: path stops, no energy, resume next attempt
+
+        while (firstNode.parent != null && blocked[0] == 0) {
+            final Node refNode = firstNode;
+            final long runAt = timer;
+            final int cSize = modules[gnode.tno].currentSize;
+            VoidClamMod.scheduleDelayed(world, runAt, () -> {
+                if (blocked[0] != 0 || pathStopped[0] != 0) return;
+                BlockPos pos = new BlockPos(refNode.x, refNode.y, refNode.z);
+                BlockState mat = world.getBlockState(pos);
+                int cst;
+                if (mat.isOf(Blocks.NETHER_WART_BLOCK)) cst = 0;
+                else if (mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA)) cst = 1;
+                else cst = (int) Math.floor(getHardness(world, pos, mat)) * 2;
+                if (refNode == gnode) cst = 0;
+
+                if (stamina[0] - cst < 0) {
+                    blocked[0] = 1;
+                    if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA)))
+                        VoidClamMod.addLightsBlackList(gnode.tno, goalPos);
+                    VoidClamMod.addEnergy(gnode.tno, -1);
+                } else {
+                    stamina[0] -= cst;
+                }
+
+                boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK));
+                if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
+                    pathStopped[0] = 1; // path stops; clam does not get energy; resume next attempt
+                    ItemStack toStore = new ItemStack(mat.getBlock().asItem(), 1);
+                    BlockPos clamCenter = new BlockPos(mod.x, mod.y, mod.z);
+                    Map<Long, Byte> snapshot = buildContainerSnapshot(world, clamCenter, cSize);
+                    BlockPos breakPos = pos.toImmutable();
+                    long clamCenterLong = clamCenter.asLong();
+                    CommandToolbox.submitPathfinding(() -> {
+                        List<Long> containers = runContainerBfsOnSnapshot(snapshot, clamCenterLong);
+                        world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, toStore));
+                    });
+                    return;
+                }
+
+                int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, pos);
+                world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
+                world.playSound(null, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+                if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
+                    VoidClamMod.addEnergy(gnode.tno, 1); // energy only when light source is eaten
+                if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK))) {
+                    if (mat.getBlock().asItem() != Items.AIR)
+                        net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
+                }
+                TendrilPulseManager.startPulse(world, pos, packedBrightness, () -> {});
+            });
+            timer -= 2;
+            firstNode = firstNode.parent;
+        }
+    }
 }
