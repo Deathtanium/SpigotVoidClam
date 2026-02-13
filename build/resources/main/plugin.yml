@@ -1,0 +1,43 @@
+name: VoidClam
+version: 1.0
+main: com.serbanstein.voidclam.Main
+api-version: 1.18
+commands:
+  voidclammake:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclammake <x> <y> <z>"
+  voidclamping:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+  voidclamtestfile:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+  voidclamkill:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclamkill <index>"
+  voidclamresize:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclamresize <index> <size>"
+  voidclaminfo:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclaminfo [index]"
+  voidclamreach:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclamreach <index>"
+  voidclamrepair:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclamrepair <index>"
+  voidclamgrow:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+    usage: "/voidclamgrow <index>"
+  voidclamsave:
+    permission: debugvoidclam
+    permission-message: "Insufficient permission"
+
