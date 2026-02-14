@@ -19,8 +19,10 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -422,7 +424,9 @@ public final class TendrilPulseManager {
                 toRemove.add(e);
             }
         }
-        entries.removeAll(toRemove);
+        Set<PulseEntry> toRemoveSet = Collections.newSetFromMap(new IdentityHashMap<>());
+        toRemoveSet.addAll(toRemove);
+        entries.removeIf(toRemoveSet::contains);
     }
 
     private static class PulseEntry {

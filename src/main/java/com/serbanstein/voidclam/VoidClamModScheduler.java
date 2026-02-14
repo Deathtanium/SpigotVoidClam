@@ -3,8 +3,11 @@ package com.serbanstein.voidclam;
 import net.minecraft.server.world.ServerWorld;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -36,7 +39,10 @@ public final class VoidClamModScheduler {
             if (t.world == world && now >= t.runAtTick)
                 toRun.add(t);
         }
-        pending.removeAll(toRun);
+        // Identity set: O(1) contains, avoids removeAll(ArrayList) O(n*m); use identity so distinct tasks are never merged
+        Set<PendingTask> toRunSet = Collections.newSetFromMap(new IdentityHashMap<>());
+        toRunSet.addAll(toRun);
+        pending.removeIf(toRunSet::contains);
         toRun.sort(Comparator.comparingLong(t -> t.runAtTick));
         for (PendingTask t : toRun)
             t.run.run();
