@@ -19,8 +19,14 @@ public class Module {
     public int energy;
     /** Age since last phase change / startpassive */
     public int age;
+    /** Whether this module seeks light sources */
+    public boolean seekLights = false;
+    /** Whether this module seeks ores */
+    public boolean seekOres = false;
     /** Positions of light sources we've failed or are ignoring for this cycle */
     public final Set<BlockPos> lightsBlackList = new HashSet<>();
+    /** Positions of ores we've failed or are ignoring for this cycle */
+    public final Set<BlockPos> oresBlackList = new HashSet<>();
     public short busyFlagPlaceEvent;
     public short busyFlagMainCycle;
 }

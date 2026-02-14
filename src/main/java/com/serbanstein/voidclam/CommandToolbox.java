@@ -1,10 +1,12 @@
 package com.serbanstein.voidclam;
 
 import net.minecraft.block.Blocks;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -17,7 +19,7 @@ public final class CommandToolbox {
     /** Shared executor for pathfinding (reach + block-place) so it doesn't block main thread. */
     static final ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
 
-    /** Run pathfinding off-thread (used by clamReach and VoidClamMod.onLightPlaced). */
+    /** Run pathfinding off-thread (used by clamReach). */
     public static void submitPathfinding(Runnable task) {
         pathfinderExecutor.execute(task);
     }
@@ -50,6 +52,28 @@ public final class CommandToolbox {
                 }
             }
         }
+    }
+
+    /** True if (px, py, pz) is inside the clam octahedron interior (relative to module center at 0,0,0). */
+    public static boolean isInsideOctahedronInterior(double px, double py, double pz, int tsize) {
+        if (py < -tsize / 2 + 1 || py > tsize - 2) return false;
+        double horiz = Math.abs(px) + Math.abs(pz);
+        if (py >= 0) return horiz <= (tsize - 2) - py;
+        return horiz <= (tsize - 2) + py;
+    }
+
+    /** True if the player's bounding box intersects the module's octahedron interior. */
+    public static boolean isPlayerInsideOctahedron(ServerPlayerEntity player, Module m) {
+        Box box = player.getBoundingBox();
+        int mx = m.x, my = m.y, mz = m.z;
+        for (double x : new double[]{box.minX, box.maxX}) {
+            for (double y : new double[]{box.minY, box.maxY}) {
+                for (double z : new double[]{box.minZ, box.maxZ}) {
+                    if (isInsideOctahedronInterior(x - mx, y - my, z - mz, m.currentSize)) return true;
+                }
+            }
+        }
+        return false;
     }
 
     public static void buildShell(ServerWorld world, int x, int y, int z, int tsize, net.minecraft.block.Block mat) {
@@ -106,7 +130,7 @@ public final class CommandToolbox {
         int x = m.x, y = m.y, z = m.z;
         int timer = 0;
 
-        for (int i = 1; i <= tsize; i += 2) {
+        for (int i = 1; i <= tsize; i += 1) {
             final int iFinal = i;
             VoidClamMod.scheduleDelayed(world, timer * 10L, () -> {
                 buildShell(world, x, y, z, iFinal, Blocks.NETHER_WART_BLOCK);
@@ -155,7 +179,7 @@ public final class CommandToolbox {
         }
     }
 
-    /** Start pathfinding to nearest light for module tno. Uses executor + queue like original async. No-op if module chunk not loaded. */
+    /** Start light/ore search for module. Scans box off-thread, pathfinds to closest target. */
     public static void clamReach(ServerWorld world, int tno) {
         Module[] modules = VoidClamMod.getModules();
         if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
@@ -168,31 +192,47 @@ public final class CommandToolbox {
             try {
                 int x = m.x, y = m.y, z = m.z, cSize = m.currentSize;
                 BlockPos modPos = new BlockPos(x, y, z);
-                BlockPos closest = null;
-                double closestDist = Double.MAX_VALUE;
+                BlockPos closestLight = null;
+                double closestLightDist = Double.MAX_VALUE;
+                BlockPos closestOre = null;
+                double closestOreDist = Double.MAX_VALUE;
 
-                for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
-                    for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
-                        for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                            BlockPos pos = new BlockPos(ix, iy, iz);
-                            if (!VoidClamMod.isLight(world.getBlockState(pos).getBlock())) continue;
-                            if (m.lightsBlackList.contains(pos)) continue;
-                            double dist = modPos.getSquaredDistance(pos);
-                            if (dist < closestDist) {
-                                closestDist = dist;
-                                closest = pos;
+                if (m.seekLights || m.seekOres) {
+                    for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
+                        for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
+                            for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
+                                BlockPos pos = new BlockPos(ix, iy, iz);
+                                net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                                double dist = modPos.getSquaredDistance(pos);
+                                if (m.seekLights && VoidClamMod.isLight(block) && !m.lightsBlackList.contains(pos) && dist < closestLightDist) {
+                                    closestLightDist = dist;
+                                    closestLight = pos;
+                                }
+                                if (m.seekOres && VoidClamMod.isOre(block) && !m.oresBlackList.contains(pos) && dist < closestOreDist) {
+                                    closestOreDist = dist;
+                                    closestOre = pos;
+                                }
                             }
                         }
                     }
                 }
 
-                if (closest != null && !m.lightsBlackList.contains(closest)) {
+                BlockPos closest = null;
+                if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
+                    closest = closestLight;
                     m.lightsBlackList.add(closest.toImmutable());
+                } else if (closestOre != null) {
+                    closest = closestOre;
+                    m.oresBlackList.add(closest.toImmutable());
+                }
+
+                if (closest != null) {
                     Pathfinder.calculatePath(world, tno, x, y, z, closest.getX(), closest.getY(), closest.getZ());
-                    // energy granted only when light is eaten in buildPath
+                } else {
+                    m.busyFlagMainCycle = 0;
                 }
             } finally {
-                m.busyFlagMainCycle = 0;
+                //m.busyFlagMainCycle = 0;
             }
         });
     }

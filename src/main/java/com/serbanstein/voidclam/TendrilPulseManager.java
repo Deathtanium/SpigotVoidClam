@@ -5,8 +5,10 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.entity.data.TrackedData;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.LightType;
 import org.joml.Vector3f;
@@ -38,11 +40,14 @@ public final class TendrilPulseManager {
     private static final int PULSE_DURATION_TICKS = 8;
 
     /** Omnidirectional pulse: max BFS blocks per module and total; delay = distance * TICKS_PER_STEP (like path building). */
-    private static final int MAX_OMNI_BFS_PER_MODULE = 1200;
-    private static final int MAX_OMNI_TOTAL_BLOCKS = 24_000;
+    private static final int MAX_OMNI_BFS_PER_MODULE = Integer.MAX_VALUE;
+    private static final int MAX_OMNI_TOTAL_BLOCKS = Integer.MAX_VALUE;
     private static final int OMNI_TICKS_PER_STEP = 2;
     /** Max BFS node expansions per tick so omni pulse doesn't block main thread. */
     private static final int OMNI_BFS_BATCH_PER_TICK = 300;
+
+    /** Entity tag persisted by vanilla in NBT (Tags); used to identify our tendril block displays after restart. */
+    public static final String VOIDCLAM_DISPLAY_TAG = "voidclam_tendril_display";
 
     private static final String DEBUG_PREFIX = "[VoidClam TendrilPulse] ";
     private static final boolean DEBUG = false;
@@ -346,10 +351,24 @@ public final class TendrilPulseManager {
         startPulse(world, pos, packedBrightness, onComplete, INITIAL_SCALE);
     }
 
+    private static final double PLAYER_RANGE_SQ = 32.0 * 32.0;
+
     /**
      * Starts a pulsing tendril with a custom initial scale (e.g. {@link #INITIAL_SCALE_OMNI} for a subtle omni pulse).
+     * Does not spawn a display if no player is within 32 blocks of the block position.
      */
     public static void startPulse(ServerWorld world, BlockPos pos, int packedBrightness, Runnable onComplete, float initialScale) {
+        boolean playerInRange = false;
+        for (ServerPlayerEntity player : world.getPlayers()) {
+            if (pos.getSquaredDistance(player.getBlockPos()) <= PLAYER_RANGE_SQ) {
+                playerInRange = true;
+                break;
+            }
+        }
+        if (!playerInRange) {
+            onComplete.run();
+            return;
+        }
         DisplayEntity.BlockDisplayEntity display = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, world);
         display.setPosition(pos.getX(), pos.getY(), pos.getZ());
         display.getDataTracker().set(blockStateData, Blocks.NETHER_WART_BLOCK.getDefaultState());
@@ -365,6 +384,7 @@ public final class TendrilPulseManager {
         }
         display.setNoGravity(true);
         display.setInvulnerable(true);
+        display.addCommandTag(VOIDCLAM_DISPLAY_TAG);
 
         if (!world.spawnEntity(display)) return;
 
@@ -421,6 +441,46 @@ public final class TendrilPulseManager {
             this.startTick = startTick;
             this.onComplete = onComplete;
             this.initialScale = initialScale;
+        }
+    }
+
+    /** Full-world box for entity queries. */
+    private static Box fullWorldBox(ServerWorld world) {
+        int minY = world.getDimension().minY();
+        int maxY = minY + world.getDimension().height();
+        return new Box(-3e7, minY, -3e7, 3e7, maxY, 3e7);
+    }
+
+    /** Removes all block display entities showing nether wart block (any source). Returns count removed. */
+    public static int cleanupAllNetherWartDisplays(ServerWorld world) {
+        Box box = fullWorldBox(world);
+        List<DisplayEntity.BlockDisplayEntity> toDiscard = world.getEntitiesByClass(
+            DisplayEntity.BlockDisplayEntity.class, box, e ->
+                e.getDataTracker().get(blockStateData).isOf(Blocks.NETHER_WART_BLOCK));
+        for (DisplayEntity.BlockDisplayEntity e : toDiscard) e.discard();
+        return toDiscard.size();
+    }
+
+    private static final boolean CLEANUP_DEBUG = Boolean.getBoolean("voidclam.debug.cleanup");
+
+    /** Removes only block display entities spawned by this mod (identified by entity tag, which vanilla persists). */
+    public static void cleanupStrayDisplays(ServerWorld world) {
+        Box box = fullWorldBox(world);
+        List<DisplayEntity.BlockDisplayEntity> all = world.getEntitiesByClass(
+            DisplayEntity.BlockDisplayEntity.class, box, entity -> true);
+        int withTag = 0;
+        int netherWartCount = 0;
+        for (DisplayEntity.BlockDisplayEntity e : all) {
+            if (e.getDataTracker().get(blockStateData).isOf(Blocks.NETHER_WART_BLOCK)) netherWartCount++;
+            if (e.getCommandTags().contains(VOIDCLAM_DISPLAY_TAG)) {
+                withTag++;
+                e.discard();
+            }
+        }
+        if (CLEANUP_DEBUG || (netherWartCount > 0 && withTag == 0)) {
+            System.out.println("[VoidClam] cleanupStrayDisplays: world=" + world.getRegistryKey().getValue()
+                + " block_displays=" + all.size() + " nether_wart=" + netherWartCount
+                + " with_tag=" + withTag + " discarded=" + withTag);
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.serbanstein.voidclam;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -23,9 +24,11 @@ import net.minecraft.util.math.Vec3d;
 public class VoidClamModEntry implements ModInitializer {
     private static final int TICK_REACH = 20;              // auto-reach (search for lights) every second
     private static final int TICK_TARGETS = 20;            // drain path queue every second
+    private static final int TICK_AUTO_GROW = 5 * 60 * 20; // auto-repair/grow every 5 min
     private static final int TICK_HEARTBEAT = 4 * 20;      // heartbeat every 4s
     private static final int TICK_OMNI_PULSE = 5 * 20;     // omnidirectional pulse every ~5s
-    private static final int TICK_AUTO_GROW = 5 * 60 * 20; // auto-repair/grow every 5 min
+    private static final int TICK_DEFENSE = 5 * 20;        // defense (encase + effects + horn) every 5s
+    private static final int TICK_CLEANUP = 60 * 20;       // stray tendril display cleanup every 1 min
     private static final int OP_LEVEL = 2;                 // commands hidden unless player has this OP level
 
     @Override
@@ -52,6 +55,7 @@ public class VoidClamModEntry implements ModInitializer {
         VoidClamMod.tickTargets(world);
         VoidClamModScheduler.tick(world);
         for (ServerWorld w : server.getWorlds()) {
+            VoidClamMod.tickGrowPendingCheck(w);
             TendrilPulseManager.tick(w);
         }
         TendrilPulseManager.tickOmniPulseJob(world);
@@ -67,8 +71,16 @@ public class VoidClamModEntry implements ModInitializer {
             VoidClamMod.tickHeartbeat(world);
         if (tick % TICK_OMNI_PULSE == 0)
             TendrilPulseManager.runOmnidirectionalPulse(world);
+        if (tick % TICK_DEFENSE == 0) {
+            for (ServerWorld w : server.getWorlds())
+                VoidClamMod.tickDefense(w);
+        }
         if (tick % TICK_AUTO_GROW == 0)
             VoidClamMod.tickAutoRepairAndGrow(world);
+        if (tick % TICK_CLEANUP == 0) {
+            for (ServerWorld w : server.getWorlds())
+                TendrilPulseManager.cleanupStrayDisplays(w);
+        }
     }
 
     private void registerCommands(CommandDispatcher<ServerCommandSource> dispatcher, CommandRegistryAccess registryAccess, CommandManager.RegistrationEnvironment environment) {
@@ -126,7 +138,8 @@ public class VoidClamModEntry implements ModInitializer {
                                 ctx.getSource().sendError(Text.literal("Bad number"));
                                 return 0;
                             }
-                            CommandToolbox.clamReSize(ctx.getSource().getWorld(), tno, VoidClamMod.getModules()[tno].currentSize);
+                            VoidClamMod.requestRepairCommand(ctx.getSource().getWorld(), tno);
+                            ctx.getSource().sendFeedback(() -> Text.literal("Repair scheduled; will run once pathfinding is idle."), false);
                             return 1;
                         })))
                 .then(CommandManager.literal("reach")
@@ -140,6 +153,63 @@ public class VoidClamModEntry implements ModInitializer {
                             CommandToolbox.clamReach(ctx.getSource().getWorld(), tno);
                             return 1;
                         })))
+                .then(CommandManager.literal("seek")
+                    .then(CommandManager.literal("ores")
+                        .then(CommandManager.literal("set")
+                            .then(CommandManager.argument("index", IntegerArgumentType.integer(1))
+                                .then(CommandManager.argument("value", BoolArgumentType.bool())
+                                    .executes(ctx -> {
+                                        int tno = IntegerArgumentType.getInteger(ctx, "index");
+                                        boolean val = BoolArgumentType.getBool(ctx, "value");
+                                        if (tno > VoidClamMod.getModuleNumber() || VoidClamMod.getModules()[tno] == null) {
+                                            ctx.getSource().sendError(Text.literal("Bad number"));
+                                            return 0;
+                                        }
+                                        VoidClamMod.getModules()[tno].seekOres = val;
+                                        VoidClamMod.save(ctx.getSource().getServer());
+                                        ctx.getSource().sendMessage(Text.literal("Module " + tno + " seek ores = " + val));
+                                        return 1;
+                                    }))))
+                        .then(CommandManager.literal("get")
+                            .then(CommandManager.argument("index", IntegerArgumentType.integer(1))
+                                .executes(ctx -> {
+                                    int tno = IntegerArgumentType.getInteger(ctx, "index");
+                                    if (tno > VoidClamMod.getModuleNumber() || VoidClamMod.getModules()[tno] == null) {
+                                        ctx.getSource().sendError(Text.literal("Bad number"));
+                                        return 0;
+                                    }
+                                    boolean val = VoidClamMod.getModules()[tno].seekOres;
+                                    ctx.getSource().sendMessage(Text.literal("Module " + tno + " seek ores = " + val));
+                                    return 1;
+                                }))))
+                    .then(CommandManager.literal("lights")
+                        .then(CommandManager.literal("set")
+                            .then(CommandManager.argument("index", IntegerArgumentType.integer(1))
+                                .then(CommandManager.argument("value", BoolArgumentType.bool())
+                                    .executes(ctx -> {
+                                        int tno = IntegerArgumentType.getInteger(ctx, "index");
+                                        boolean val = BoolArgumentType.getBool(ctx, "value");
+                                        if (tno > VoidClamMod.getModuleNumber() || VoidClamMod.getModules()[tno] == null) {
+                                            ctx.getSource().sendError(Text.literal("Bad number"));
+                                            return 0;
+                                        }
+                                        VoidClamMod.getModules()[tno].seekLights = val;
+                                        VoidClamMod.save(ctx.getSource().getServer());
+                                        ctx.getSource().sendMessage(Text.literal("Module " + tno + " seek lights = " + val));
+                                        return 1;
+                                    }))))
+                        .then(CommandManager.literal("get")
+                            .then(CommandManager.argument("index", IntegerArgumentType.integer(1))
+                                .executes(ctx -> {
+                                    int tno = IntegerArgumentType.getInteger(ctx, "index");
+                                    if (tno > VoidClamMod.getModuleNumber() || VoidClamMod.getModules()[tno] == null) {
+                                        ctx.getSource().sendError(Text.literal("Bad number"));
+                                        return 0;
+                                    }
+                                    boolean val = VoidClamMod.getModules()[tno].seekLights;
+                                    ctx.getSource().sendMessage(Text.literal("Module " + tno + " seek lights = " + val));
+                                    return 1;
+                                })))))
                 .then(CommandManager.literal("info")
                     .executes(ctx -> {
                         if (ctx.getSource().getEntity() instanceof ServerPlayerEntity player) {
@@ -183,13 +253,33 @@ public class VoidClamModEntry implements ModInitializer {
                                 return 0;
                             }
                             int cSize = VoidClamMod.getModules()[tno].currentSize + 2;
-                            CommandToolbox.clamReSize(ctx.getSource().getWorld(), tno, cSize);
+                            VoidClamMod.requestGrowCommand(ctx.getSource().getWorld(), tno, cSize);
+                            ctx.getSource().sendFeedback(() -> Text.literal("Grow scheduled; will run once pathfinding is idle."), false);
                             return 1;
                         })))
                 .then(CommandManager.literal("save")
                     .executes(ctx -> {
                         VoidClamMod.save(ctx.getSource().getServer());
                         ctx.getSource().sendMessage(Text.literal("Saved"));
+                        return 1;
+                    }))
+                .then(CommandManager.literal("cleanup")
+                    .executes(ctx -> {
+                        int count = 0;
+                        for (ServerWorld w : ctx.getSource().getServer().getWorlds()) {
+                            TendrilPulseManager.cleanupStrayDisplays(w);
+                            count++;
+                        }
+                        ctx.getSource().sendMessage(Text.literal("Cleaned up stray tendril block displays in " + count + " world(s)."));
+                        return 1;
+                    }))
+                .then(CommandManager.literal("roughcleanup")
+                    .executes(ctx -> {
+                        int total = 0;
+                        for (ServerWorld w : ctx.getSource().getServer().getWorlds()) {
+                            total += TendrilPulseManager.cleanupAllNetherWartDisplays(w);
+                        }
+                        ctx.getSource().sendMessage(Text.literal("Removed " + total + " nether wart block display(s) across all worlds."));
                         return 1;
                     }))
                 .then(CommandManager.literal("ping")

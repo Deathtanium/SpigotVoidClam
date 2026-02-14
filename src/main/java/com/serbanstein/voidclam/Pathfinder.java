@@ -18,6 +18,7 @@ import net.minecraft.world.World;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +29,16 @@ import java.util.Set;
 public final class Pathfinder {
     static final List<Cursor> xc = new ArrayList<>();
     static final List<Cursor> yc = new ArrayList<>();
+    private static final Map<net.minecraft.block.Block, List<ItemStack>> FORTUNE3_DROPS = new HashMap<>();
+
+    private static void putFortune3(net.minecraft.block.Block block, net.minecraft.item.Item item, int count) {
+        FORTUNE3_DROPS.put(block, Collections.singletonList(new ItemStack(item, count)));
+    }
+
+    static List<ItemStack> getFortune3Drops(net.minecraft.block.Block block) {
+        List<ItemStack> list = FORTUNE3_DROPS.get(block);
+        return list != null ? list.stream().map(ItemStack::copy).toList() : new ArrayList<>();
+    }
 
     static {
         xc.add(new Cursor(1, 0, 0));
@@ -36,6 +47,24 @@ public final class Pathfinder {
         xc.add(new Cursor(0, -1, 0));
         xc.add(new Cursor(0, 0, 1));
         xc.add(new Cursor(0, 0, -1));
+        putFortune3(Blocks.COAL_ORE, Items.COAL, 4);
+        putFortune3(Blocks.DEEPSLATE_COAL_ORE, Items.COAL, 4);
+        putFortune3(Blocks.IRON_ORE, Items.IRON_INGOT, 4);
+        putFortune3(Blocks.DEEPSLATE_IRON_ORE, Items.IRON_INGOT, 4);
+        putFortune3(Blocks.GOLD_ORE, Items.GOLD_INGOT, 4);
+        putFortune3(Blocks.DEEPSLATE_GOLD_ORE, Items.GOLD_INGOT, 4);
+        putFortune3(Blocks.COPPER_ORE, Items.COPPER_INGOT, 4);
+        putFortune3(Blocks.DEEPSLATE_COPPER_ORE, Items.COPPER_INGOT, 4);
+        putFortune3(Blocks.NETHER_GOLD_ORE, Items.GOLD_NUGGET, 24);
+        putFortune3(Blocks.DIAMOND_ORE, Items.DIAMOND, 1);
+        putFortune3(Blocks.DEEPSLATE_DIAMOND_ORE, Items.DIAMOND, 1);
+        putFortune3(Blocks.LAPIS_ORE, Items.LAPIS_LAZULI, 25);
+        putFortune3(Blocks.DEEPSLATE_LAPIS_ORE, Items.LAPIS_LAZULI, 25);
+        putFortune3(Blocks.REDSTONE_ORE, Items.REDSTONE, 36);
+        putFortune3(Blocks.DEEPSLATE_REDSTONE_ORE, Items.REDSTONE, 36);
+        putFortune3(Blocks.EMERALD_ORE, Items.EMERALD, 25);
+        putFortune3(Blocks.DEEPSLATE_EMERALD_ORE, Items.EMERALD, 25);
+        putFortune3(Blocks.NETHER_QUARTZ_ORE, Items.QUARTZ, 4);
         yc.add(new Cursor(1, 0, 0));
         yc.add(new Cursor(-1, 0, 0));
         yc.add(new Cursor(0, 1, 0));
@@ -67,6 +96,9 @@ public final class Pathfinder {
 
     public static boolean calculatePath(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
+        Module[] modules = VoidClamMod.getModules();
+        Module modForFlag = modules[tno];
+        if (modForFlag == null) return false;
         List<Node> open = new ArrayList<>();
         List<Node> closed = new ArrayList<>();
 
@@ -76,7 +108,6 @@ public final class Pathfinder {
         firstNode.f = firstNode.h;
         open.add(firstNode);
 
-        Module[] modules = VoidClamMod.getModules();
         int moduleNumber = VoidClamMod.getModuleNumber();
 
         while (!open.isEmpty()) {
@@ -94,6 +125,7 @@ public final class Pathfinder {
 
                 if (nextNode.x == gx && nextNode.y == gy && nextNode.z == gz) {
                     VoidClamMod.enqueueTarget(nextNode);
+                    //we do not reset the busy flag here, because if CommandToolbox.clamReach was called, the reset is handled there
                     return true;
                 }
 
@@ -133,6 +165,8 @@ public final class Pathfinder {
             }
             closed.add(nextCheapestNode);
         }
+
+        modForFlag.busyFlagMainCycle = 0;
         return false;
     }
 
@@ -248,6 +282,13 @@ public final class Pathfinder {
         return containers;
     }
 
+    private static void replaceWithWartAndPulse(ServerWorld world, BlockPos breakPos) {
+        int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, breakPos);
+        world.setBlockState(breakPos, Blocks.NETHER_WART_BLOCK.getDefaultState());
+        world.playSound(null, breakPos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+        TendrilPulseManager.startPulse(world, breakPos, packedBrightness, () -> {});
+    }
+
     /** Main thread: try insert into containers; if none, create barrel at breakPos. Replaces breakPos with wart when stored in existing container. */
     private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, ItemStack toStore) {
         for (long l : containerPositions) {
@@ -257,10 +298,29 @@ public final class Pathfinder {
         if (!toStore.isEmpty()) {
             createBarrelAndInsert(world, breakPos, toStore);
         } else {
-            int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, breakPos);
-            world.setBlockState(breakPos, Blocks.NETHER_WART_BLOCK.getDefaultState());
-            world.playSound(null, breakPos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
-            TendrilPulseManager.startPulse(world, breakPos, packedBrightness, () -> {});
+            replaceWithWartAndPulse(world, breakPos);
+        }
+    }
+
+    /** Main thread: insert multiple stacks into containers; remainder goes to barrel. Replaces breakPos with wart when all stored. */
+    private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, List<ItemStack> toStoreList) {
+        for (long l : containerPositions) {
+            boolean anyLeft = false;
+            for (ItemStack stack : toStoreList) {
+                if (stack.isEmpty()) continue;
+                tryInsertInto(world, BlockPos.fromLong(l), stack);
+                anyLeft = anyLeft || !stack.isEmpty();
+            }
+            if (!anyLeft) break;
+        }
+        List<ItemStack> remainder = new ArrayList<>();
+        for (ItemStack stack : toStoreList) {
+            if (!stack.isEmpty()) remainder.add(stack);
+        }
+        if (remainder.isEmpty()) {
+            replaceWithWartAndPulse(world, breakPos);
+        } else {
+            createBarrelAndInsert(world, breakPos, remainder);
         }
     }
 
@@ -302,11 +362,47 @@ public final class Pathfinder {
         }
     }
 
+    private static void createBarrelAndInsert(ServerWorld world, BlockPos pos, List<ItemStack> stacks) {
+        BlockState barrelState = Blocks.BARREL.getDefaultState().with(BarrelBlock.FACING, Direction.NORTH);
+        world.setBlockState(pos, barrelState);
+        BlockEntity be = world.getBlockEntity(pos);
+        if (be instanceof BarrelBlockEntity) {
+            for (ItemStack stack : stacks) {
+                if (!stack.isEmpty()) tryInsertInto(world, pos, stack);
+            }
+        } else {
+            for (ItemStack stack : stacks) {
+                if (!stack.isEmpty()) net.minecraft.block.Block.dropStack(world, pos, stack);
+            }
+        }
+    }
+
     public static void buildPath(ServerWorld world, Node gnode) {
-        if (gnode.f >= 2500) return;
         Module[] modules = VoidClamMod.getModules();
         Module mod = modules[gnode.tno];
-        if (mod == null || !world.isChunkLoaded(mod.x >> 4, mod.z >> 4)) return;
+        if (mod == null) {
+            return;
+        }
+        final Module modForFlag = mod;
+        if (gnode.f >= 2500) {
+            modForFlag.busyFlagMainCycle = 0;
+            return;
+        }
+        if (!world.isChunkLoaded(mod.x >> 4, mod.z >> 4)) {
+            modForFlag.busyFlagMainCycle = 0;
+            return;
+        }
+        // Skip if this goal was enqueued before seek flags were turned off
+        BlockPos goalPos = new BlockPos(gnode.x, gnode.y, gnode.z);
+        net.minecraft.block.Block goalBlock = world.getBlockState(goalPos).getBlock();
+        if (VoidClamMod.isOre(goalBlock) && !mod.seekOres) {
+            modForFlag.busyFlagMainCycle = 0;
+            return;
+        }
+        if (VoidClamMod.isLight(goalBlock) && !mod.seekLights) {
+            modForFlag.busyFlagMainCycle = 0;
+            return;
+        }
         Node firstNode = gnode;
         Node copy = gnode;
         long timer = 2;
@@ -315,9 +411,10 @@ public final class Pathfinder {
             copy = copy.parent;
         }
 
-        BlockPos goalPos = new BlockPos(gnode.x, gnode.y, gnode.z);
-        VoidClamMod.scheduleDelayed(world, timer, () ->
-            VoidClamMod.removeLightsBlackList(gnode.tno, goalPos));
+        VoidClamMod.scheduleDelayed(world, timer, () -> {
+            VoidClamMod.removeLightsBlackList(gnode.tno, goalPos);
+            VoidClamMod.removeOresBlackList(gnode.tno, goalPos);
+        });
 
         int[] stamina = new int[]{modules[gnode.tno].currentSize};
         int[] blocked = new int[1];
@@ -328,7 +425,10 @@ public final class Pathfinder {
             final long runAt = timer;
             final int cSize = modules[gnode.tno].currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
-                if (blocked[0] != 0 || pathStopped[0] != 0) return;
+                if (blocked[0] != 0 || pathStopped[0] != 0) {
+                    modForFlag.busyFlagMainCycle = 0;
+                    return;
+                }
                 BlockPos pos = new BlockPos(refNode.x, refNode.y, refNode.z);
                 BlockState mat = world.getBlockState(pos);
                 int cst;
@@ -337,10 +437,30 @@ public final class Pathfinder {
                 else cst = (int) Math.floor(getHardness(world, pos, mat)) * 2;
                 if (refNode == gnode) cst = 0;
 
+                // Ore at goal: fortune-3 drops, store in containers, replace with wart
+                if (refNode == gnode && VoidClamMod.isOre(mat.getBlock())) {
+                    List<ItemStack> drops = getFortune3Drops(mat.getBlock());
+                    if (!drops.isEmpty()) {
+                        BlockPos breakPos = pos.toImmutable();
+                        BlockPos clamCenter = new BlockPos(mod.x, mod.y, mod.z);
+                        Map<Long, Byte> snapshot = buildContainerSnapshot(world, clamCenter, cSize);
+                        CommandToolbox.submitPathfinding(() -> {
+                            List<Long> containers = runContainerBfsOnSnapshot(snapshot, breakPos.asLong());
+                            world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, drops));
+                        });
+                    } else {
+                        replaceWithWartAndPulse(world, pos);
+                    }
+                    modForFlag.busyFlagMainCycle = 0;
+                    return;
+                }
+
                 if (stamina[0] - cst < 0) {
                     blocked[0] = 1;
-                    if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA)))
+                    if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA))) {
                         VoidClamMod.addLightsBlackList(gnode.tno, goalPos);
+                        VoidClamMod.addOresBlackList(gnode.tno, goalPos);
+                    }
                     VoidClamMod.addEnergy(gnode.tno, -1);
                 } else {
                     stamina[0] -= cst;
@@ -358,6 +478,7 @@ public final class Pathfinder {
                         List<Long> containers = runContainerBfsOnSnapshot(snapshot, clamCenterLong);
                         world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, toStore));
                     });
+                    modForFlag.busyFlagMainCycle = 0;
                     return;
                 }
 
@@ -371,6 +492,8 @@ public final class Pathfinder {
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
                 }
                 TendrilPulseManager.startPulse(world, pos, packedBrightness, () -> {});
+                if (refNode == gnode)
+                    modForFlag.busyFlagMainCycle = 0; // light or empty goal: path done
             });
             timer -= 2;
             firstNode = firstNode.parent;

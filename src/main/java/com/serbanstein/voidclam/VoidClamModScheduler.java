@@ -3,6 +3,7 @@ package com.serbanstein.voidclam;
 import net.minecraft.server.world.ServerWorld;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -18,7 +19,16 @@ public final class VoidClamModScheduler {
         pending.add(new PendingTask(world, runAt, run));
     }
 
-    /** Call from server tick; runs due tasks. */
+    /** True if there is any scheduled task for the given world (e.g. path steps not yet run). Uses dimension so ref equality is not required. */
+    public static boolean hasPendingTasks(ServerWorld world) {
+        var key = world.getRegistryKey();
+        for (PendingTask t : pending) {
+            if (t.world.getRegistryKey().equals(key)) return true;
+        }
+        return false;
+    }
+
+    /** Call from server tick; runs due tasks in schedule order (earliest runAt first) so path steps run start→goal. */
     public static void tick(ServerWorld world) {
         long now = world.getTime();
         List<PendingTask> toRun = new ArrayList<>();
@@ -27,6 +37,7 @@ public final class VoidClamModScheduler {
                 toRun.add(t);
         }
         pending.removeAll(toRun);
+        toRun.sort(Comparator.comparingLong(t -> t.runAtTick));
         for (PendingTask t : toRun)
             t.run.run();
     }

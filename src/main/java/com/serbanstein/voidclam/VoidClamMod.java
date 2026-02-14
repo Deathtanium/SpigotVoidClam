@@ -3,10 +3,17 @@ package com.serbanstein.voidclam;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.util.Identifier;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
 
 import java.io.*;
@@ -26,11 +33,41 @@ public final class VoidClamMod {
     private static int moduleNumber = 0;
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
+    /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
+    private static ServerWorld growPendingWorld = null;
+    /** If > 0, when grow runs do clamReSize(world, growCommandTno, growCommandTargetSize); else run full auto grow routine. */
+    private static int growCommandTno = 0;
+    private static int growCommandTargetSize = 0;
+    private static final boolean[] savedSeekLights = new boolean[MAX_MODULES];
+    private static final boolean[] savedSeekOres = new boolean[MAX_MODULES];
+    private static final int DEFENSE_MIN_SIZE = 11;
+    private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
+    private static final float DEFENSE_HORN_PITCH = 0.5f;
     /** Blocks that count as "food" (light sources) for SIVA. */
     private static final Set<Block> lights = new HashSet<>();
+    /** Blocks that count as ores (fortune-3 style drops when eaten). */
+    private static final Set<Block> ores = new HashSet<>();
     private static final Set<Block> baseCost = new HashSet<>();
 
     static {
+        ores.add(Blocks.COAL_ORE);
+        ores.add(Blocks.DEEPSLATE_COAL_ORE);
+        ores.add(Blocks.IRON_ORE);
+        ores.add(Blocks.DEEPSLATE_IRON_ORE);
+        ores.add(Blocks.GOLD_ORE);
+        ores.add(Blocks.DEEPSLATE_GOLD_ORE);
+        ores.add(Blocks.COPPER_ORE);
+        ores.add(Blocks.DEEPSLATE_COPPER_ORE);
+        ores.add(Blocks.NETHER_GOLD_ORE);
+        ores.add(Blocks.DIAMOND_ORE);
+        ores.add(Blocks.DEEPSLATE_DIAMOND_ORE);
+        ores.add(Blocks.LAPIS_ORE);
+        ores.add(Blocks.DEEPSLATE_LAPIS_ORE);
+        ores.add(Blocks.REDSTONE_ORE);
+        ores.add(Blocks.DEEPSLATE_REDSTONE_ORE);
+        ores.add(Blocks.EMERALD_ORE);
+        ores.add(Blocks.DEEPSLATE_EMERALD_ORE);
+        ores.add(Blocks.NETHER_QUARTZ_ORE);
         lights.add(Blocks.BEACON);
         lights.add(Blocks.GLOWSTONE);
         lights.add(Blocks.JACK_O_LANTERN);
@@ -52,6 +89,7 @@ public final class VoidClamMod {
     public static Module[] getModules() { return modules; }
     public static int getModuleNumber() { return moduleNumber; }
     public static boolean isLight(Block block) { return lights.contains(block); }
+    public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
 
     /** True if module tno exists and its center chunk is loaded (so clam work is safe). */
@@ -65,6 +103,11 @@ public final class VoidClamMod {
         targets.offer(node);
     }
 
+    /** True if no pathfinding results are waiting to be built (targets queue empty). */
+    public static boolean isTargetsQueueEmpty() {
+        return targets.isEmpty();
+    }
+
     public static void removeLightsBlackList(int tno, BlockPos pos) {
         if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
             modules[tno].lightsBlackList.remove(pos);
@@ -73,6 +116,16 @@ public final class VoidClamMod {
     public static void addLightsBlackList(int tno, BlockPos pos) {
         if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
             modules[tno].lightsBlackList.add(pos.toImmutable());
+    }
+
+    public static void removeOresBlackList(int tno, BlockPos pos) {
+        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
+            modules[tno].oresBlackList.remove(pos);
+    }
+
+    public static void addOresBlackList(int tno, BlockPos pos) {
+        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
+            modules[tno].oresBlackList.add(pos.toImmutable());
     }
 
     public static void addEnergy(int tno, int delta) {
@@ -115,6 +168,8 @@ public final class VoidClamMod {
                 m.status = Integer.parseInt(parts[5]);
                 m.energy = Integer.parseInt(parts[6]);
                 m.age = Integer.parseInt(parts[7]);
+                m.seekLights = parts.length > 8 ? Boolean.parseBoolean(parts[8]) : false;
+                m.seekOres = parts.length > 9 ? Boolean.parseBoolean(parts[9]) : false;
                 modules[moduleNumber] = m;
             }
         } catch (IOException e) {
@@ -135,7 +190,8 @@ public final class VoidClamMod {
                     Module m = modules[i];
                     if (m != null) {
                         out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
-                            + m.currentSize + "," + m.status + "," + m.energy + "," + m.age);
+                            + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
+                            + "," + m.seekLights + "," + m.seekOres);
                     }
                 }
             }
@@ -182,9 +238,94 @@ public final class VoidClamMod {
         moduleNumber--;
     }
 
-    /** Auto-repair/grow: every 5 min, grow modules that have enough energy and room (original logic + blast resistance). */
-    public static void tickAutoRepairAndGrow(ServerWorld world) {
+    /**
+     * Request a safe repair for one module (e.g. from /voidclam repair). Same flow as grow but target size = current size.
+     */
+    public static void requestRepairCommand(ServerWorld world, int tno) {
+        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
+        requestGrowCommand(world, tno, modules[tno].currentSize);
+    }
+
+    /**
+     * Request a safe grow for one module (e.g. from /voidclam grow). Uses same flow as auto grow:
+     * seeks off → wait for paths to finish → run clamReSize(world, tno, targetSize) → restore seeks.
+     * If a grow is already pending for this world, this request becomes the action run when ready.
+     */
+    public static void requestGrowCommand(ServerWorld world, int tno, int targetSize) {
+        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
+        if (growPendingWorld == null) {
+            for (int i = 1; i <= moduleNumber; i++) {
+                Module m = modules[i];
+                if (m != null) {
+                    savedSeekLights[i] = m.seekLights;
+                    savedSeekOres[i] = m.seekOres;
+                    m.seekLights = false;
+                    m.seekOres = false;
+                }
+            }
+            growPendingWorld = world;
+        }
+        if (growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) {
+            growCommandTno = tno;
+            growCommandTargetSize = targetSize;
+        }
+    }
+
+    /** Called every tick. If a grow/repair is pending for this world and pathfinding is idle, runs it and restores seeks. */
+    public static void tickGrowPendingCheck(ServerWorld world) {
+        if (growPendingWorld == null) return;
+        if (!growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) return;
         Module[] modules = getModules();
+        int cmdTno = growCommandTno;
+        boolean idle;
+        if (cmdTno > 0) {
+            idle = (modules[cmdTno] == null || modules[cmdTno].busyFlagMainCycle == 0);
+        } else {
+            idle = true;
+            for (int i = 1; i <= moduleNumber; i++) {
+                Module m = modules[i];
+                if (m != null && m.busyFlagMainCycle != 0) {
+                    idle = false;
+                    break;
+                }
+            }
+        }
+        if (!idle || !isTargetsQueueEmpty() || VoidClamModScheduler.hasPendingTasks(world)) return;
+        int cmdSize = growCommandTargetSize;
+        growPendingWorld = null;
+        growCommandTno = 0;
+        growCommandTargetSize = 0;
+        if (cmdTno > 0) {
+            CommandToolbox.clamReSize(world, cmdTno, cmdSize);
+        } else {
+            runGrowRoutine(world, modules);
+        }
+        for (int i = 1; i <= moduleNumber; i++) {
+            if (modules[i] != null) {
+                modules[i].seekLights = savedSeekLights[i];
+                modules[i].seekOres = savedSeekOres[i];
+            }
+        }
+    }
+
+    /** Auto-repair/grow: every 5 min. Starts the safe flow (seeks off → wait for paths → run grow); completion is checked every tick in tickGrowPendingCheck. */
+    public static void tickAutoRepairAndGrow(ServerWorld world) {
+        if (growPendingWorld != null) return;
+        for (int i = 1; i <= moduleNumber; i++) {
+            Module m = modules[i];
+            if (m != null) {
+                savedSeekLights[i] = m.seekLights;
+                savedSeekOres[i] = m.seekOres;
+                m.seekLights = false;
+                m.seekOres = false;
+            }
+        }
+        growPendingWorld = world;
+        growCommandTno = 0;
+        growCommandTargetSize = 0;
+    }
+
+    private static void runGrowRoutine(ServerWorld world, Module[] modules) {
         for (int i = 1; i <= moduleNumber; i++) {
             Module m = modules[i];
             if (m == null) continue;
@@ -192,6 +333,7 @@ public final class VoidClamMod {
             int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
             CommandToolbox.clamReSize(world, i, m.currentSize); // repair
             m.lightsBlackList.clear();
+            m.oresBlackList.clear();
             if (m.energy <= 4 * m.currentSize || m.currentSize >= 15) continue;
             double cst = 0;
             int hasRoom = 1;
@@ -232,6 +374,36 @@ public final class VoidClamMod {
         }
     }
 
+    /** Defense: every 5s, players inside clam octahedron (except 'serbanstein') get encased in nether wart, hunger 0, mining fatigue I for 6s, Dream horn sound. */
+    public static void tickDefense(ServerWorld world) {
+        Module[] modules = getModules();
+        for (int i = 1; i <= moduleNumber; i++) {
+            Module m = modules[i];
+            if (m == null || m.currentSize < DEFENSE_MIN_SIZE || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            float volume = Math.min(3f, (float) m.currentSize / 4f);
+            // Dream goat horn: minecraft:item.goat_horn.sound.dream_goat_horn (static registry)
+            SoundEvent dreamHornSound = net.minecraft.registry.Registries.SOUND_EVENT.get(Identifier.of("minecraft", "item.goat_horn.sound.dream_goat_horn"));
+            final SoundEvent soundRef = dreamHornSound;
+            for (ServerPlayerEntity player : world.getPlayers()) {
+                if (player.isSpectator()) continue;
+                if ("serbantein".equalsIgnoreCase(player.getName().getString())) continue;
+                if (!CommandToolbox.isPlayerInsideOctahedron(player, m)) continue;
+                BlockPos playerBlock = player.getBlockPos();
+                for (Direction d : Direction.values()) {
+                    BlockPos adj = playerBlock.offset(d);
+                    BlockState state = world.getBlockState(adj);
+                    if (state.isReplaceable() || state.isAir())
+                        world.setBlockState(adj, Blocks.NETHER_WART_BLOCK.getDefaultState());
+                }
+                SoundEvent hornSound = soundRef != null ? soundRef : SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
+                world.playSound(null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,
+                    hornSound, SoundCategory.HOSTILE, volume, DEFENSE_HORN_PITCH);
+                player.addStatusEffect(new StatusEffectInstance(StatusEffects.HUNGER, DEFENSE_EFFECT_TICKS, 0));
+                player.addStatusEffect(new StatusEffectInstance(StatusEffects.MINING_FATIGUE, DEFENSE_EFFECT_TICKS, 0));
+            }
+        }
+    }
+
     /** Heartbeat sound for loaded modules (original every 4s). */
     public static void tickHeartbeat(ServerWorld world) {
         Module[] modules = getModules();
@@ -244,29 +416,4 @@ public final class VoidClamMod {
         }
     }
 
-    /** Called when a light block is placed; notifies nearby modules to pathfind (async). Only considers modules in loaded chunks. */
-    public static void onLightPlaced(ServerWorld world, BlockPos pos, Block block) {
-        if (!isLight(block)) return;
-        Vec3d eventPos = Vec3d.ofCenter(pos);
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
-            if (m == null || m.status != 1 || m.busyFlagPlaceEvent != 0) continue;
-            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
-            Vec3d modPos = new Vec3d(m.x + 0.5, m.y + 0.5, m.z + 0.5);
-            if (eventPos.squaredDistanceTo(modPos) > (4.0 * m.currentSize) * (4.0 * m.currentSize)) continue;
-            if (m.lightsBlackList.contains(pos)) continue;
-            final int ii = i;
-            m.busyFlagPlaceEvent = 1;
-            m.lightsBlackList.add(pos.toImmutable());
-            CommandToolbox.submitPathfinding(() -> {
-                try {
-                    Pathfinder.calculatePath(world, ii, m.x, m.y, m.z, pos.getX(), pos.getY(), pos.getZ());
-                    // energy granted only when light is eaten in buildPath
-                } finally {
-                    m.busyFlagPlaceEvent = 0;
-                }
-            });
-            break; // one module per place, like original
-        }
-    }
 }
