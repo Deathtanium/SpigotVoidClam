@@ -48,7 +48,17 @@ Runs on **main thread** from `tickTargets`.
 
 ## Container snapshot (`buildContainerSnapshot` / `runContainerBfsOnSnapshot`)
 
-For storing drops: main thread builds a **BFS map** from clam center (cap `CONTAINER_SNAPSHOT_MAX_STEPS`), classifying nether wart, warped wart, chest-like blocks, other. Worker runs BFS on the map; main thread applies insertions via `world.getServer().execute`.
+**Intended behavior:** Storage routing is anchored to the **module center** (clam core coordinates), not the block being broken. The main thread builds a **BFS map** from that center (cap `CONTAINER_SNAPSHOT_MAX_STEPS`), classifying nether wart, warped wart, chest / trapped chest / barrel, and everything else. The worker runs **the same BFS from the same root** on that map and returns containers in **BFS order from the clam center**. The main thread then tries `tryInsertInto` in that order via `world.getServer().execute`.
+
+So “nearer” means **fewer graph steps from the clam center through wart (and the root cell’s neighbors)**, not Euclidean distance from the break position. A chest sitting on wart closer to the center than another chest should appear **earlier** in the list unless it is never reached (see below).
+
+**Situations where pre-placed “near” storage might be skipped or not receive items:**
+
+1. **Snapshot step budget** — If `CONTAINER_SNAPSHOT_MAX_STEPS` is exhausted before the BFS frontier reaches a container, that block is absent from the map and is invisible to the worker. A large wart volume or a long “thin” branch can starve exploration of other branches.
+2. **No path through the snapshot** — Traversal continues only through nether wart, warped wart, and the root cell. A chest that is not adjacent to wart reachable from the center in the explored region does not appear in the list.
+3. **Block not treated as storage** — Only `CHEST`, `TRAPPED_CHEST`, and `BARREL` are containers. Other inventories (e.g. shulker, hopper, decorated pot) are not candidates.
+4. **Insert failure** — `tryInsertInto` uses `Inventory` on the block entity; if the entity is missing or the inventory is not usable as expected, that position effectively does nothing and the stack may fall through to a barrel at the break position.
+5. **Stale snapshot vs. concurrent breaks** — Each break schedules work from a snapshot taken when that step runs; rapid successive breaks can see slightly different world state ordering, but should not systematically ignore center-near chests unless one of the above applies.
 
 ## Related notes
 
