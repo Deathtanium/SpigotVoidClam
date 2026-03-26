@@ -22,19 +22,28 @@ public final class CommandToolbox {
     private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
 
     /**
-     * Run pathfinding off-thread (used by clamReach and container BFS). Skips the task if shutdown is requested or the clam
-     * center chunk is not loaded (see {@link VoidClamMod#shouldAbortAsyncPathfindingWork}). When skipped, runs
-     * {@code onAbortedBeforeRun} if non-null (e.g. clear {@code busyFlagMainCycle}).
+     * Run pathfinding off-thread (used by clamReach and container BFS). Rejects without queuing while a coordinated kill barrier
+     * is in effect. Otherwise skips the task body if shutdown, kill victim, or unloaded center chunk applies; when skipped, runs
+     * {@code onAbortedBeforeRun} if non-null.
+     *
+     * @param pathfindingModuleSlot module index {@code tno} for this work, or 0 if unknown (position-only fallback for kill matching)
      */
     public static void submitPathfinding(
         ServerWorld world,
         int clamCenterX,
         int clamCenterZ,
+        int pathfindingModuleSlot,
         Runnable onAbortedBeforeRun,
         Runnable task
     ) {
+        if (VoidClamMod.isAsyncPathfindingKillBarrierInEffect() || VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+            if (onAbortedBeforeRun != null) {
+                onAbortedBeforeRun.run();
+            }
+            return;
+        }
         pathfinderExecutor.execute(() -> {
-            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ)) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)) {
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -62,6 +71,14 @@ public final class CommandToolbox {
             Thread.currentThread().interrupt();
         }
         pathfinderExecutor = Executors.newFixedThreadPool(2);
+    }
+
+    /**
+     * During {@link VoidClamMod#clamKillBlocking}: drain workers (victim slot aborts cooperatively), then replace the pool.
+     * Must not run on the server thread if workers may {@code server.execute} — use a helper thread.
+     */
+    static void shutdownPathfinderExecutorAfterKillDrain() {
+        shutdownPathfinderExecutorForSessionEnd();
     }
 
     public static void buildStub(ServerWorld world, int x, int y, int z) {
@@ -223,13 +240,14 @@ public final class CommandToolbox {
         if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
         Module m = modules[tno];
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
-        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z)) return;
+        int slot = tno;
+        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot)) return;
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
-        submitPathfinding(world, m.x, m.z, () -> m.busyFlagMainCycle = 0, () -> {
+        submitPathfinding(world, m.x, m.z, slot, () -> m.busyFlagMainCycle = 0, () -> {
             try {
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot)) {
                     m.busyFlagMainCycle = 0;
                     return;
                 }
@@ -246,7 +264,7 @@ public final class CommandToolbox {
                     for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
                         for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
                             for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z)) {
+                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
                                     break outerScan;
                                 }
                                 BlockPos pos = new BlockPos(ix, iy, iz);
@@ -263,7 +281,7 @@ public final class CommandToolbox {
                             }
                         }
                     }
-                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z)) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
                         m.busyFlagMainCycle = 0;
                         return;
                     }
@@ -278,7 +296,7 @@ public final class CommandToolbox {
                     m.oresBlackList.add(closest.toImmutable());
                 }
 
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
                     if (closest != null) {
                         if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
                             m.lightsBlackList.remove(closest.toImmutable());

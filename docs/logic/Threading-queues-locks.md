@@ -11,21 +11,34 @@
 
 ## Async pathfinding abort conditions
 
-Work tied to a specific module stops when **either** the server is stopping **or** that module’s **center chunk is unloaded** (same check as `isModuleInLoadedChunk`: `world.isChunkLoaded(cx >> 4, cz >> 4)` for the module’s X/Z).
+Work tied to a specific module stops when **any** of: the server is stopping; a **coordinated clam kill** has marked this module’s slot as victim; that module’s **center chunk is unloaded** (`world.isChunkLoaded(cx >> 4, cz >> 4)`).
 
-- **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ)` — true when `isAsyncPathfindingShutdownRequested()` **or** the center chunk is not loaded.
+- **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)` — pass `tno` as `pathfindingModuleSlot` when known so kill targets the correct clam; use `0` only when matching by center X/Z against the victim slot.
 - **Shutdown flag**: `isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
-- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). It sets the flag, **shuts down and awaits** the pathfinder executor (with timeout + `shutdownNow`), **replaces** the pool for a possible next world in the same JVM, and clears every module’s `busyFlagMainCycle` so nothing stays “stuck busy” after skipped queue entries.
+- **Kill barrier**: `isAsyncPathfindingKillBarrierInEffect()` — while `true`, `submitPathfinding` **rejects without queuing** (runs `onAbortedBeforeRun` immediately). Used so no new async tasks are created during a kill drain. `asyncPathfindingKillVictimSlot` identifies which `tno` is aborted cooperatively in workers.
+- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). Clears kill barrier state, sets the shutdown flag, **shuts down and awaits** the pathfinder executor, **replaces** the pool, and clears every module’s `busyFlagMainCycle`.
 - **Cleared (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStart()` at `SERVER_STARTED` (before `load`).
-- **`submitPathfinding`**: Takes `world`, clam center X/Z, `onAbortedBeforeRun`, and the task. If abort is true when the runnable would run, it invokes `onAbortedBeforeRun` (e.g. clear `busyFlagMainCycle` / `pathStoppedAwaitingContainer`) and returns without running the task body.
+- **`submitPathfinding`**: `submitPathfinding(world, cx, cz, pathfindingModuleSlot, onAbortedBeforeRun, task)`. Rejects if kill barrier **or** shutdown (no `execute`). Otherwise, if abort before the body, runs `onAbortedBeforeRun` (clears `busyFlagMainCycle` / `pathStoppedAwaitingContainer` where needed).
 - **Where abort is polled**:
-  - `CommandToolbox.submitPathfinding` (before task body),
+  - `CommandToolbox.submitPathfinding` (reject vs before task body),
   - `clamReach` (before submit; periodic checks in the light/ore scan),
   - `Pathfinder.calculatePath` (A* loop + goal enqueue guard),
   - `Pathfinder.isGoalReachableByPrepass` / `runContainerBfsOnWorld` via `BlockBfs.AbortChecker`,
-  - Main-thread `applyContainerResult` path after container BFS (via `world.getServer().execute`): skips applying if the clam center chunk unloaded or shutdown.
+  - Main-thread `applyContainerResult` path after container BFS (via `world.getServer().execute`): skips applying if abort is true.
+- **`busyFlagMainCycle` on interrupt**: Aborted paths clear the flag via `onAbortedBeforeRun`, A* early exit, `calculatePath` failure, or container callback guards. Kill starts by clearing the victim’s flag and purging that slot from `targets` to narrow enqueue races.
 
-**Porting:** Any new off-thread VoidClam work should use `shouldAbortAsyncPathfindingWork` (or equivalent) so work does not continue for an unloaded clam or after shutdown has begun.
+## Coordinated module kill (`clamKill` / `clamKillBlocking`)
+
+`/voidclam kill` and automatic core death call `VoidClamMod.clamKill(server, tno, saveAfter)` (alias for `clamKillBlocking`). Sequence:
+
+1. **Queue** the request (serialized with `asyncKillCoordinatorLock`; multiple kills remap pending slots after each shift).
+2. **Start drain**: clear victim `busyFlagMainCycle`, **purge `targets`** entries for that `tno` only, set victim slot + kill barrier.
+3. **Background thread** runs `shutdownPathfinderExecutorAfterKillDrain()` (same await/replace as server stop) so the server thread is not blocked while workers may call `server.execute`.
+4. **Server thread** (`server.execute`): remap pending kill indices, **purge+adjust `targets`**, fix `growCommandTno`, shift `savedSeek*`, **shift module array**, clear victim/barrier, optional `save`, then start the next queued kill if any.
+
+**Stale scheduled path steps:** `Pathfinder.buildPath` records origin `(x,y,z)` at enqueue time; each `scheduleDelayed` step checks `moduleAtSlotMatchesPosition(tno, …)` so work for a shifted index does not run against the wrong module.
+
+**Porting:** New off-thread work must respect `shouldAbortAsyncPathfindingWork` and the kill barrier; new kill paths should use the same coordinator or extend it.
 
 ## `targets` queue
 

@@ -24,9 +24,14 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 
 public final class Pathfinder {
-    private static BlockBfs.AbortChecker asyncPathfindingAbortChecker(ServerWorld world, int clamCenterX, int clamCenterZ) {
+    private static BlockBfs.AbortChecker asyncPathfindingAbortChecker(
+        ServerWorld world,
+        int clamCenterX,
+        int clamCenterZ,
+        int pathfindingModuleSlot
+    ) {
         return (w, posLong, distanceFromStart) ->
-            VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ);
+            VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot);
     }
 
     static final List<Cursor> xc = new ArrayList<>();
@@ -165,7 +170,7 @@ public final class Pathfinder {
             BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
             null,
             null,
-            asyncPathfindingAbortChecker(world, mod.x, mod.z),
+            asyncPathfindingAbortChecker(world, mod.x, mod.z, tno),
             goalLong
         );
         bfs.runToCompletionOnCurrentThread();
@@ -198,7 +203,7 @@ public final class Pathfinder {
 
         long astarIterations = 0;
         while (!open.isEmpty()) {
-            if ((astarIterations++ & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z)) {
+            if ((astarIterations++ & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno)) {
                 modForFlag.busyFlagMainCycle = 0;
                 return false;
             }
@@ -262,7 +267,7 @@ public final class Pathfinder {
                 nextNode.f = nextNode.g + nextNode.h;
 
                 if (nx == gx && ny == gy && nz == gz) {
-                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z)) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno)) {
                         modForFlag.busyFlagMainCycle = 0;
                         return false;
                     }
@@ -348,7 +353,8 @@ public final class Pathfinder {
         List<Long> containersOut,
         BlockBfs.ExecutionMode executionMode,
         Executor executor,
-        Runnable onComplete
+        Runnable onComplete,
+        int pathfindingModuleSlot
     ) {
         BlockBfs.EdgePolicy containerPolicy = new BlockBfs.EdgePolicy() {
             @Override
@@ -372,7 +378,7 @@ public final class Pathfinder {
             executionMode,
             executor,
             onComplete,
-            asyncPathfindingAbortChecker(world, cx, cz),
+            asyncPathfindingAbortChecker(world, cx, cz, pathfindingModuleSlot),
             BlockBfs.NO_EARLY_GOAL,
             (w, posLong, d) -> {
                 BlockState state = w.getBlockState(BlockPos.fromLong(posLong));
@@ -487,6 +493,10 @@ public final class Pathfinder {
         if (mod == null) {
             return;
         }
+        final int pathTno = gnode.tno;
+        final int pathOriginX = mod.x;
+        final int pathOriginY = mod.y;
+        final int pathOriginZ = mod.z;
         final Module modForFlag = mod;
         if (gnode.f >= 2500) {
             modForFlag.busyFlagMainCycle = 0;
@@ -516,11 +526,14 @@ public final class Pathfinder {
         }
 
         VoidClamMod.scheduleDelayed(world, timer, () -> {
-            VoidClamMod.removeLightsBlackList(gnode.tno, goalPos);
-            VoidClamMod.removeOresBlackList(gnode.tno, goalPos);
+            if (!VoidClamMod.moduleAtSlotMatchesPosition(pathTno, pathOriginX, pathOriginY, pathOriginZ)) {
+                return;
+            }
+            VoidClamMod.removeLightsBlackList(pathTno, goalPos);
+            VoidClamMod.removeOresBlackList(pathTno, goalPos);
         });
 
-        int[] stamina = new int[]{modules[gnode.tno].currentSize};
+        int[] stamina = new int[]{modules[pathTno].currentSize};
         int[] blocked = new int[1];
         int[] pathStopped = new int[1]; // set when block-to-break: path stops, no energy, resume next attempt
         int[] pathStoppedAwaitingContainer = new int[1]; // 1 while off-thread container BFS + apply not finished; keeps busy, suppresses stale path steps
@@ -528,8 +541,11 @@ public final class Pathfinder {
         while (firstNode.parent != null && blocked[0] == 0) {
             final Node refNode = firstNode;
             final long runAt = timer;
-            final int cSize = modules[gnode.tno].currentSize;
+            final int cSize = modules[pathTno].currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
+                if (!VoidClamMod.moduleAtSlotMatchesPosition(pathTno, pathOriginX, pathOriginY, pathOriginZ)) {
+                    return;
+                }
                 if (pathStopped[0] != 0 && pathStoppedAwaitingContainer[0] != 0) {
                     return;
                 }
@@ -556,14 +572,15 @@ public final class Pathfinder {
                             world,
                             mx,
                             mz,
+                            pathTno,
                             () -> modForFlag.busyFlagMainCycle = 0,
                             () -> {
                                 List<Long> containers = new ArrayList<>();
                                 runContainerBfsOnWorld(
                                     world, mx, my, mz, cSize, clamCenterLong, containers,
-                                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
+                                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathTno);
                                 world.getServer().execute(() -> {
-                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z)) {
+                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathTno)) {
                                         modForFlag.busyFlagMainCycle = 0;
                                         return;
                                     }
@@ -582,10 +599,10 @@ public final class Pathfinder {
                 if (stamina[0] - cst < 0) {
                     blocked[0] = 1;
                     if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA))) {
-                        VoidClamMod.addLightsBlackList(gnode.tno, goalPos);
-                        VoidClamMod.addOresBlackList(gnode.tno, goalPos);
+                        VoidClamMod.addLightsBlackList(pathTno, goalPos);
+                        VoidClamMod.addOresBlackList(pathTno, goalPos);
                     }
-                    VoidClamMod.addEnergy(gnode.tno, -1);
+                    VoidClamMod.addEnergy(pathTno, -1);
                 } else {
                     stamina[0] -= cst;
                 }
@@ -602,6 +619,7 @@ public final class Pathfinder {
                         world,
                         mx,
                         mz,
+                        pathTno,
                         () -> {
                             pathStoppedAwaitingContainer[0] = 0;
                             modForFlag.busyFlagMainCycle = 0;
@@ -610,9 +628,9 @@ public final class Pathfinder {
                             List<Long> containers = new ArrayList<>();
                             runContainerBfsOnWorld(
                                 world, mx, my, mz, cSize, clamCenterLong, containers,
-                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
+                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathTno);
                             world.getServer().execute(() -> {
-                                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z)) {
+                                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathTno)) {
                                     pathStoppedAwaitingContainer[0] = 0;
                                     modForFlag.busyFlagMainCycle = 0;
                                     return;
@@ -630,7 +648,7 @@ public final class Pathfinder {
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 world.playSound(null, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
-                    VoidClamMod.addEnergy(gnode.tno, 1); // energy only when light source is eaten
+                    VoidClamMod.addEnergy(pathTno, 1); // energy only when light source is eaten
                 if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));

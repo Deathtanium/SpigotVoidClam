@@ -15,7 +15,7 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 | Symbol | Role |
 |--------|------|
 | `load` / `save` | CSV `modules.siva` + rotation |
-| `makeStub`, `clamKill` | Create module / shift array down |
+| `makeStub`, `clamKill(server, tno, saveAfter)` | Create module / coordinated kill (async drain then shift) |
 | `enqueueTarget`, `tickTargets`, `isTargetsQueueEmpty` | Path result queue |
 | `requestGrowCommand`, `requestRepairCommand`, `tickGrowPendingCheck`, `tickAutoRepairAndGrow`, `runGrowRoutine` | Safe grow/repair sequencing |
 | `tickCoreCheck` | Integrity kill |
@@ -36,7 +36,7 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 
 | Symbol | Role |
 |--------|------|
-| `pathfinderExecutor`, `submitPathfinding(world, cx, cz, onAbort, task)` | Off-thread work; abort if shutdown or clam chunk unloaded |
+| `pathfinderExecutor`, `submitPathfinding(world, cx, cz, tno, onAbort, task)` | Off-thread work; reject if kill barrier/shutdown; else abort if victim/unload/shutdown |
 | `buildStub` | Initial shape with staggered wart/obsidian |
 | `buildShell` | Octahedral shell of arbitrary material |
 | `clamReSize` | Animated resize/repair |
