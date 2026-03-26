@@ -34,6 +34,11 @@ public class Module {
     public final Set<BlockPos> oresBlackList = new HashSet<>();
     public short busyFlagPlaceEvent;
     public short busyFlagMainCycle;
+    /**
+     * Overworld {@link net.minecraft.server.world.ServerWorld#getTime()} when this clam should run its next auto repair/grow
+     * (staggered per heart, like entity tick phasing). Only meaningful while the clam is registered.
+     */
+    public long nextAutoGrowRepairWorldTime;
 
     public void ensureClamId() {
         if (clamId == null) {

@@ -59,6 +59,9 @@ public final class VoidClamMod {
     private static int growCommandTargetSize = 0;
     private static final Map<UUID, Boolean> growSavedSeekLights = new HashMap<>();
     private static final Map<UUID, Boolean> growSavedSeekOres = new HashMap<>();
+    /** Per-clam auto repair/grow cadence (overworld world time ticks), staggered by heart position. */
+    public static final int AUTO_GROW_REPAIR_INTERVAL_TICKS = 5 * 60 * 20;
+
     private static final int DEFENSE_MIN_SIZE = 11;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
@@ -141,8 +144,11 @@ public final class VoidClamMod {
         if (victimId == null) return;
         purgeTargetsForVictimClamId(victimId);
         if (growPendingWorld != null && victimId.equals(growCommandClamId)) {
+            growPendingWorld = null;
             growCommandClamId = null;
             growCommandTargetSize = 0;
+            growSavedSeekLights.clear();
+            growSavedSeekOres.clear();
         }
         growSavedSeekLights.remove(victimId);
         growSavedSeekOres.remove(victimId);
@@ -316,6 +322,39 @@ public final class VoidClamMod {
         m.ensureClamId();
         if (modulesById.size() >= MAX_MODULES) return false;
         modulesById.put(m.clamId, m);
+        return true;
+    }
+
+    /** First auto-grow deadline for a clam that has not been scheduled yet (spread across one interval by position). */
+    public static void ensureAutoGrowScheduled(ServerWorld world, Module m) {
+        if (m.nextAutoGrowRepairWorldTime > 0) return;
+        long t = world.getTime();
+        int spread = Math.floorMod(m.x * 31 + m.y * 17 + m.z * 13, AUTO_GROW_REPAIR_INTERVAL_TICKS);
+        m.nextAutoGrowRepairWorldTime = t + 1 + spread;
+    }
+
+    /** After CSV load: give every loaded module a first auto-grow fire time. */
+    public static void seedAutoGrowScheduleForAllModules(ServerWorld world) {
+        for (Module m : modulesById.values()) {
+            if (m != null) ensureAutoGrowScheduled(world, m);
+        }
+    }
+
+    /**
+     * Per-clam auto repair/grow (like an entity-local periodic). Returns false if another grow/repair is already pending globally.
+     * Snapshots and clears seeks only for this clam.
+     */
+    public static boolean tryScheduleAutoGrowRepairForClam(ServerWorld world, UUID clamId) {
+        if (growPendingWorld != null || asyncPathfindingKillBarrierInEffect) return false;
+        Module m = getModuleById(clamId);
+        if (m == null) return false;
+        growSavedSeekLights.put(clamId, m.seekLights);
+        growSavedSeekOres.put(clamId, m.seekOres);
+        m.seekLights = false;
+        m.seekOres = false;
+        growPendingWorld = world;
+        growCommandClamId = clamId;
+        growCommandTargetSize = -1;
         return true;
     }
 
@@ -690,22 +729,42 @@ public final class VoidClamMod {
     }
 
     public static void requestGrowCommand(ServerWorld world, UUID clamId, int targetSize) {
-        if (getModuleById(clamId) == null) return;
+        Module target = getModuleById(clamId);
+        if (target == null) return;
         if (growPendingWorld == null) {
             growSavedSeekLights.clear();
             growSavedSeekOres.clear();
-            for (Module m : modulesById.values()) {
-                if (m == null) continue;
-                growSavedSeekLights.put(m.clamId, m.seekLights);
-                growSavedSeekOres.put(m.clamId, m.seekOres);
-                m.seekLights = false;
-                m.seekOres = false;
-            }
+            growSavedSeekLights.put(clamId, target.seekLights);
+            growSavedSeekOres.put(clamId, target.seekOres);
+            target.seekLights = false;
+            target.seekOres = false;
             growPendingWorld = world;
+        } else if (growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) {
+            UUID prev = growCommandClamId;
+            if (prev != null && !prev.equals(clamId)) {
+                restoreSeekFlagsFromGrowSnapshots(prev);
+                growSavedSeekLights.put(clamId, target.seekLights);
+                growSavedSeekOres.put(clamId, target.seekOres);
+                target.seekLights = false;
+                target.seekOres = false;
+            }
         }
         if (growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) {
             growCommandClamId = clamId;
             growCommandTargetSize = targetSize;
+        }
+    }
+
+    private static void restoreSeekFlagsFromGrowSnapshots(UUID clamId) {
+        Module m = getModuleById(clamId);
+        if (m != null) {
+            Boolean sl = growSavedSeekLights.remove(clamId);
+            Boolean so = growSavedSeekOres.remove(clamId);
+            if (sl != null) m.seekLights = sl;
+            if (so != null) m.seekOres = so;
+        } else {
+            growSavedSeekLights.remove(clamId);
+            growSavedSeekOres.remove(clamId);
         }
     }
 
@@ -714,66 +773,41 @@ public final class VoidClamMod {
         if (asyncPathfindingKillBarrierInEffect) return;
         if (!growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) return;
         UUID cmdId = growCommandClamId;
-        boolean idle;
-        if (cmdId != null) {
-            Module m = getModuleById(cmdId);
-            idle = (m == null || m.busyFlagMainCycle == 0);
-        } else {
-            idle = true;
-            for (Module m : modulesById.values()) {
-                if (m != null && m.busyFlagMainCycle != 0) {
-                    idle = false;
-                    break;
-                }
-            }
+        if (cmdId == null) {
+            growPendingWorld = null;
+            growCommandTargetSize = 0;
+            growSavedSeekLights.clear();
+            growSavedSeekOres.clear();
+            return;
         }
+        Module m = getModuleById(cmdId);
+        boolean idle = (m == null || m.busyFlagMainCycle == 0);
         if (!idle || !isTargetsQueueEmpty() || VoidClamModScheduler.hasPendingTasks(world)) return;
         int cmdSize = growCommandTargetSize;
         growPendingWorld = null;
         growCommandClamId = null;
         growCommandTargetSize = 0;
-        if (cmdId != null) {
-            CommandToolbox.clamReSize(world, cmdId, cmdSize);
-        } else {
-            runGrowRoutine(world);
+        if (m != null) {
+            if (cmdSize < 0) {
+                runAutoGrowRoutineSingle(world, m);
+            } else {
+                CommandToolbox.clamReSize(world, cmdId, cmdSize);
+            }
         }
-        for (Module m : modulesById.values()) {
-            if (m == null) continue;
-            Boolean sl = growSavedSeekLights.get(m.clamId);
-            Boolean so = growSavedSeekOres.get(m.clamId);
-            if (sl != null) m.seekLights = sl;
-            if (so != null) m.seekOres = so;
-        }
+        restoreSeekFlagsFromGrowSnapshots(cmdId);
         growSavedSeekLights.clear();
         growSavedSeekOres.clear();
     }
 
-    public static void tickAutoRepairAndGrow(ServerWorld world) {
-        if (growPendingWorld != null) return;
-        growSavedSeekLights.clear();
-        growSavedSeekOres.clear();
-        for (Module m : modulesById.values()) {
-            if (m == null) continue;
-            growSavedSeekLights.put(m.clamId, m.seekLights);
-            growSavedSeekOres.put(m.clamId, m.seekOres);
-            m.seekLights = false;
-            m.seekOres = false;
-        }
-        growPendingWorld = world;
-        growCommandClamId = null;
-        growCommandTargetSize = 0;
-    }
-
-    private static void runGrowRoutine(ServerWorld world) {
-        for (Module m : modulesById.values()) {
-            if (m == null) continue;
-            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
-            int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
-            CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
-            m.lightsBlackList.clear();
-            m.oresBlackList.clear();
-            VoidClamConfig cfg = VoidClamConfig.get();
-            if (m.energy <= cfg.clam_grow_energymultiplier * m.currentSize || m.currentSize >= cfg.clam_size_max) continue;
+    /** Auto repair + optional grow for one clam (same rules as former batch routine). */
+    private static void runAutoGrowRoutineSingle(ServerWorld world, Module m) {
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
+        CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
+        m.lightsBlackList.clear();
+        m.oresBlackList.clear();
+        VoidClamConfig cfg = VoidClamConfig.get();
+        if (m.energy > cfg.clam_grow_energymultiplier * m.currentSize && m.currentSize < cfg.clam_size_max) {
             double cst = 0;
             int hasRoom = 1;
             for (int ix = x - csize + 2; ix <= x + csize - 2; ix++) {
@@ -790,13 +824,13 @@ public final class VoidClamMod {
                     }
                 }
             }
-            if (cst > 10 * csize) hasRoom = 0;
-            if (hasRoom == 1) {
+            if (cst <= 10 * csize) {
                 int nextSize = Math.min(m.currentSize + 2, cfg.clam_size_max);
-                if (nextSize <= m.currentSize) continue;
-                m.energy = 0;
-                CommandToolbox.clamReSize(world, m.clamId, nextSize);
-                m.currentSize = nextSize;
+                if (nextSize > m.currentSize) {
+                    m.energy = 0;
+                    CommandToolbox.clamReSize(world, m.clamId, nextSize);
+                    m.currentSize = nextSize;
+                }
             }
         }
         maybeSaveLegacyModulesSiva(world.getServer());

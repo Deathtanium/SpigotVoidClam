@@ -7,22 +7,31 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 | Symbol | Role |
 |--------|------|
 | `onInitialize` | Register server start/stop, end tick, commands |
-| `onServerTick` | Encodes tick order and intervals |
+| `onServerTick` | Encodes tick order (path queue, scheduler, grow pending, pulses) |
 | `registerCommands` | Brigadier `/voidclam` tree |
 
 ## `VoidClamMod`
 
 | Symbol | Role |
 |--------|------|
-| `load` / `save` | CSV `modules.siva` + rotation |
-| `makeStub`, `clamKill(server, tno, saveAfter)` | Create module / coordinated kill (async drain then shift) |
+| `loadOptionalLegacyModulesSiva` / `save` / `maybeSaveLegacyModulesSiva` | Optional CSV mirror at `modules.siva` |
+| `makeStub`, `clamKill(server, clamId, saveAfter)` | Create clam / coordinated kill (async drain) |
+| `ensureRuntimeModuleForHeart` | Map heart BE → runtime `Module` on load |
 | `enqueueTarget`, `tickTargets`, `isTargetsQueueEmpty` | Path result queue |
-| `requestGrowCommand`, `requestRepairCommand`, `tickGrowPendingCheck`, `tickAutoRepairAndGrow`, `runGrowRoutine` | Safe grow/repair sequencing |
-| `tickCoreCheck` | Integrity kill |
-| `tickDefense`, `tickHeartbeat` | Effects |
+| `requestGrowCommand`, `requestRepairCommand`, `tickGrowPendingCheck` | Safe grow/repair (single-clam seek snapshot) |
+| `tryScheduleAutoGrowRepairForClam`, `runAutoGrowRoutineSingle` | Per-heart auto repair/grow |
+| `ensureAutoGrowScheduled`, `seedAutoGrowScheduleForAllModules` | Staggered auto-grow deadlines |
+| `tickCoreCheck` | Integrity kill (legacy / global) |
+| `tickDefenseForModule`, `tickHeartbeatForModule` | Effects (typically from heart tick) |
 | `scheduleDelayed` | Delegates to scheduler |
 | `isLight`, `isOre`, `isBaseCost` | Block categorization |
 | Blacklist / energy helpers | Path retry behavior |
+
+## `VoidClamHeartBlockEntity`
+
+| Symbol | Role |
+|--------|------|
+| `tick` | Registry link, auto-grow scheduling (overworld), reach, core check, heartbeat, defense |
 
 ## `VoidClamModScheduler`
 
@@ -36,7 +45,7 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 
 | Symbol | Role |
 |--------|------|
-| `pathfinderExecutor`, `submitPathfinding(world, cx, cz, tno, onAbort, task)` | Off-thread work; reject if kill barrier/shutdown; else abort if victim/unload/shutdown |
+| `pathfinderExecutor`, `submitPathfinding` | Off-thread work; kill barrier / unload checks |
 | `buildStub` | Initial shape with staggered wart/obsidian |
 | `buildShell` | Octahedral shell of arbitrary material |
 | `clamReSize` | Animated resize/repair |
@@ -50,11 +59,11 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 | `calculatePath` | A\*; enqueue or clear busy |
 | `buildPath` | Schedule placement along path, stamina, drops |
 | `getFortune3Drops` | Ore rewards |
-| Container helpers | Snapshot, BFS, insert, barrel fallback |
+| Container helpers | BFS, insert, barrel fallback |
 
 ## `Module`, `Node`, `Cursor`
 
-Data carriers for persisted state and A\* graph.
+Data carriers for runtime state and A\* graph.
 
 ## `TendrilPulseManager`
 
@@ -64,3 +73,4 @@ Pulse entities, omni job, cleanup commands, sky brightness helper for displays.
 
 - [[Overview]]
 - [[Threading-queues-locks]]
+- [[Hivemind-future]]

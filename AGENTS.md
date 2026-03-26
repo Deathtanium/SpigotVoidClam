@@ -30,7 +30,7 @@ Requires a JDK **17+** on `PATH`.
 - **Core state / logic**: `VoidClamMod`, `Module`, `Pathfinder`, `Cursor`, `Node`.
 - **Threading**: Pathfinding runs off-thread; results are queued and applied on the **server main thread**. Respect `busyFlagMainCycle` (and any future use of `busyFlagPlaceEvent`) when changing concurrency.
 - **Scheduling**: `VoidClamModScheduler` — delayed runnables keyed off **world time** (`world.getTime()`).
-- **Persistence**: World save CSV `modules.siva` (and `modules.siva.old` rotation) at the save root — format and field order matter for compatibility.
+- **Persistence**: Heart block entities hold authoritative clam data in chunk NBT. Optional legacy CSV `modules.siva` at the save root (loaded if present; written on `/voidclam save` or when the file already exists). See `docs/logic/State-and-save.md`.
 
 ## Logic documentation (porting / behavior)
 

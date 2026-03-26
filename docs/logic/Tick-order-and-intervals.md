@@ -1,6 +1,6 @@
 # Tick order and intervals
 
-All intervals below are expressed in **server ticks** (20 ticks ≈ 1 second). Constants live in `VoidClamModEntry` unless noted.
+All intervals below are expressed in **server ticks** (20 ticks ≈ 1 second). Constants live in `VoidClamModEntry` or `VoidClamMod` unless noted.
 
 ## Single `END_SERVER_TICK` callback (overworld-driven)
 
@@ -16,20 +16,26 @@ Then **gated** by `overworld.getTime()`:
 
 | Interval constant | Ticks | What runs |
 |-------------------|-------|-----------|
-| `TICK_TARGETS` (20) | 1 s | For each module in **loaded overworld chunk**: `CommandToolbox.clamReach`; then `VoidClamMod.tickCoreCheck(overworld)` |
-| `TICK_HEARTBEAT` (80) | 4 s | `VoidClamMod.tickHeartbeat(overworld)` |
 | `TICK_OMNI_PULSE` (100) | 5 s | `TendrilPulseManager.runOmnidirectionalPulse(overworld)` |
-| `TICK_DEFENSE` (100) | 5 s | `VoidClamMod.tickDefense(w)` for **every** world |
-| `TICK_AUTO_GROW` (6000) | 5 min | `VoidClamMod.tickAutoRepairAndGrow(overworld)` — starts safe-pending flow |
 | `TICK_CLEANUP` (1200) | 1 min | `TendrilPulseManager.cleanupStrayDisplays(w)` for every world |
+
+## Per–block-entity tick (heart)
+
+Registered via `VoidClamHeartBlock.getTicker`: each loaded heart runs **`VoidClamHeartBlockEntity.tick`** every game tick (when the chunk ticks). That drives:
+
+- First-load **registry link** (`ensureRuntimeModuleForHeart`)
+- **Auto grow/repair** scheduling (overworld only; see [[Grow-repair-and-energy]])
+- Staggered **reach** + core check, **heartbeat**, **defense**
+
+So reach/core/heartbeat/defense are **not** driven by the global server tick table in `VoidClamModEntry`; they are **heart-local** intervals.
 
 ## Design notes for ports
 
-- **Reach and core check** use the **overworld** only for the periodic pass (even though grow pending and defense iterate all worlds).
 - **Delayed tasks** are ticked with the **overworld** reference; tasks scheduled with a different `ServerWorld` instance may not fire until `VoidClamModScheduler` is extended to match by dimension key (see [[Threading-queues-locks]]).
-- `TICK_REACH` exists in code but is **unused**; the periodic reach uses `TICK_TARGETS`.
 
 ## Related notes
 
 - [[Threading-queues-locks]]
 - [[Pathfinding-and-reach]]
+- [[Grow-repair-and-energy]]
+- [[State-and-save]]

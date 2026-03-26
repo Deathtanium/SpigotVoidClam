@@ -59,6 +59,16 @@ public class VoidClamHeartBlockEntity extends BlockEntity {
         }
         if (clamId == null || modForTick == null) return;
 
+        if (serverWorld.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
+            VoidClamMod.ensureAutoGrowScheduled(serverWorld, modForTick);
+            long due = modForTick.nextAutoGrowRepairWorldTime;
+            if (due > 0 && t >= due) {
+                if (VoidClamMod.tryScheduleAutoGrowRepairForClam(serverWorld, clamId)) {
+                    modForTick.nextAutoGrowRepairWorldTime = t + VoidClamMod.AUTO_GROW_REPAIR_INTERVAL_TICKS;
+                }
+            }
+        }
+
         if ((t + phase) % REACH_INTERVAL == 0) {
             CommandToolbox.clamReach(serverWorld, clamId);
             VoidClamMod.tickCoreCheckAtHeart(serverWorld, pos, clamId);

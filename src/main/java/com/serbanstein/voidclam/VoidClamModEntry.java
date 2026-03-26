@@ -27,7 +27,6 @@ import java.util.List;
 
 /** Fabric mod entrypoint: lifecycle, server tick hook, and commands. */
 public class VoidClamModEntry implements ModInitializer {
-    private static final int TICK_AUTO_GROW = 5 * 60 * 20; // auto-repair/grow every 5 min
     private static final int TICK_OMNI_PULSE = 5 * 20;     // omnidirectional pulse every ~5s
     private static final int TICK_CLEANUP = 60 * 20;       // stray tendril display cleanup every 1 min
     private static final int OP_LEVEL = 2;                 // commands hidden unless player has this OP level
@@ -49,6 +48,10 @@ public class VoidClamModEntry implements ModInitializer {
         VoidClamMod.onAsyncPathfindingSessionStart();
         VoidClamMod.loadOptionalLegacyModulesSiva(server);
         VoidClamMod.migrateLoadedModulesToHeartBlocks(server);
+        ServerWorld overworld = server.getOverworld();
+        if (overworld != null) {
+            VoidClamMod.seedAutoGrowScheduleForAllModules(overworld);
+        }
     }
 
     private void onServerStopping(MinecraftServer server) {
@@ -74,8 +77,6 @@ public class VoidClamModEntry implements ModInitializer {
 
         if (tick % TICK_OMNI_PULSE == 0)
             TendrilPulseManager.runOmnidirectionalPulse(world);
-        if (tick % TICK_AUTO_GROW == 0)
-            VoidClamMod.tickAutoRepairAndGrow(world);
         if (tick % TICK_CLEANUP == 0) {
             for (ServerWorld w : server.getWorlds())
                 TendrilPulseManager.cleanupStrayDisplays(w);
@@ -86,6 +87,25 @@ public class VoidClamModEntry implements ModInitializer {
         dispatcher.register(
             CommandManager.literal("voidclam")
                 .requires(s -> s.getPermissions().hasPermission(new Permission.Level(PermissionLevel.GAMEMASTERS)))
+                .executes(ctx -> {
+                    ctx.getSource().sendFeedback(() -> Text.literal("Use /voidclam help for syntax. Target = UUID (dashed or 32 hex) or three integers x y z (heart center)."), false);
+                    return 1;
+                })
+                .then(CommandManager.literal("help")
+                    .executes(ctx -> {
+                        ServerCommandSource s = ctx.getSource();
+                        s.sendFeedback(() -> Text.literal("Voidclam commands (OP 2). Target = UUID or x y z at heart."), false);
+                        s.sendFeedback(() -> Text.literal("make <x> <y> <z> — new clam"), false);
+                        s.sendFeedback(() -> Text.literal("kill <target>"), false);
+                        s.sendFeedback(() -> Text.literal("resize <size> <target> — size first"), false);
+                        s.sendFeedback(() -> Text.literal("repair <target> | reach <target> | grow <target>"), false);
+                        s.sendFeedback(() -> Text.literal("seek ores|lights|protect set <true|false> <target> — bool before target"), false);
+                        s.sendFeedback(() -> Text.literal("seek ores|lights|protect get <target>"), false);
+                        s.sendFeedback(() -> Text.literal("info [target] — list all (console) or nearest (player)"), false);
+                        s.sendFeedback(() -> Text.literal("save — write modules.siva (creates file) | ingestlegacy — import modules.siva into hearts"), false);
+                        s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping | testfile"), false);
+                        return 1;
+                    }))
                 .then(CommandManager.literal("make")
                     .then(CommandManager.argument("x", IntegerArgumentType.integer())
                         .then(CommandManager.argument("y", IntegerArgumentType.integer())
