@@ -228,8 +228,8 @@ public final class Pathfinder {
         return block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL;
     }
 
-    /** Build snapshot on main thread: BFS from start, max steps = light search radius (capped). Returns (pos -> type). */
-    private static Map<Long, Byte> buildContainerSnapshot(ServerWorld world, BlockPos start, int cSize) {
+    /** Build snapshot on main thread: BFS from start (typically break position), capped by max steps. Returns (pos -> type). */
+    private static Map<Long, Byte> buildContainerSnapshot(ServerWorld world, BlockPos start) {
         int maxSteps = CONTAINER_SNAPSHOT_MAX_STEPS; // light search radius volume is huge; cap to avoid main-thread hang
         Map<Long, Byte> map = new HashMap<>();
         Set<Long> seen = new HashSet<>();
@@ -423,7 +423,6 @@ public final class Pathfinder {
         while (firstNode.parent != null && blocked[0] == 0) {
             final Node refNode = firstNode;
             final long runAt = timer;
-            final int cSize = modules[gnode.tno].currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
                 if (blocked[0] != 0 || pathStopped[0] != 0) {
                     modForFlag.busyFlagMainCycle = 0;
@@ -442,8 +441,7 @@ public final class Pathfinder {
                     List<ItemStack> drops = getFortune3Drops(mat.getBlock());
                     if (!drops.isEmpty()) {
                         BlockPos breakPos = pos.toImmutable();
-                        BlockPos clamCenter = new BlockPos(mod.x, mod.y, mod.z);
-                        Map<Long, Byte> snapshot = buildContainerSnapshot(world, clamCenter, cSize);
+                        Map<Long, Byte> snapshot = buildContainerSnapshot(world, breakPos);
                         CommandToolbox.submitPathfinding(() -> {
                             List<Long> containers = runContainerBfsOnSnapshot(snapshot, breakPos.asLong());
                             world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, drops));
@@ -470,12 +468,10 @@ public final class Pathfinder {
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
                     pathStopped[0] = 1; // path stops; clam does not get energy; resume next attempt
                     ItemStack toStore = new ItemStack(mat.getBlock().asItem(), 1);
-                    BlockPos clamCenter = new BlockPos(mod.x, mod.y, mod.z);
-                    Map<Long, Byte> snapshot = buildContainerSnapshot(world, clamCenter, cSize);
                     BlockPos breakPos = pos.toImmutable();
-                    long clamCenterLong = clamCenter.asLong();
+                    Map<Long, Byte> snapshot = buildContainerSnapshot(world, breakPos);
                     CommandToolbox.submitPathfinding(() -> {
-                        List<Long> containers = runContainerBfsOnSnapshot(snapshot, clamCenterLong);
+                        List<Long> containers = runContainerBfsOnSnapshot(snapshot, breakPos.asLong());
                         world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, toStore));
                     });
                     modForFlag.busyFlagMainCycle = 0;
