@@ -94,6 +94,20 @@ public final class Pathfinder {
         return null;
     }
 
+    /**
+     * Half-extents for A* expansion and container snapshot BFS, in block units from module center.
+     * Must match {@link #calculatePath} bounds: ±4×{@code cSize} on X, ±5×{@code cSize} on Y and Z.
+     */
+    private static final int PATHFINDING_RANGE_XZ_HALF = 4;
+    private static final int PATHFINDING_RANGE_Y_HALF = 5;
+    private static final int PATHFINDING_RANGE_Z_HALF = 5;
+
+    private static boolean isWithinPathfindingRange(int x, int y, int z, int cx, int cy, int cz, int cSize) {
+        return Math.abs(x - cx) <= PATHFINDING_RANGE_XZ_HALF * cSize
+            && Math.abs(y - cy) <= PATHFINDING_RANGE_Y_HALF * cSize
+            && Math.abs(z - cz) <= PATHFINDING_RANGE_Z_HALF * cSize;
+    }
+
     public static boolean calculatePath(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
         Module[] modules = VoidClamMod.getModules();
@@ -153,10 +167,9 @@ public final class Pathfinder {
 
                 Node tempNode1 = nodeExists(open, nextNode);
                 Node tempNode2 = nodeExists(closed, nextNode);
-                if (tno <= moduleNumber && modules[tno] != null &&
-                    !(Math.abs(nextNode.x - modules[tno].x) > 4 * modules[tno].currentSize
-                        || Math.abs(nextNode.y - modules[tno].y) > 5 * modules[tno].currentSize
-                        || Math.abs(nextNode.z - modules[tno].z) > 5 * modules[tno].currentSize) &&
+                Module pathMod = modules[tno];
+                if (tno <= moduleNumber && pathMod != null &&
+                    isWithinPathfindingRange(nextNode.x, nextNode.y, nextNode.z, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize) &&
                     (tempNode1 == null || tempNode1.f > nextNode.f) &&
                     (tempNode2 == null || tempNode2.f > nextNode.f) &&
                     cst != 2500) {
@@ -214,8 +227,7 @@ public final class Pathfinder {
         return b;
     }
 
-    // --- Container logic: off-thread BFS, max range = light search radius (capped by step limit) ---
-    private static final int CONTAINER_SNAPSHOT_MAX_STEPS = 4096;
+    // --- Container logic: off-thread BFS within same AABB as calculatePath (see PATHFINDING_RANGE_*_HALF) ---
     private static final byte TYPE_OTHER = 0;
     private static final byte TYPE_NETHER_WART = 1;
     private static final byte TYPE_WARPED_WART = 2;
@@ -229,22 +241,20 @@ public final class Pathfinder {
     }
 
     /**
-     * Build snapshot on main thread: BFS from module center (clam core), capped by max steps. Returns (pos -> type).
+     * Build snapshot on main thread: BFS from module center (clam core), limited to the same axis-aligned box as {@link #calculatePath}.
      *
-     * @param cSize {@link Module#currentSize} at scheduling time; reserved if snapshot bounds are tied to clam size later (unused today).
+     * @param cSize {@link Module#currentSize} at scheduling time (bounds scale with this).
      */
     private static Map<Long, Byte> buildContainerSnapshot(ServerWorld world, BlockPos start, int cSize) {
-        int maxSteps = CONTAINER_SNAPSHOT_MAX_STEPS; // light search radius volume is huge; cap to avoid main-thread hang
+        int cx = start.getX(), cy = start.getY(), cz = start.getZ();
         Map<Long, Byte> map = new HashMap<>();
         Set<Long> seen = new HashSet<>();
         Queue<Long> queue = new ArrayDeque<>();
         long startLong = start.asLong();
         queue.add(startLong);
         seen.add(startLong);
-        int steps = 0;
-        while (!queue.isEmpty() && steps < maxSteps) {
+        while (!queue.isEmpty()) {
             long cur = queue.poll();
-            steps++;
             BlockPos pos = BlockPos.fromLong(cur);
             BlockState state = world.getBlockState(pos);
             byte type;
@@ -256,7 +266,9 @@ public final class Pathfinder {
             // From BFS root (clam center) we can step to neighbors even if that block isn't wart; else only step from wart
             if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
             for (int i = 0; i < 6; i++) {
-                long next = BlockPos.fromLong(cur).add(DX[i], DY[i], DZ[i]).asLong();
+                BlockPos nextPos = pos.add(DX[i], DY[i], DZ[i]);
+                if (!isWithinPathfindingRange(nextPos.getX(), nextPos.getY(), nextPos.getZ(), cx, cy, cz, cSize)) continue;
+                long next = nextPos.asLong();
                 if (seen.add(next)) queue.add(next);
             }
         }
