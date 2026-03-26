@@ -50,7 +50,7 @@ Runs on **main thread** from `tickTargets`.
 
 ## Container routing (off-thread BFS + main-thread apply)
 
-**Intended behavior:** Storage routing is anchored to the **module center** (clam core coordinates), not the block being broken. There is **no in-memory snapshot**: `Pathfinder.runContainerBfsOnWorld` runs on **`CommandToolbox.pathfinderExecutor`**, reading the **live `ServerWorld`** with the same rules as before (expand once from the center cell; continue only through nether / warped wart; same AABB as `calculatePath`: ±4×`currentSize` on X, ±5×`currentSize` on Y and Z). It returns container positions in **BFS order from the clam center**. The main thread applies via `world.getServer().execute` → `tryInsertInto` / barrel / wart.
+**Intended behavior:** Storage routing is anchored to the **module center** (clam core coordinates), not the block being broken. There is **no in-memory snapshot**: `Pathfinder.runContainerBfsOnWorld` runs on **`CommandToolbox.pathfinderExecutor`**, reading the **live `ServerWorld`** with the same rules as before (expand once from the center cell; continue only through nether wart; same AABB as `calculatePath`: ±4×`currentSize` on X, ±5×`currentSize` on Y and Z). It returns container positions in **BFS order from the clam center**. The main thread applies via `world.getServer().execute` → `tryInsertInto` / barrel / wart.
 
 **Pause / lock:** When a step needs container routing, **`busyFlagMainCycle` stays non-zero** until the executor finishes BFS **and** the main thread has run `applyContainerResult`. That blocks **`clamReach`** (and thus new targets) for that module. For **path-stopped** breaks (non-goal block with an item), earlier scheduled path steps along the same path would otherwise still run and clear the busy flag early; those steps **no-op** while waiting for the container apply (`pathStoppedAwaitingContainer`).
 
@@ -59,7 +59,7 @@ So “nearer” means **fewer graph steps from the clam center through wart (and
 **Situations where pre-placed “near” storage might be skipped or not receive items:**
 
 1. **Outside pathfinding range** — Storage beyond the `calculatePath` box (same limits as above) is never visited by the BFS, even if connected by wart outside that box.
-2. **No path inside the box** — Traversal continues only through nether wart, warped wart, and the root cell. A chest that is not adjacent to wart reachable from the center inside the box does not appear in the list.
+2. **No path inside the box** — Traversal continues only through nether wart and the root cell. A chest that is not adjacent to wart reachable from the center inside the box does not appear in the list.
 3. **Block not treated as storage** — Only `CHEST`, `TRAPPED_CHEST`, and `BARREL` are containers. Other inventories (e.g. shulker, hopper, decorated pot) are not candidates.
 4. **Insert failure** — `tryInsertInto` uses `Inventory` on the block entity; if the entity is missing or the inventory is not usable as expected, that position effectively does nothing and the stack may fall through to a barrel at the break position.
 5. **Concurrent breaks** — Each break schedules BFS from world state at that moment; ordering can differ under rapid changes, but should not systematically ignore center-near chests unless one of the above applies.

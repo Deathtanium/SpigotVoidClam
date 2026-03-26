@@ -237,7 +237,7 @@ public final class BlockBfs {
 
     /**
      * Multiple simultaneous BFS sources (e.g. one per module), one merged distance map (shortest wins),
-     * per-source visit caps, and global merged size cap. Same edge rule as omni pulse: only nether/warped wart, chunk loaded.
+     * per-source visit caps, and global merged size cap. Same edge rule as omni pulse: only nether wart, chunk loaded.
      */
     public static final class MergedOmniBfsJob {
         private final ServerWorld world;
@@ -279,7 +279,7 @@ public final class BlockBfs {
                         if (s.dist.containsKey(next)) continue;
                         if (!world.isChunkLoaded(next)) continue;
                         BlockState state = world.getBlockState(next);
-                        if (state.getBlock() != Blocks.NETHER_WART_BLOCK && state.getBlock() != Blocks.WARPED_WART_BLOCK)
+                        if (state.getBlock() != Blocks.NETHER_WART_BLOCK)
                             continue;
                         int nextDist = d + 1;
                         if (mergedResult.containsKey(next)) {

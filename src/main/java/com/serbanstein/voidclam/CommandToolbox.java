@@ -121,9 +121,7 @@ public final class CommandToolbox {
         if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
         Module m = modules[tno];
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
-        int ctype = m.type;
         net.minecraft.block.Block mat = Blocks.NETHER_WART_BLOCK;
-        if (ctype == 2) mat = Blocks.WARPED_WART_BLOCK;
         int csize = m.currentSize;
         int x = m.x, y = m.y, z = m.z;
         int timer = 0;

@@ -34,7 +34,7 @@ Every 5 minutes (overworld tick gate): if no grow already pending, snapshots see
 
 ## `clamReSize` (summary)
 
-- Schedules layered shell rebuild with nether wart (staggered delays), converts obsidian in old volume to wart/warped material by type, updates vertical spine, schedules final obsidian shell pass, sets `m.currentSize`, **saves**.
+- Schedules layered shell rebuild with nether wart (staggered delays), converts obsidian in old volume to nether wart, updates vertical spine, schedules final obsidian shell pass, sets `m.currentSize`, **saves**.
 
 ## Energy rules (summary)
 
