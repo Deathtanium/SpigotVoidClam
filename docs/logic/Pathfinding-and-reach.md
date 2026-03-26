@@ -17,8 +17,10 @@
 
 ## `calculatePath` (`Pathfinder`)
 
-- A\* on the 6-neighbor grid with custom edge costs (wart cheap, tile entities / very hard blocks cost `2500`, air/water over solid cheap, etc.).
-- Search is bounded roughly by **±4×currentSize** on X/Z and **±5×currentSize** on Y from module center (see conditions on `nextNode`).
+- **Reachability pre-pass:** Before A\*, a 6-neighbor **BFS** from the start cell checks whether the goal lies in the same connected component under the same search bounds and **hard impassability** rules as A\* (tile entities and blocks with hardness &gt; 5 are walls; wart is walkable). Movement **costs** are ignored—only disconnects from impassable cells. If there is no such path, `busyFlagMainCycle` is cleared and A\* is skipped (avoids exhausting the open set for caged targets).
+- **Performance note:** Today `calculatePath` is invoked from the pathfinder **worker** thread (`CommandToolbox.submitPathfinding`), same as A\*. If this pre-pass is ever called from the **server main thread** and proves too expensive for TPS, run it on worker threads the same way as A\*.
+- A\* on the 6-neighbor grid with custom edge costs (wart cheap, tile entities / very hard blocks cost `2500`, air/water over solid cheap, etc.). **Heuristic:** Manhattan distance to goal (`manhattanH`). **`g`** is cumulative edge cost with re-open when a cheaper path to a cell is found.
+- Search is bounded roughly by **±4×currentSize** on X/Z and **±5×currentSize** on Y from module center (per-neighbor checks before enqueue).
 - **Success:** Enqueue goal `Node` on `targets`; leave busy flag for `buildPath` to clear.
 - **Failure:** Set `busyFlagMainCycle = 0`.
 
@@ -36,9 +38,9 @@ Runs on **main thread** from `tickTargets`.
 
 - Set `blocked`; if the block was not air/water/lava, **blacklist the goal** for both lights and ores and **`addEnergy(tno, -1)`**.
 
-**Path stop (`pathStopped`):** If the step would replace a non-goal block that has a non-air item drop, the path **stops** (no energy change for that case): schedule container routing with a snapshot, clear busy flag.
+**Path stop (`pathStopped`):** If the step would replace a non-goal block that has a non-air item drop, the path **stops** (no energy change for that case): schedule off-thread container BFS + main-thread apply (see below); busy flag clears after apply.
 
-**Ore goal:** Fortune-3 style drops from `getFortune3Drops`, container BFS from snapshot, then replace or barrel; clear busy flag.
+**Ore goal:** Fortune-3 style drops from `getFortune3Drops`, off-thread container BFS, then replace or barrel; busy clears after apply (or immediately if no fortune drops).
 
 **Light goal:** Replacing the light with wart grants **`addEnergy(tno, 1)`**; clear busy flag on that final scheduled step.
 
@@ -56,11 +58,11 @@ So “nearer” means **fewer graph steps from the clam center through wart (and
 
 **Situations where pre-placed “near” storage might be skipped or not receive items:**
 
-1. **Outside pathfinding range** — Storage beyond the `calculatePath` box (same limits as above) is never included in the snapshot, even if connected by wart outside that box.
-2. **No path through the snapshot** — Traversal continues only through nether wart, warped wart, and the root cell. A chest that is not adjacent to wart reachable from the center inside the box does not appear in the list.
+1. **Outside pathfinding range** — Storage beyond the `calculatePath` box (same limits as above) is never visited by the BFS, even if connected by wart outside that box.
+2. **No path inside the box** — Traversal continues only through nether wart, warped wart, and the root cell. A chest that is not adjacent to wart reachable from the center inside the box does not appear in the list.
 3. **Block not treated as storage** — Only `CHEST`, `TRAPPED_CHEST`, and `BARREL` are containers. Other inventories (e.g. shulker, hopper, decorated pot) are not candidates.
 4. **Insert failure** — `tryInsertInto` uses `Inventory` on the block entity; if the entity is missing or the inventory is not usable as expected, that position effectively does nothing and the stack may fall through to a barrel at the break position.
-5. **Stale snapshot vs. concurrent breaks** — Each break schedules work from a snapshot taken when that step runs; rapid successive breaks can see slightly different world state ordering, but should not systematically ignore center-near chests unless one of the above applies.
+5. **Concurrent breaks** — Each break schedules BFS from world state at that moment; ordering can differ under rapid changes, but should not systematically ignore center-near chests unless one of the above applies.
 
 ## Related notes
 

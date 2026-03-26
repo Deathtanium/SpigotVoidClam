@@ -95,7 +95,7 @@ public final class Pathfinder {
     }
 
     /**
-     * Half-extents for A* expansion and container snapshot BFS, in block units from module center.
+     * Half-extents for A* expansion, reachability prepass, and container BFS, in block units from module center.
      * Must match {@link #calculatePath} bounds: ±4×{@code cSize} on X, ±5×{@code cSize} on Y and Z.
      */
     private static final int PATHFINDING_RANGE_XZ_HALF = 4;
@@ -108,42 +108,111 @@ public final class Pathfinder {
             && Math.abs(z - cz) <= PATHFINDING_RANGE_Z_HALF * cSize;
     }
 
+    /**
+     * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}).
+     */
+    private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
+        BlockState bl = world.getBlockState(pos);
+        if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(Blocks.WARPED_WART_BLOCK)) {
+            return false;
+        }
+        if (bl.getBlock() instanceof BlockEntityProvider) {
+            return true;
+        }
+        return getHardness(world, pos, bl) > 5;
+    }
+
+    private static boolean inPathfindSearchBounds(Module mod, int x, int y, int z) {
+        return isWithinPathfindingRange(x, y, z, mod.x, mod.y, mod.z, mod.currentSize);
+    }
+
+    /**
+     * 6-neighbor BFS from start within the same axis bounds as A*. Edges match A* impassability (cells with cost 2500 are walls).
+     * Ignores movement costs; only detects hard disconnects so unreachable goals skip the expensive A* search.
+     * <p>
+     * Today {@link #calculatePath} runs from a worker thread ({@link CommandToolbox#submitPathfinding}). If this prepass is ever
+     * invoked from the server main thread and proves too heavy for TPS, move it to the same executor pattern as A*.
+     */
+    private static boolean isGoalReachableByPrepass(
+        ServerWorld world,
+        int tno,
+        int sx, int sy, int sz,
+        int gx, int gy, int gz,
+        Module mod,
+        Module[] modules,
+        int moduleNumber
+    ) {
+        if (sx == gx && sy == gy && sz == gz) {
+            return true;
+        }
+        if (tno > moduleNumber || modules[tno] == null) {
+            return false;
+        }
+        long goalLong = BlockPos.asLong(gx, gy, gz);
+        long startLong = BlockPos.asLong(sx, sy, sz);
+        Set<Long> seen = new HashSet<>();
+        Queue<Long> queue = new ArrayDeque<>();
+        seen.add(startLong);
+        queue.add(startLong);
+        while (!queue.isEmpty()) {
+            long cur = queue.poll();
+            BlockPos curPos = BlockPos.fromLong(cur);
+            for (Cursor c : xc) {
+                int nx = curPos.getX() + c.x;
+                int ny = curPos.getY() + c.y;
+                int nz = curPos.getZ() + c.z;
+                long nextLong = BlockPos.asLong(nx, ny, nz);
+                if (nextLong == goalLong) {
+                    return true;
+                }
+                if (!inPathfindSearchBounds(mod, nx, ny, nz) || seen.contains(nextLong)) {
+                    continue;
+                }
+                BlockPos nextPos = new BlockPos(nx, ny, nz);
+                if (isPathfindCellImpassable(world, nextPos)) {
+                    continue;
+                }
+                seen.add(nextLong);
+                queue.add(nextLong);
+            }
+        }
+        return false;
+    }
+
+    /** Cheaper than Euclidean: no sqrt, O(1). Not admissible when edge costs can be 0 (e.g. wart). */
+    private static double manhattanH(int x, int y, int z, int gx, int gy, int gz) {
+        return Math.abs(x - gx) + Math.abs(y - gy) + Math.abs(z - gz);
+    }
+
     public static boolean calculatePath(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
         Module[] modules = VoidClamMod.getModules();
         Module modForFlag = modules[tno];
         if (modForFlag == null) return false;
+        int moduleNumber = VoidClamMod.getModuleNumber();
+        if (!isGoalReachableByPrepass(world, tno, sx, sy, sz, gx, gy, gz, modForFlag, modules, moduleNumber)) {
+            modForFlag.busyFlagMainCycle = 0;
+            return false;
+        }
         List<Node> open = new ArrayList<>();
         List<Node> closed = new ArrayList<>();
 
         Node firstNode = new Node(sx, sy, sz, null, tno);
         firstNode.g = 0;
-        firstNode.h = Math.pow(firstNode.x - gx, 2) + Math.pow(firstNode.y - gy, 2) + Math.pow(firstNode.z - gz, 2);
-        firstNode.f = firstNode.h;
+        firstNode.h = manhattanH(sx, sy, sz, gx, gy, gz);
+        firstNode.f = firstNode.g + firstNode.h;
         open.add(firstNode);
-
-        int moduleNumber = VoidClamMod.getModuleNumber();
 
         while (!open.isEmpty()) {
             Node nextCheapestNode = leastF(open);
             open.remove(nextCheapestNode);
 
             for (Cursor c : xc) {
-                Node nextNode = new Node(
-                    nextCheapestNode.x + c.x,
-                    nextCheapestNode.y + c.y,
-                    nextCheapestNode.z + c.z,
-                    nextCheapestNode,
-                    tno
-                );
+                int nx = nextCheapestNode.x + c.x;
+                int ny = nextCheapestNode.y + c.y;
+                int nz = nextCheapestNode.z + c.z;
 
-                if (nextNode.x == gx && nextNode.y == gy && nextNode.z == gz) {
-                    VoidClamMod.enqueueTarget(nextNode);
-                    //we do not reset the busy flag here, because if CommandToolbox.clamReach was called, the reset is handled there
-                    return true;
-                }
-
-                BlockPos nextPos = new BlockPos(nextNode.x, nextNode.y, nextNode.z);
+                BlockPos nextPos = new BlockPos(nx, ny, nz);
                 BlockState bl = world.getBlockState(nextPos);
                 double cst;
                 if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(Blocks.WARPED_WART_BLOCK)) {
@@ -161,20 +230,46 @@ public final class Pathfinder {
                     cst = 10 + getBlastResistance(bl);
                 }
 
-                nextNode.g = cst;
-                nextNode.h = Math.abs(nextNode.x - gx) + Math.abs(nextNode.y - gy) + Math.abs(nextNode.z - gz);
+                if (cst == 2500) {
+                    continue;
+                }
+
+                Module pathMod = modules[tno];
+                if (tno > moduleNumber || pathMod == null
+                    || !isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
+                    continue;
+                }
+
+                double tentativeG = nextCheapestNode.g + cst;
+                Node probe = new Node(nx, ny, nz, nextCheapestNode, tno);
+                Node inOpen = nodeExists(open, probe);
+                Node inClosed = nodeExists(closed, probe);
+                if (inOpen != null && tentativeG >= inOpen.g) {
+                    continue;
+                }
+                if (inClosed != null && tentativeG >= inClosed.g) {
+                    continue;
+                }
+
+                if (inOpen != null) {
+                    open.remove(inOpen);
+                }
+                if (inClosed != null) {
+                    closed.remove(inClosed);
+                }
+
+                Node nextNode = new Node(nx, ny, nz, nextCheapestNode, tno);
+                nextNode.g = tentativeG;
+                nextNode.h = manhattanH(nx, ny, nz, gx, gy, gz);
                 nextNode.f = nextNode.g + nextNode.h;
 
-                Node tempNode1 = nodeExists(open, nextNode);
-                Node tempNode2 = nodeExists(closed, nextNode);
-                Module pathMod = modules[tno];
-                if (tno <= moduleNumber && pathMod != null &&
-                    isWithinPathfindingRange(nextNode.x, nextNode.y, nextNode.z, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize) &&
-                    (tempNode1 == null || tempNode1.f > nextNode.f) &&
-                    (tempNode2 == null || tempNode2.f > nextNode.f) &&
-                    cst != 2500) {
-                    open.add(nextNode);
+                if (nx == gx && ny == gy && nz == gz) {
+                    VoidClamMod.enqueueTarget(nextNode);
+                    //we do not reset the busy flag here, because if CommandToolbox.clamReach was called, the reset is handled there
+                    return true;
                 }
+
+                open.add(nextNode);
             }
             closed.add(nextCheapestNode);
         }
