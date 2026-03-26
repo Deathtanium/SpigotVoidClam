@@ -24,8 +24,9 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 
 public final class Pathfinder {
-    private static BlockBfs.AbortChecker asyncPathfindingShutdownAbortChecker() {
-        return (w, posLong, distanceFromStart) -> VoidClamMod.isAsyncPathfindingShutdownRequested();
+    private static BlockBfs.AbortChecker asyncPathfindingAbortChecker(ServerWorld world, int clamCenterX, int clamCenterZ) {
+        return (w, posLong, distanceFromStart) ->
+            VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ);
     }
 
     static final List<Cursor> xc = new ArrayList<>();
@@ -164,7 +165,7 @@ public final class Pathfinder {
             BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
             null,
             null,
-            asyncPathfindingShutdownAbortChecker(),
+            asyncPathfindingAbortChecker(world, mod.x, mod.z),
             goalLong
         );
         bfs.runToCompletionOnCurrentThread();
@@ -197,7 +198,7 @@ public final class Pathfinder {
 
         long astarIterations = 0;
         while (!open.isEmpty()) {
-            if ((astarIterations++ & 0x3FF) == 0 && VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+            if ((astarIterations++ & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z)) {
                 modForFlag.busyFlagMainCycle = 0;
                 return false;
             }
@@ -261,7 +262,7 @@ public final class Pathfinder {
                 nextNode.f = nextNode.g + nextNode.h;
 
                 if (nx == gx && ny == gy && nz == gz) {
-                    if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z)) {
                         modForFlag.busyFlagMainCycle = 0;
                         return false;
                     }
@@ -371,7 +372,7 @@ public final class Pathfinder {
             executionMode,
             executor,
             onComplete,
-            asyncPathfindingShutdownAbortChecker(),
+            asyncPathfindingAbortChecker(world, cx, cz),
             BlockBfs.NO_EARLY_GOAL,
             (w, posLong, d) -> {
                 BlockState state = w.getBlockState(BlockPos.fromLong(posLong));
@@ -551,16 +552,26 @@ public final class Pathfinder {
                         BlockPos breakPos = pos.toImmutable();
                         long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
                         int mx = mod.x, my = mod.y, mz = mod.z;
-                        CommandToolbox.submitPathfinding(() -> {
-                            List<Long> containers = new ArrayList<>();
-                            runContainerBfsOnWorld(
-                                world, mx, my, mz, cSize, clamCenterLong, containers,
-                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
-                            world.getServer().execute(() -> {
-                                applyContainerResult(world, containers, breakPos, drops);
-                                modForFlag.busyFlagMainCycle = 0;
-                            });
-                        });
+                        CommandToolbox.submitPathfinding(
+                            world,
+                            mx,
+                            mz,
+                            () -> modForFlag.busyFlagMainCycle = 0,
+                            () -> {
+                                List<Long> containers = new ArrayList<>();
+                                runContainerBfsOnWorld(
+                                    world, mx, my, mz, cSize, clamCenterLong, containers,
+                                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
+                                world.getServer().execute(() -> {
+                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z)) {
+                                        modForFlag.busyFlagMainCycle = 0;
+                                        return;
+                                    }
+                                    applyContainerResult(world, containers, breakPos, drops);
+                                    modForFlag.busyFlagMainCycle = 0;
+                                });
+                            }
+                        );
                     } else {
                         replaceWithWartAndPulse(world, pos);
                         modForFlag.busyFlagMainCycle = 0;
@@ -587,17 +598,31 @@ public final class Pathfinder {
                     BlockPos breakPos = pos.toImmutable();
                     long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
                     int mx = mod.x, my = mod.y, mz = mod.z;
-                    CommandToolbox.submitPathfinding(() -> {
-                        List<Long> containers = new ArrayList<>();
-                        runContainerBfsOnWorld(
-                            world, mx, my, mz, cSize, clamCenterLong, containers,
-                            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
-                        world.getServer().execute(() -> {
-                            applyContainerResult(world, containers, breakPos, toStore);
+                    CommandToolbox.submitPathfinding(
+                        world,
+                        mx,
+                        mz,
+                        () -> {
                             pathStoppedAwaitingContainer[0] = 0;
                             modForFlag.busyFlagMainCycle = 0;
-                        });
-                    });
+                        },
+                        () -> {
+                            List<Long> containers = new ArrayList<>();
+                            runContainerBfsOnWorld(
+                                world, mx, my, mz, cSize, clamCenterLong, containers,
+                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
+                            world.getServer().execute(() -> {
+                                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z)) {
+                                    pathStoppedAwaitingContainer[0] = 0;
+                                    modForFlag.busyFlagMainCycle = 0;
+                                    return;
+                                }
+                                applyContainerResult(world, containers, breakPos, toStore);
+                                pathStoppedAwaitingContainer[0] = 0;
+                                modForFlag.busyFlagMainCycle = 0;
+                            });
+                        }
+                    );
                     return;
                 }
 

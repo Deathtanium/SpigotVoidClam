@@ -21,10 +21,23 @@ public final class CommandToolbox {
      */
     private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
 
-    /** Run pathfinding off-thread (used by clamReach and container BFS). */
-    public static void submitPathfinding(Runnable task) {
+    /**
+     * Run pathfinding off-thread (used by clamReach and container BFS). Skips the task if shutdown is requested or the clam
+     * center chunk is not loaded (see {@link VoidClamMod#shouldAbortAsyncPathfindingWork}). When skipped, runs
+     * {@code onAbortedBeforeRun} if non-null (e.g. clear {@code busyFlagMainCycle}).
+     */
+    public static void submitPathfinding(
+        ServerWorld world,
+        int clamCenterX,
+        int clamCenterZ,
+        Runnable onAbortedBeforeRun,
+        Runnable task
+    ) {
         pathfinderExecutor.execute(() -> {
-            if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ)) {
+                if (onAbortedBeforeRun != null) {
+                    onAbortedBeforeRun.run();
+                }
                 return;
             }
             task.run();
@@ -210,13 +223,13 @@ public final class CommandToolbox {
         if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
         Module m = modules[tno];
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
-        if (VoidClamMod.isAsyncPathfindingShutdownRequested()) return;
+        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z)) return;
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
-        submitPathfinding(() -> {
+        submitPathfinding(world, m.x, m.z, () -> m.busyFlagMainCycle = 0, () -> {
             try {
-                if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z)) {
                     m.busyFlagMainCycle = 0;
                     return;
                 }
@@ -233,7 +246,7 @@ public final class CommandToolbox {
                     for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
                         for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
                             for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z)) {
                                     break outerScan;
                                 }
                                 BlockPos pos = new BlockPos(ix, iy, iz);
@@ -250,7 +263,7 @@ public final class CommandToolbox {
                             }
                         }
                     }
-                    if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z)) {
                         m.busyFlagMainCycle = 0;
                         return;
                     }
@@ -265,7 +278,7 @@ public final class CommandToolbox {
                     m.oresBlackList.add(closest.toImmutable());
                 }
 
-                if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z)) {
                     if (closest != null) {
                         if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
                             m.lightsBlackList.remove(closest.toImmutable());

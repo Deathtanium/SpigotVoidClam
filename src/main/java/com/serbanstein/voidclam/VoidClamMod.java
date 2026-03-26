@@ -34,7 +34,7 @@ public final class VoidClamMod {
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
     /**
-     * When true, off-thread pathfinding work ({@link CommandToolbox#submitPathfinding}) should exit promptly and must not enqueue
+     * When true, off-thread pathfinding work ({@code CommandToolbox.submitPathfinding}) should exit promptly and must not enqueue
      * new main-thread effects. Set during {@link net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents#SERVER_STOPPING}
      * so the pathfinder pool can drain before save; cleared when a new server session starts.
      */
@@ -94,6 +94,15 @@ public final class VoidClamMod {
 
     public static boolean isAsyncPathfindingShutdownRequested() {
         return asyncPathfindingShutdownRequested;
+    }
+
+    /**
+     * Off-thread pathfinding for a module should stop when the server is shutting down or the clam center chunk is unloaded.
+     * Use the module's center X/Z (same chunk check as {@link #isModuleInLoadedChunk(ServerWorld, int)}).
+     */
+    public static boolean shouldAbortAsyncPathfindingWork(ServerWorld world, int clamCenterX, int clamCenterZ) {
+        if (asyncPathfindingShutdownRequested) return true;
+        return !world.isChunkLoaded(clamCenterX >> 4, clamCenterZ >> 4);
     }
 
     /** New server session: allow pathfinding tasks again (mod entry, before load). */

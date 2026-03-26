@@ -36,7 +36,7 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 
 | Symbol | Role |
 |--------|------|
-| `pathfinderExecutor`, `submitPathfinding` | Off-thread work |
+| `pathfinderExecutor`, `submitPathfinding(world, cx, cz, onAbort, task)` | Off-thread work; abort if shutdown or clam chunk unloaded |
 | `buildStub` | Initial shape with staggered wart/obsidian |
 | `buildShell` | Octahedral shell of arbitrary material |
 | `clamReSize` | Animated resize/repair |

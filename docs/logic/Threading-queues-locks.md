@@ -9,18 +9,23 @@
 
 **Caveat:** Vanilla `ServerWorld` is not documented as safe for arbitrary concurrent reads; the design matches historical behavior. Safer ports may snapshot chunk sections or confine reads to the main thread.
 
-## Async pathfinding shutdown flag
+## Async pathfinding abort conditions
 
-- **API**: `VoidClamMod.isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
-- **Set**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). It sets the flag, **shuts down and awaits** the pathfinder executor (with timeout + `shutdownNow`), **replaces** the pool for a possible next world in the same JVM, and clears every module’s `busyFlagMainCycle` so nothing stays “stuck busy” after skipped queue entries.
-- **Cleared**: `VoidClamMod.onAsyncPathfindingSessionStart()` at `SERVER_STARTED` (before `load`).
-- **Where it is polled**:
-  - `CommandToolbox.submitPathfinding` wrapper (skips running new work if already shut down),
-  - `clamReach` (early return; periodic checks in the light/ore scan),
+Work tied to a specific module stops when **either** the server is stopping **or** that module’s **center chunk is unloaded** (same check as `isModuleInLoadedChunk`: `world.isChunkLoaded(cx >> 4, cz >> 4)` for the module’s X/Z).
+
+- **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ)` — true when `isAsyncPathfindingShutdownRequested()` **or** the center chunk is not loaded.
+- **Shutdown flag**: `isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
+- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). It sets the flag, **shuts down and awaits** the pathfinder executor (with timeout + `shutdownNow`), **replaces** the pool for a possible next world in the same JVM, and clears every module’s `busyFlagMainCycle` so nothing stays “stuck busy” after skipped queue entries.
+- **Cleared (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStart()` at `SERVER_STARTED` (before `load`).
+- **`submitPathfinding`**: Takes `world`, clam center X/Z, `onAbortedBeforeRun`, and the task. If abort is true when the runnable would run, it invokes `onAbortedBeforeRun` (e.g. clear `busyFlagMainCycle` / `pathStoppedAwaitingContainer`) and returns without running the task body.
+- **Where abort is polled**:
+  - `CommandToolbox.submitPathfinding` (before task body),
+  - `clamReach` (before submit; periodic checks in the light/ore scan),
   - `Pathfinder.calculatePath` (A* loop + goal enqueue guard),
-  - `Pathfinder.isGoalReachableByPrepass` / `runContainerBfsOnWorld` via `BlockBfs.AbortChecker`.
+  - `Pathfinder.isGoalReachableByPrepass` / `runContainerBfsOnWorld` via `BlockBfs.AbortChecker`,
+  - Main-thread `applyContainerResult` path after container BFS (via `world.getServer().execute`): skips applying if the clam center chunk unloaded or shutdown.
 
-**Porting:** Any new off-thread VoidClam work should use the same flag (or extend it) so shutdown does not enqueue world mutations after the server has begun stopping.
+**Porting:** Any new off-thread VoidClam work should use `shouldAbortAsyncPathfindingWork` (or equivalent) so work does not continue for an unloaded clam or after shutdown has begun.
 
 ## `targets` queue
 
