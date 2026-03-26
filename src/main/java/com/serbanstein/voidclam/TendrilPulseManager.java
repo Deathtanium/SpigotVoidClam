@@ -5,6 +5,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.entity.data.TrackedData;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -42,7 +43,7 @@ public final class TendrilPulseManager {
     private static final int MAX_OMNI_BFS_PER_MODULE = Integer.MAX_VALUE;
     private static final int MAX_OMNI_TOTAL_BLOCKS = Integer.MAX_VALUE;
     private static final int OMNI_TICKS_PER_STEP = 2;
-    /** Max BFS node expansions per tick so omni pulse doesn't block main thread. */
+    /** Max BFS node expansions per tick so omni pulse doesn't block main thread (sync batched mode uses 25% of this). */
     private static final int OMNI_BFS_BATCH_PER_TICK = 300;
 
     /** Entity tag persisted by vanilla in NBT (Tags); used to identify our tendril block displays after restart. */
@@ -137,6 +138,8 @@ public final class TendrilPulseManager {
 
     /** Incremental omni-pulse BFS job: runs over multiple ticks so main thread doesn't block. */
     private static volatile BlockBfs.MergedOmniBfsJob omniPulseJob = null;
+    /** When {@link VoidClamConfig.BfsMode#ASYNC}: full omni graph runs on {@link CommandToolbox#pathfindingExecutor()}. */
+    private static volatile boolean omniAsyncRunning = false;
 
     /**
      * Run an omnidirectional pulse: starts an incremental BFS job if none is running.
@@ -144,7 +147,7 @@ public final class TendrilPulseManager {
      */
     public static void runOmnidirectionalPulse(ServerWorld world) {
         if (!VoidClamConfig.get().vfx_enabled) return;
-        if (omniPulseJob != null) return;
+        if (omniPulseJob != null || omniAsyncRunning) return;
         List<BlockBfs.MergedOmniBfsJob.SingleSource> bfsList = new ArrayList<>();
         for (Module m : VoidClamMod.getAllModules()) {
             if (m == null || m.status != 1) continue;
@@ -156,19 +159,31 @@ public final class TendrilPulseManager {
             bfsList.add(new BlockBfs.MergedOmniBfsJob.SingleSource(center.asLong(), MAX_OMNI_BFS_PER_MODULE));
         }
         if (bfsList.isEmpty()) return;
+        if (VoidClamConfig.get().bfsModeEnum() == VoidClamConfig.BfsMode.ASYNC) {
+            MinecraftServer server = world.getServer();
+            omniAsyncRunning = true;
+            CommandToolbox.pathfindingExecutor().execute(() -> {
+                try {
+                    BlockBfs.MergedOmniBfsJob job = new BlockBfs.MergedOmniBfsJob(world, bfsList);
+                    while (!job.isDone()) {
+                        job.step(Integer.MAX_VALUE, MAX_OMNI_TOTAL_BLOCKS);
+                    }
+                    Map<BlockPos, Integer> result = job.getMergedResult();
+                    server.execute(() -> {
+                        omniAsyncRunning = false;
+                        scheduleOmniPulsesFromMergedResult(world, result);
+                    });
+                } catch (Throwable t) {
+                    server.execute(() -> omniAsyncRunning = false);
+                    throw t;
+                }
+            });
+            return;
+        }
         omniPulseJob = new BlockBfs.MergedOmniBfsJob(world, bfsList);
     }
 
-    /**
-     * Call every server tick (overworld). Advances the omni-pulse BFS by a batch; when done, schedules all pulses and clears the job.
-     */
-    public static void tickOmniPulseJob(ServerWorld world) {
-        BlockBfs.MergedOmniBfsJob job = omniPulseJob;
-        if (job == null) return;
-        job.step(OMNI_BFS_BATCH_PER_TICK, MAX_OMNI_TOTAL_BLOCKS);
-        if (!job.isDone()) return;
-        Map<BlockPos, Integer> result = job.getMergedResult();
-        omniPulseJob = null;
+    private static void scheduleOmniPulsesFromMergedResult(ServerWorld world, Map<BlockPos, Integer> result) {
         for (Map.Entry<BlockPos, Integer> e : result.entrySet()) {
             BlockPos pos = e.getKey();
             int distance = e.getValue();
@@ -182,6 +197,20 @@ public final class TendrilPulseManager {
                 startPulse(world, pos, state, packed, () -> {}, INITIAL_SCALE_OMNI);
             });
         }
+    }
+
+    /**
+     * Call every server tick (overworld). Advances the omni-pulse BFS by a batch; when done, schedules all pulses and clears the job.
+     */
+    public static void tickOmniPulseJob(ServerWorld world) {
+        BlockBfs.MergedOmniBfsJob job = omniPulseJob;
+        if (job == null) return;
+        int batch = Math.max(1, OMNI_BFS_BATCH_PER_TICK / 4);
+        job.step(batch, MAX_OMNI_TOTAL_BLOCKS);
+        if (!job.isDone()) return;
+        Map<BlockPos, Integer> result = job.getMergedResult();
+        omniPulseJob = null;
+        scheduleOmniPulsesFromMergedResult(world, result);
     }
 
     @SuppressWarnings("unchecked")

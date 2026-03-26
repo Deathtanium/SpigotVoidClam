@@ -24,6 +24,17 @@ public final class VoidClamConfig {
         ASYNC
     }
 
+    /**
+     * How BFS-heavy work is scheduled: incremental on the server thread vs a background executor.
+     * Applies to omnidirectional pulse graph and storage container discovery only. Path reachability prepass
+     * always runs on the same thread as the A* work unit (server tick job or pathfinder worker) and is not
+     * affected by this setting, so async A* still does prepass then A* back-to-back on one worker with early exit.
+     */
+    public enum BfsMode {
+        SYNC_BATCHED,
+        ASYNC
+    }
+
     /** Try to spawn voidclams in freshly generated chunks. */
     public boolean clam_spawn_natural = false;
     /** Only if {@link #clam_spawn_natural}: {@code default} or {@code dungeon}. */
@@ -38,6 +49,8 @@ public final class VoidClamConfig {
     public boolean clam_protect_itself_default = true;
 
     public String astar_mode = "async";
+    /** {@code sync_batched} or {@code async} — see {@link BfsMode}. */
+    public String bfs_mode = "sync_batched";
     /**
      * Total A* node expansions per tick shared across all clams in {@link AstarMode#SYNC_BATCHED}.
      * 0 = estimate from available processors.
@@ -103,6 +116,11 @@ public final class VoidClamConfig {
         if (sfx_volume_multiplier < 0) sfx_volume_multiplier = 0;
         if (astar_sync_global_max_steps_per_tick < 0) astar_sync_global_max_steps_per_tick = 0;
         if (astar_async_global_max_threads < 0) astar_async_global_max_threads = 0;
+        if (bfs_mode != null && bfs_mode.equalsIgnoreCase("async")) {
+            bfs_mode = "async";
+        } else {
+            bfs_mode = "sync_batched";
+        }
     }
 
     public NaturalSpawnMethod naturalSpawnMethodEnum() {
@@ -119,12 +137,32 @@ public final class VoidClamConfig {
         return AstarMode.ASYNC;
     }
 
-    public int effectiveSyncMaxStepsPerTick() {
-        if (astar_sync_global_max_steps_per_tick > 0) {
-            return astar_sync_global_max_steps_per_tick;
+    public BfsMode bfsModeEnum() {
+        if (bfs_mode != null && bfs_mode.equalsIgnoreCase("async")) {
+            return BfsMode.ASYNC;
         }
-        int n = Math.max(1, Runtime.getRuntime().availableProcessors());
-        return n * 512;
+        return BfsMode.SYNC_BATCHED;
+    }
+
+    public BlockBfs.ExecutionMode bfsBlockBfsExecutionMode() {
+        return bfsModeEnum() == BfsMode.ASYNC
+            ? BlockBfs.ExecutionMode.BACKGROUND
+            : BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED;
+    }
+
+    /**
+     * Global A* + prepass BFS expansion budget per server tick for {@link AstarMode#SYNC_BATCHED}.
+     * Reduced to 25% of the configured/estimated value (75% reduction) to lower main-thread load.
+     */
+    public int effectiveSyncMaxStepsPerTick() {
+        int base;
+        if (astar_sync_global_max_steps_per_tick > 0) {
+            base = astar_sync_global_max_steps_per_tick;
+        } else {
+            int n = Math.max(1, Runtime.getRuntime().availableProcessors());
+            base = n * 512;
+        }
+        return Math.max(1, base / 4);
     }
 
     public int effectiveAsyncThreadPoolSize() {

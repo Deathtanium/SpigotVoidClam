@@ -37,6 +37,15 @@ public final class Pathfinder {
         syncAStarFairness.clear();
     }
 
+    /** Remove queued sync A* jobs for one clam (e.g. before {@link CommandToolbox#clamReSize}). */
+    public static void clearSyncAStarJobsForClam(@org.jetbrains.annotations.Nullable java.util.UUID clamId) {
+        if (clamId == null) {
+            return;
+        }
+        syncAStarJobs.removeIf(job -> clamId.equals(job.clamId));
+        syncAStarFairness.removeIf(job -> clamId.equals(job.clamId));
+    }
+
     /**
      * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncAStarJobs}.
      */
@@ -66,6 +75,11 @@ public final class Pathfinder {
                 continue;
             }
             if (!syncAStarJobs.contains(job)) {
+                continue;
+            }
+            Module pauseMod = VoidClamMod.getModuleById(job.clamId);
+            if (!VoidClamMod.isPathfindingAllowedYet(job.worldRef, pauseMod)) {
+                syncAStarFairness.addLast(job);
                 continue;
             }
             int used = job.step(job.worldRef, globalStepBudget);
@@ -166,6 +180,7 @@ public final class Pathfinder {
             boolean reachable = prepassBfs.isEarlyGoalNeighborHit();
             prepassBfs = null;
             if (!reachable) {
+                VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
                 finishFail(modForFlag);
                 return used;
             }
@@ -211,7 +226,7 @@ public final class Pathfinder {
         private void finishFail(Module modForFlag) {
             phase = AStarPhase.DONE;
             if (modForFlag != null) {
-                modForFlag.busyFlagMainCycle = 0;
+                VoidClamMod.releasePathfindingMainCycle(modForFlag);
             }
         }
     }
@@ -258,15 +273,19 @@ public final class Pathfinder {
                 cst = 0;
             } else if (bl.getBlock() instanceof BlockEntityProvider) {
                 cst = 2500;
-            } else if (getHardness(world, nextPos, bl) > 5) {
-                cst = 2500;
-            } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, nextPos) && isSolid(world, nextPos.down()))) {
-                cst = 1;
-            } else if (isAirLike(bl, world, nextPos)) {
-                int b = countAdjacentNotWaterAirWart(world, nextPos);
-                cst = 6 - b;
             } else {
-                cst = 10 + getBlastResistance(bl);
+                float hard = getHardness(world, nextPos, bl);
+                // Negative hardness: bedrock, barrier, etc. Impervious to break; do not path or apply as diggable.
+                if (hard > 5 || hard < 0) {
+                    cst = 2500;
+                } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, nextPos) && isSolid(world, nextPos.down()))) {
+                    cst = 1;
+                } else if (isAirLike(bl, world, nextPos)) {
+                    int b = countAdjacentNotWaterAirWart(world, nextPos);
+                    cst = 6 - b;
+                } else {
+                    cst = 10 + getBlastResistance(bl);
+                }
             }
 
             if (cst == 2500) {
@@ -303,6 +322,9 @@ public final class Pathfinder {
 
             if (nx == gx && ny == gy && nz == gz) {
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
+                    return AStarExpandResult.ABORT;
+                }
+                if (modForFlag.busyFlagMainCycle == 0) {
                     return AStarExpandResult.ABORT;
                 }
                 VoidClamMod.enqueueTarget(nextNode);
@@ -411,13 +433,14 @@ public final class Pathfinder {
      */
     private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
         BlockState bl = world.getBlockState(pos);
-            if (VoidClamCoreBlocks.isWartOrCore(bl)) {
-                return false;
-            }
-            if (bl.getBlock() instanceof BlockEntityProvider) {
-                return true;
-            }
-        return getHardness(world, pos, bl) > 5;
+        if (VoidClamCoreBlocks.isWartOrCore(bl)) {
+            return false;
+        }
+        if (bl.getBlock() instanceof BlockEntityProvider) {
+            return true;
+        }
+        float h = getHardness(world, pos, bl);
+        return h > 5 || h < 0;
     }
 
     private static boolean inPathfindSearchBounds(Module mod, int x, int y, int z) {
@@ -428,8 +451,10 @@ public final class Pathfinder {
      * 6-neighbor BFS from start within the same axis bounds as A*. Edges match A* impassability (cells with cost 2500 are walls).
      * Ignores movement costs; only detects hard disconnects so unreachable goals skip the expensive A* search.
      * <p>
-     * Today {@link #calculatePath} runs from a worker thread ({@link CommandToolbox#submitPathfinding}). If this prepass is ever
-     * invoked from the server main thread and proves too heavy for TPS, move it to the same executor pattern as A*.
+     * Runs to completion on the <strong>invoking</strong> thread: for async A* that is the same pathfinder worker that
+     * then runs {@link #calculatePath}'s main loop, so prepass and A* share one thread with an early return if unreachable.
+     * {@code bfs_mode} does not apply here — only {@link BlockBfs.ExecutionMode#MAIN_THREAD_BATCHED} is used so prepass is
+     * never nested as {@link BlockBfs.ExecutionMode#BACKGROUND} on the pathfinder pool (deadlock risk).
      */
     private static boolean isGoalReachableByPrepass(
         ServerWorld world,
@@ -470,21 +495,37 @@ public final class Pathfinder {
         return Math.abs(x - gx) + Math.abs(y - gy) + Math.abs(z - gz);
     }
 
+    /**
+     * {@link VoidClamConfig.AstarMode#SYNC_BATCHED}: enqueues a server-tick job whose prepass and A* steps share the main thread.
+     * {@link VoidClamConfig.AstarMode#ASYNC}: pathfinder worker runs prepass BFS then the A* loop on that same thread; unreachable
+     * prepass clears {@code busyFlagMainCycle} and returns before building the open list. {@code bfs_mode} does not change prepass.
+     */
     public static boolean calculatePath(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
-        if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
+        if (!world.isChunkLoaded(sx >> 4, sz >> 4)) {
+            Module early = VoidClamMod.getModuleById(clamId);
+            if (early != null) {
+                VoidClamMod.releasePathfindingMainCycle(early);
+            }
+            return false;
+        }
         Module modForFlag = VoidClamMod.getModuleById(clamId);
         if (modForFlag == null) return false;
         if (modForFlag.status != 1) {
-            modForFlag.busyFlagMainCycle = 0;
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
         }
         modForFlag.ensureClamId();
+        if (!VoidClamMod.isPathfindingAllowedYet(world, modForFlag)) {
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
+            return false;
+        }
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
             return true;
         }
         if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag)) {
-            modForFlag.busyFlagMainCycle = 0;
+            VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
         }
         List<Node> open = new ArrayList<>();
@@ -502,18 +543,18 @@ public final class Pathfinder {
                 world, pathCid, gx, gy, gz, modForFlag, open, closed, astarIterations);
             astarIterations++;
             if (r == AStarExpandResult.ABORT) {
-                modForFlag.busyFlagMainCycle = 0;
+                VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return false;
             }
             if (r == AStarExpandResult.SUCCESS) {
                 return true;
             }
             if (r == AStarExpandResult.NO_PATH) {
-                modForFlag.busyFlagMainCycle = 0;
+                VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return false;
             }
         }
-        modForFlag.busyFlagMainCycle = 0;
+        VoidClamMod.releasePathfindingMainCycle(modForFlag);
         return false;
     }
 
@@ -569,11 +610,9 @@ public final class Pathfinder {
     /**
      * BFS from {@code startLong} (clam center) over the live world. Same traversal rules as before: expand from root once;
      * otherwise only through nether wart. Bounded by the same AABB as {@link #calculatePath}.
-     * Appends container positions to {@code containersOut} via {@link BlockBfs}.
-     *
-     * @param executionMode {@link BlockBfs.ExecutionMode#MAIN_THREAD_BATCHED} drains on the current thread (e.g. inside
-     *                      {@link CommandToolbox#submitPathfinding}); {@link BlockBfs.ExecutionMode#BACKGROUND} runs on {@code executor}
-     *                      and invokes {@code onComplete} on that executor thread when done.
+     * Appends container positions to {@code containersOut} via {@link BlockBfs} (use a synchronized list if
+     * {@link VoidClamConfig#bfsBlockBfsExecutionMode()} is {@link BlockBfs.ExecutionMode#BACKGROUND}).
+     * When finished, queues {@code onCompleteOnServerThread} on the server thread.
      */
     private static void runContainerBfsOnWorld(
         ServerWorld world,
@@ -583,10 +622,8 @@ public final class Pathfinder {
         int cSize,
         long startLong,
         List<Long> containersOut,
-        BlockBfs.ExecutionMode executionMode,
-        Executor executor,
-        Runnable onComplete,
-        @org.jetbrains.annotations.Nullable UUID pathfindingClamId
+        @org.jetbrains.annotations.Nullable UUID pathfindingClamId,
+        Runnable onCompleteOnServerThread
     ) {
         BlockBfs.EdgePolicy containerPolicy = new BlockBfs.EdgePolicy() {
             @Override
@@ -602,14 +639,19 @@ public final class Pathfinder {
                 return isWithinPathfindingRange(p.getX(), p.getY(), p.getZ(), cx, cy, cz, cSize);
             }
         };
+        BlockBfs.ExecutionMode mode = VoidClamConfig.get().bfsBlockBfsExecutionMode();
+        Executor bgExec = mode == BlockBfs.ExecutionMode.BACKGROUND ? CommandToolbox.pathfindingExecutor() : null;
+        Runnable bgDone = mode == BlockBfs.ExecutionMode.BACKGROUND
+            ? () -> world.getServer().execute(onCompleteOnServerThread)
+            : null;
         BlockBfs bfs = BlockBfs.start(
             world,
             startLong,
             containerPolicy,
             Integer.MAX_VALUE,
-            executionMode,
-            executor,
-            onComplete,
+            mode,
+            bgExec,
+            bgDone,
             asyncPathfindingAbortChecker(world, cx, cz, pathfindingClamId),
             BlockBfs.NO_EARLY_GOAL,
             (w, posLong, d) -> {
@@ -619,8 +661,9 @@ public final class Pathfinder {
                 }
             }
         );
-        if (executionMode == BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED) {
+        if (mode == BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED) {
             bfs.runToCompletionOnCurrentThread();
+            world.getServer().execute(onCompleteOnServerThread);
         }
     }
 
@@ -731,25 +774,34 @@ public final class Pathfinder {
         final int pathOriginY = mod.y;
         final int pathOriginZ = mod.z;
         final Module modForFlag = mod;
+        if (modForFlag.busyFlagMainCycle == 0) {
+            return;
+        }
         if (gnode.f >= 2500) {
-            modForFlag.busyFlagMainCycle = 0;
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
         if (!world.isChunkLoaded(mod.x >> 4, mod.z >> 4)) {
-            modForFlag.busyFlagMainCycle = 0;
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
         // Skip if this goal was enqueued before seek flags were turned off
         BlockPos goalPos = new BlockPos(gnode.x, gnode.y, gnode.z);
         net.minecraft.block.Block goalBlock = world.getBlockState(goalPos).getBlock();
         if (VoidClamMod.isOre(goalBlock) && !mod.seekOres) {
-            modForFlag.busyFlagMainCycle = 0;
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
         if (VoidClamMod.isLight(goalBlock) && !mod.seekLights) {
-            modForFlag.busyFlagMainCycle = 0;
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
+        int pathSteps = 0;
+        for (Node c = gnode; c.parent != null; c = c.parent) {
+            pathSteps++;
+        }
+        modForFlag.pathApplyPendingSteps = pathSteps;
+
         Node firstNode = gnode;
         Node copy = gnode;
         long timer = 2;
@@ -762,7 +814,6 @@ public final class Pathfinder {
             if (!VoidClamMod.moduleMatchesClamAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
                 return;
             }
-            VoidClamMod.removeLightsBlackList(pathClamId, goalPos);
             VoidClamMod.removeOresBlackList(pathClamId, goalPos);
         });
 
@@ -777,13 +828,14 @@ public final class Pathfinder {
             final int cSize = modForFlag.currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
                 if (!VoidClamMod.moduleMatchesClamAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
+                    VoidClamMod.releasePathfindingMainCycle(modForFlag);
                     return;
                 }
                 if (pathStopped[0] != 0 && pathStoppedAwaitingContainer[0] != 0) {
                     return;
                 }
                 if (blocked[0] != 0 || pathStopped[0] != 0) {
-                    modForFlag.busyFlagMainCycle = 0;
+                    VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
                 BlockPos pos = new BlockPos(refNode.x, refNode.y, refNode.z);
@@ -791,13 +843,21 @@ public final class Pathfinder {
                 if (mat.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
                     int packedH = TendrilPulseManager.getPackedBrightnessAt(world, pos);
                     TendrilPulseManager.startPulse(world, pos, mat, packedH, () -> {}, TendrilPulseManager.INITIAL_SCALE_OMNI);
+                    VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
                 int cst;
+                float breakHard = getHardness(world, pos, mat);
                 if (mat.isOf(Blocks.NETHER_WART_BLOCK)) cst = 0;
                 else if (mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA)) cst = 1;
-                else cst = (int) Math.floor(getHardness(world, pos, mat)) * 2;
+                else if (breakHard < 0) cst = 1_000_000; // indestructible: do not use negative-hardness stamina math
+                else cst = (int) Math.floor(breakHard) * 2;
                 if (refNode == gnode) cst = 0;
+                if (refNode == gnode && breakHard < 0
+                    && !mat.isAir() && !mat.isOf(Blocks.WATER) && !mat.isOf(Blocks.LAVA)
+                    && !VoidClamCoreBlocks.isWartOrCore(mat)) {
+                    cst = 1_000_000;
+                }
 
                 // Ore at goal: fortune-3 drops, store in containers, replace with wart
                 if (refNode == gnode && VoidClamMod.isOre(mat.getBlock())) {
@@ -811,25 +871,24 @@ public final class Pathfinder {
                             mx,
                             mz,
                             pathClamId,
-                            () -> modForFlag.busyFlagMainCycle = 0,
+                            () -> VoidClamMod.completeOnePathApplyStep(modForFlag),
                             () -> {
-                                List<Long> containers = new ArrayList<>();
+                                List<Long> containers = Collections.synchronizedList(new ArrayList<>());
                                 runContainerBfsOnWorld(
-                                    world, mx, my, mz, cSize, clamCenterLong, containers,
-                                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathClamId);
-                                world.getServer().execute(() -> {
-                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
-                                        modForFlag.busyFlagMainCycle = 0;
-                                        return;
-                                    }
-                                    applyContainerResult(world, containers, breakPos, drops);
-                                    modForFlag.busyFlagMainCycle = 0;
-                                });
+                                    world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
+                                    () -> {
+                                        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
+                                            VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                            return;
+                                        }
+                                        applyContainerResult(world, containers, breakPos, drops);
+                                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                    });
                             }
                         );
                     } else {
                         replaceWithWartAndPulse(world, pos);
-                        modForFlag.busyFlagMainCycle = 0;
+                        VoidClamMod.completeOnePathApplyStep(modForFlag);
                     }
                     return;
                 }
@@ -837,8 +896,13 @@ public final class Pathfinder {
                 if (stamina[0] - cst < 0) {
                     blocked[0] = 1;
                     if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA))) {
-                        VoidClamMod.addLightsBlackList(pathClamId, goalPos);
-                        VoidClamMod.addOresBlackList(pathClamId, goalPos);
+                        BlockState goalState = world.getBlockState(goalPos);
+                        if (VoidClamMod.isLight(goalState.getBlock())) {
+                            VoidClamMod.removeLightFromClamCacheAfterFailedPath(pathClamId, goalPos);
+                        }
+                        if (VoidClamMod.isOre(goalState.getBlock())) {
+                            VoidClamMod.addOresBlackList(pathClamId, goalPos);
+                        }
                     }
                     VoidClamMod.addEnergy(pathClamId, -1);
                 } else {
@@ -860,23 +924,22 @@ public final class Pathfinder {
                         pathClamId,
                         () -> {
                             pathStoppedAwaitingContainer[0] = 0;
-                            modForFlag.busyFlagMainCycle = 0;
+                            VoidClamMod.completeOnePathApplyStep(modForFlag);
                         },
                         () -> {
-                            List<Long> containers = new ArrayList<>();
+                            List<Long> containers = Collections.synchronizedList(new ArrayList<>());
                             runContainerBfsOnWorld(
-                                world, mx, my, mz, cSize, clamCenterLong, containers,
-                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathClamId);
-                            world.getServer().execute(() -> {
-                                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
+                                world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
+                                () -> {
+                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
+                                        pathStoppedAwaitingContainer[0] = 0;
+                                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                        return;
+                                    }
+                                    applyContainerResult(world, containers, breakPos, toStore);
                                     pathStoppedAwaitingContainer[0] = 0;
-                                    modForFlag.busyFlagMainCycle = 0;
-                                    return;
-                                }
-                                applyContainerResult(world, containers, breakPos, toStore);
-                                pathStoppedAwaitingContainer[0] = 0;
-                                modForFlag.busyFlagMainCycle = 0;
-                            });
+                                    VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                });
                         }
                     );
                     return;
@@ -892,8 +955,7 @@ public final class Pathfinder {
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
                 }
                 TendrilPulseManager.startPulse(world, pos, packedBrightness, () -> {});
-                if (refNode == gnode)
-                    modForFlag.busyFlagMainCycle = 0; // light or empty goal: path done
+                VoidClamMod.completeOnePathApplyStep(modForFlag);
             });
             timer -= 2;
             firstNode = firstNode.parent;

@@ -86,10 +86,10 @@ public final class SearingHeartItems {
         n.putBoolean("protectItself", m.protectItself);
         n.putBoolean("stubBuilt", m.stubBuilt);
         NbtList lights = new NbtList();
-        for (BlockPos p : m.lightsBlackList) {
-            lights.add(NbtLong.of(p.asLong()));
+        for (Long p : m.lightsCache) {
+            lights.add(NbtLong.of(p));
         }
-        n.put("lightsBL", lights);
+        n.put("lightsC", lights);
         NbtList ores = new NbtList();
         for (BlockPos p : m.oresBlackList) {
             ores.add(NbtLong.of(p.asLong()));
@@ -120,11 +120,11 @@ public final class SearingHeartItems {
         m.seekOres = n.getBoolean("seekOres").orElse(false);
         m.protectItself = n.getBoolean("protectItself").orElse(true);
         m.stubBuilt = n.getBoolean("stubBuilt").orElse(true);
-        n.getList("lightsBL").ifPresent(list -> {
+        n.getList("lightsC").ifPresent(list -> {
             for (int i = 0; i < list.size(); i++) {
                 NbtElement el = list.get(i);
                 if (el instanceof AbstractNbtNumber num) {
-                    m.lightsBlackList.add(BlockPos.fromLong(num.longValue()));
+                    m.lightsCache.add(num.longValue());
                 }
             }
         });
@@ -150,16 +150,18 @@ public final class SearingHeartItems {
         into.seekOres = snapshot.seekOres;
         into.protectItself = snapshot.protectItself;
         into.stubBuilt = snapshot.stubBuilt;
-        into.lightsBlackList.clear();
-        for (BlockPos p : snapshot.lightsBlackList) {
-            into.lightsBlackList.add(p.toImmutable());
-        }
+        into.lightsCache.clear();
+        into.lightsCache.addAll(snapshot.lightsCache);
         into.oresBlackList.clear();
         for (BlockPos p : snapshot.oresBlackList) {
             into.oresBlackList.add(p.toImmutable());
         }
+        into.lightsBlackList.clear();
         into.busyFlagPlaceEvent = 0;
         into.busyFlagMainCycle = 0;
+        into.pathApplyPendingSteps = 0;
+        into.lightPathGoalPacked = null;
+        into.pathfindingResumeWorldTime = 0;
     }
 
     public static boolean isPlainBlastFurnaceDrop(ItemStack stack) {

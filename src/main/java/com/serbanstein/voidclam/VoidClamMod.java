@@ -46,6 +46,10 @@ public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
 
     private static final Map<UUID, Module> modulesById = new ConcurrentHashMap<>();
+
+    private record PendingLightCacheDelta(BlockPos pos, BlockState oldState, BlockState newState) {}
+    /** Avoid synchronous cache work inside {@code World#setBlockState} (beacon/pyramid causes huge update chains). */
+    private static final ConcurrentLinkedQueue<PendingLightCacheDelta> pendingLightCacheDeltas = new ConcurrentLinkedQueue<>();
     /** Captured in break {@code BEFORE} while the clam core block entity still exists (for item drop components). */
     private static final ThreadLocal<ComponentMap> breakingClamFurnaceComponents = new ThreadLocal<>();
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
@@ -76,6 +80,10 @@ public final class VoidClamMod {
     private static final int CLAM_CORE_FUEL_SLOT = 1;
     /** Per-clam auto repair/grow cadence (overworld world time ticks), staggered by core position. */
     public static final int AUTO_GROW_REPAIR_INTERVAL_TICKS = 5 * 60 * 20;
+    /** Batched ticks to spread a full light-cache rescan after repair (sync on server thread). */
+    public static final int LIGHT_CACHE_REBUILD_TICKS = 100;
+    /** No reach/pathfind until this many ticks after obsidian shell from {@link CommandToolbox#clamReSize}. */
+    public static final int POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS = 20;
     private static final int DEFENSE_MIN_SIZE = 11;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
@@ -180,6 +188,29 @@ public final class VoidClamMod {
         }
     }
 
+    /** Drop queued path ends for this clam (resize/kill); does not clear busy — use with {@link #releasePathfindingMainCycle}. */
+    static void purgeTargetsForClam(UUID clamId) {
+        purgeTargetsForVictimClamId(clamId);
+    }
+
+    /**
+     * Clears busy, targets queue, and sync A* jobs for this clam. Call at the start of {@link CommandToolbox#clamReSize}.
+     */
+    public static void prepareClamForResizeShell(Module m) {
+        if (m == null) return;
+        releasePathfindingMainCycle(m);
+        m.lightsBlackList.clear();
+        purgeTargetsForClam(m.clamId);
+        Pathfinder.clearSyncAStarJobsForClam(m.clamId);
+    }
+
+    /** Whether {@code clamReach}, path enqueues, and sync A* may run (after obsidian + grace when resizing). */
+    public static boolean isPathfindingAllowedYet(ServerWorld world, Module m) {
+        if (m == null) return true;
+        long t = m.pathfindingResumeWorldTime;
+        return t == 0 || world.getTime() >= t;
+    }
+
     /**
      * Kill module at index: block all new async pathfinding, abort work for this slot, drain the pathfinder pool off-thread,
      * then on the server thread adjust targets and the module array and clear the barrier. Kills are serialized; additional
@@ -208,7 +239,8 @@ public final class VoidClamMod {
             tryStartNextClamKillDrainLocked();
             return;
         }
-        victim.busyFlagMainCycle = 0;
+        releasePathfindingMainCycle(victim);
+        victim.lightsBlackList.clear();
         purgeTargetsForVictimClamId(victimId);
         asyncPathfindingKillVictimClamId = victimId;
         asyncPathfindingKillBarrierInEffect = true;
@@ -266,7 +298,7 @@ public final class VoidClamMod {
         NaturalSpawnHandler.clearForSessionEnd();
         for (Module m : modulesById.values()) {
             if (m != null) {
-                m.busyFlagMainCycle = 0;
+                releasePathfindingMainCycle(m);
             }
         }
     }
@@ -329,7 +361,10 @@ public final class VoidClamMod {
     /** After CSV load: give every loaded module a first auto-grow fire time. */
     public static void seedAutoGrowScheduleForAllModules(ServerWorld world) {
         for (Module mm : modulesById.values()) {
-            if (mm != null) ensureAutoGrowScheduled(world, mm);
+            if (mm != null) {
+                ensureAutoGrowScheduled(world, mm);
+                startLightCacheRebuild(mm);
+            }
         }
     }
 
@@ -436,6 +471,7 @@ public final class VoidClamMod {
         m.stubBuilt = false;
         applySearingHeartBlockLabel(world, pos);
         maybeSaveLegacyModulesSiva(world.getServer());
+        startLightCacheRebuild(m);
     }
 
     /**
@@ -446,6 +482,10 @@ public final class VoidClamMod {
         long t = world.getTime();
         for (Module m : modulesById.values()) {
             if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            tickLightCacheRebuildStep(world, m);
+            if (m.busyFlagMainCycle == 0 && m.lightPathGoalPacked != null) {
+                releasePathfindingMainCycle(m);
+            }
             BlockPos pos = new BlockPos(m.x, m.y, m.z);
             tryConsumeFuelAndWakeClam(world, m);
             if (world.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
@@ -479,6 +519,183 @@ public final class VoidClamMod {
 
     public static boolean isLight(Block block) { return lights.contains(block); }
 
+    /** Half-width of the light seek box in blocks on each axis: {@code max(dx,dy,dz) <= 4 * currentSize}. */
+    public static int lightSeekHalfExtent(int currentSize) {
+        return 4 * currentSize;
+    }
+
+    public static boolean inLightSeekRange(Module m, BlockPos pos) {
+        int e = lightSeekHalfExtent(m.currentSize);
+        return Math.abs(pos.getX() - m.x) <= e
+            && Math.abs(pos.getY() - m.y) <= e
+            && Math.abs(pos.getZ() - m.z) <= e;
+    }
+
+    /** Linear volume of the clamReach scan box for {@code currentSize}. */
+    static long lightSeekScanVolume(int currentSize) {
+        long e = lightSeekHalfExtent(currentSize);
+        long span = 2L * e + 1;
+        return span * span * span;
+    }
+
+    /** Clears the cache and rescans the seek box over {@link #LIGHT_CACHE_REBUILD_TICKS} server ticks. */
+    public static void startLightCacheRebuild(Module m) {
+        if (m == null) return;
+        m.lightsCache.clear();
+        m.lightCacheRebuildTicksRemaining = LIGHT_CACHE_REBUILD_TICKS;
+        m.lightCacheRebuildCursor = 0L;
+    }
+
+    /**
+     * Call from server tick for each loaded clam while {@link Module#lightCacheRebuildTicksRemaining} &gt; 0.
+     * Processes a fair slice of the scan volume for this tick.
+     */
+    public static void tickLightCacheRebuildStep(ServerWorld world, Module m) {
+        if (m == null || m.lightCacheRebuildTicksRemaining <= 0) return;
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (!isPathfindingAllowedYet(world, m)) return;
+        long total = lightSeekScanVolume(m.currentSize);
+        long cursor = m.lightCacheRebuildCursor;
+        int ticksLeft = m.lightCacheRebuildTicksRemaining;
+        long remaining = total - cursor;
+        if (remaining <= 0) {
+            m.lightCacheRebuildTicksRemaining = 0;
+            m.lightCacheRebuildCursor = 0;
+            return;
+        }
+        int e = lightSeekHalfExtent(m.currentSize);
+        long span = 2L * e + 1;
+        long layer = span * span;
+        long toProcess = (remaining + (long) ticksLeft - 1L) / (long) ticksLeft;
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        for (long j = 0; j < toProcess && cursor < total; j++, cursor++) {
+            long xi = cursor / layer;
+            long rem = cursor % layer;
+            long yi = rem / span;
+            long zi = rem % span;
+            int bx = m.x - e + (int) xi;
+            int by = m.y - e + (int) yi;
+            int bz = m.z - e + (int) zi;
+            mut.set(bx, by, bz);
+            if (!world.isChunkLoaded(mut.getX() >> 4, mut.getZ() >> 4)) {
+                continue;
+            }
+            if (VoidClamMod.isLight(world.getBlockState(mut).getBlock())) {
+                m.lightsCache.add(mut.asLong());
+            }
+        }
+        m.lightCacheRebuildCursor = cursor;
+        m.lightCacheRebuildTicksRemaining--;
+        if (m.lightCacheRebuildTicksRemaining <= 0 || cursor >= total) {
+            m.lightCacheRebuildTicksRemaining = 0;
+            m.lightCacheRebuildCursor = 0;
+        }
+    }
+
+    /** When pathfinding cannot reach a light goal, drop it from the cache until the next repair rebuild. */
+    public static void removeLightFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
+        Module m = getModuleById(clamId);
+        if (m != null) {
+            long p = pos.asLong();
+            m.lightsCache.remove(p);
+            m.lightsBlackList.remove(p);
+            if (m.lightPathGoalPacked != null && m.lightPathGoalPacked == p) {
+                m.lightPathGoalPacked = null;
+            }
+        }
+    }
+
+    /** If the path goal is still a registered light block, drop it from this clam's cache (unreachable prepass). */
+    public static void removeLightGoalFromCacheIfPrepassUnreachable(ServerWorld world, UUID clamId, int gx, int gy, int gz) {
+        BlockPos goal = new BlockPos(gx, gy, gz);
+        if (!isLight(world.getBlockState(goal).getBlock())) {
+            return;
+        }
+        removeLightFromClamCacheAfterFailedPath(clamId, goal);
+    }
+
+    /** Clears main-cycle busy, releases the light path lock in {@link Module#lightsBlackList}, and clears the active light goal. */
+    public static void releasePathfindingMainCycle(Module m) {
+        if (m == null) return;
+        m.pathApplyPendingSteps = 0;
+        Long goal = m.lightPathGoalPacked;
+        if (goal != null) {
+            m.lightsBlackList.remove(goal);
+        }
+        m.busyFlagMainCycle = 0;
+        m.lightPathGoalPacked = null;
+    }
+
+    /**
+     * One delayed {@link Pathfinder#buildPath} step finished (server thread). When the last step completes, calls
+     * {@link #releasePathfindingMainCycle}. Stale steps after a force-release see pending 0 and do nothing.
+     */
+    public static void completeOnePathApplyStep(Module m) {
+        if (m == null || m.pathApplyPendingSteps <= 0) {
+            return;
+        }
+        m.pathApplyPendingSteps--;
+        if (m.pathApplyPendingSteps == 0) {
+            releasePathfindingMainCycle(m);
+        }
+    }
+
+    /**
+     * Mixin hook: queue work for {@link #drainPendingLightCacheDeltas}; do not scan modules inside {@code setBlockState}.
+     */
+    public static void enqueueLightCacheDeltaFromBlockChange(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
+        if (!world.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
+            return;
+        }
+        Block ob = oldState.getBlock();
+        Block nb = newState.getBlock();
+        if (!isLight(ob) && !isLight(nb)) {
+            return;
+        }
+        pendingLightCacheDeltas.add(new PendingLightCacheDelta(pos.toImmutable(), oldState, newState));
+    }
+
+    /**
+     * Apply queued light cache updates (server tick). Bounded per tick so one beacon placement cannot freeze the server.
+     */
+    public static void drainPendingLightCacheDeltas(ServerWorld overworld) {
+        if (overworld == null || !overworld.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
+            return;
+        }
+        int budget = 16384;
+        PendingLightCacheDelta d;
+        while (budget-- > 0 && (d = pendingLightCacheDeltas.poll()) != null) {
+            applyLightCacheDelta(overworld, d.pos, d.oldState, d.newState);
+        }
+    }
+
+    private static void applyLightCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
+        Block ob = oldState.getBlock();
+        Block nb = newState.getBlock();
+        boolean wasLight = isLight(ob);
+        boolean nowLight = isLight(nb);
+        if (!wasLight && !nowLight) {
+            return;
+        }
+        long packed = pos.asLong();
+        int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
+        for (Module m : modulesById.values()) {
+            if (m == null || !m.seekLights) continue;
+            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            int e = lightSeekHalfExtent(m.currentSize);
+            if (Math.abs(m.x - px) > e || Math.abs(m.y - py) > e || Math.abs(m.z - pz) > e) continue;
+            if (wasLight && !nowLight) {
+                m.lightsCache.remove(packed);
+                m.lightsBlackList.remove(packed);
+                if (m.lightPathGoalPacked != null && m.lightPathGoalPacked == packed) {
+                    m.lightPathGoalPacked = null;
+                }
+            } else if (nowLight) {
+                m.lightsCache.add(packed);
+            }
+        }
+    }
+
     /** Fuel-slot items that can wake a dormant clam: edible light blocks (as items) or anything the fuel registry accepts. */
     public static boolean isClamWakeFuel(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) return false;
@@ -509,6 +726,7 @@ public final class VoidClamMod {
         }
         ensureAutoGrowScheduled(world, m);
         maybeSaveLegacyModulesSiva(world.getServer());
+        startLightCacheRebuild(m);
     }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
@@ -548,16 +766,6 @@ public final class VoidClamMod {
         return targets.isEmpty();
     }
 
-    public static void removeLightsBlackList(UUID clamId, BlockPos pos) {
-        Module m = getModuleById(clamId);
-        if (m != null) m.lightsBlackList.remove(pos);
-    }
-
-    public static void addLightsBlackList(UUID clamId, BlockPos pos) {
-        Module m = getModuleById(clamId);
-        if (m != null) m.lightsBlackList.add(pos.toImmutable());
-    }
-
     public static void removeOresBlackList(UUID clamId, BlockPos pos) {
         Module m = getModuleById(clamId);
         if (m != null) m.oresBlackList.remove(pos);
@@ -580,9 +788,19 @@ public final class VoidClamMod {
 
     /** Called every tick on server thread: drain path queue and run buildPath. */
     public static void tickTargets(ServerWorld world) {
+        List<Node> stalled = new ArrayList<>();
         Node n;
-        while ((n = targets.poll()) != null)
+        while ((n = targets.poll()) != null) {
+            Module tm = getModuleById(n.clamId);
+            if (!isPathfindingAllowedYet(world, tm)) {
+                stalled.add(n);
+                continue;
+            }
             Pathfinder.buildPath(world, n);
+        }
+        for (Node s : stalled) {
+            targets.offer(s);
+        }
     }
 
     /** One line of legacy {@code modules.siva} CSV, or null if empty/invalid. */
@@ -785,6 +1003,7 @@ public final class VoidClamMod {
         CommandToolbox.buildStub(world, x, y, z);
         m.stubBuilt = true;
         maybeSaveLegacyModulesSiva(world.getServer());
+        startLightCacheRebuild(m);
         return m.clamId;
     }
 
@@ -874,8 +1093,8 @@ public final class VoidClamMod {
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
         CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
-        m.lightsBlackList.clear();
         m.oresBlackList.clear();
+        m.lightsBlackList.clear();
         VoidClamConfig cfg = VoidClamConfig.get();
         if (m.energy > cfg.clam_grow_energymultiplier * m.currentSize && m.currentSize < cfg.clam_size_max) {
             double cst = 0;

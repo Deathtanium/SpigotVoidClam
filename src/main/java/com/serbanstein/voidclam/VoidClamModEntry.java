@@ -87,6 +87,7 @@ public class VoidClamModEntry implements ModInitializer {
     private void onServerTick(MinecraftServer server) {
         ServerWorld world = server.getOverworld();
         if (world == null) return;
+        VoidClamMod.drainPendingLightCacheDeltas(world);
         long tick = world.getTime();
 
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
@@ -130,6 +131,7 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("info [target] — list all (console) or nearest (player)"), false);
                         s.sendFeedback(() -> Text.literal("save — write modules.siva (creates file) | ingestlegacy — import modules.siva into hearts"), false);
                         s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping | testfile"), false);
+                        s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode — each sync_batched or async"), false);
                         return 1;
                     }))
                 .then(CommandManager.literal("make")

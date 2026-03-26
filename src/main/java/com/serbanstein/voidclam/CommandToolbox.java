@@ -12,6 +12,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -24,6 +25,11 @@ public final class CommandToolbox {
      */
     private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(
         VoidClamConfig.effectiveAsyncThreadPoolSize(0));
+
+    /** Same pool used for async A* work and {@link BlockBfs.ExecutionMode#BACKGROUND} when {@code bfs_mode} is async. */
+    public static Executor pathfindingExecutor() {
+        return pathfinderExecutor;
+    }
 
     public static void configurePathfinderExecutorSize(int poolSize) {
         int n = Math.max(1, poolSize);
@@ -60,6 +66,13 @@ public final class CommandToolbox {
         Runnable task
     ) {
         if (VoidClamMod.isAsyncPathfindingKillBarrierInEffect() || VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+            if (onAbortedBeforeRun != null) {
+                onAbortedBeforeRun.run();
+            }
+            return;
+        }
+        Module pauseModule = pathfindingClamId != null ? VoidClamMod.getModuleById(pathfindingClamId) : null;
+        if (!VoidClamMod.isPathfindingAllowedYet(world, pauseModule)) {
             if (onAbortedBeforeRun != null) {
                 onAbortedBeforeRun.run();
             }
@@ -214,6 +227,7 @@ public final class CommandToolbox {
         Module m = VoidClamMod.getModuleById(clamId);
         if (m == null) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        VoidClamMod.prepareClamForResizeShell(m);
         net.minecraft.block.Block mat = Blocks.NETHER_WART_BLOCK;
         int csize = m.currentSize;
         int x = m.x, y = m.y, z = m.z;
@@ -248,11 +262,14 @@ public final class CommandToolbox {
                 world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
         }
 
+        long obsidianAtTick = world.getTime() + (long) timer * 20L;
         VoidClamMod.scheduleDelayed(world, timer * 20L, () -> buildShell(world, x, y, z, tsize, Blocks.OBSIDIAN));
+        m.pathfindingResumeWorldTime = obsidianAtTick + VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
 
         m.currentSize = tsize;
         VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         VoidClamMod.maybeSaveLegacyModulesSiva(world.getServer());
+        VoidClamMod.startLightCacheRebuild(m);
 
         int ts = tsize - 2;
         for (int ix = x - ts + 1; ix <= x; ix++) {
@@ -284,13 +301,18 @@ public final class CommandToolbox {
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         m.ensureClamId();
         if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) return;
+        if (!VoidClamMod.isPathfindingAllowedYet(world, m)) return;
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
-        submitPathfinding(world, m.x, m.z, m.clamId, () -> m.busyFlagMainCycle = 0, () -> {
+        submitPathfinding(world, m.x, m.z, m.clamId, () -> VoidClamMod.releasePathfindingMainCycle(m), () -> {
             try {
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) {
-                    m.busyFlagMainCycle = 0;
+                    VoidClamMod.releasePathfindingMainCycle(m);
+                    return;
+                }
+                if (!VoidClamMod.isPathfindingAllowedYet(world, m)) {
+                    VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
                 int x = m.x, y = m.y, z = m.z, cSize = m.currentSize;
@@ -301,30 +323,44 @@ public final class CommandToolbox {
                 double closestOreDist = Double.MAX_VALUE;
 
                 if (m.seekLights || m.seekOres) {
-                    int scanStep = 0;
-                    outerScan:
-                    for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
-                        for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
-                            for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
-                                    break outerScan;
-                                }
-                                BlockPos pos = new BlockPos(ix, iy, iz);
-                                net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
-                                double dist = modPos.getSquaredDistance(pos);
-                                if (m.seekLights && VoidClamMod.isLight(block) && !m.lightsBlackList.contains(pos) && dist < closestLightDist) {
-                                    closestLightDist = dist;
-                                    closestLight = pos;
-                                }
-                                if (m.seekOres && VoidClamMod.isOre(block) && !m.oresBlackList.contains(pos) && dist < closestOreDist) {
-                                    closestOreDist = dist;
-                                    closestOre = pos;
+                    if (m.seekLights) {
+                        for (long packed : m.lightsCache) {
+                            if (m.lightsBlackList.contains(packed)) {
+                                continue;
+                            }
+                            BlockPos pos = BlockPos.fromLong(packed);
+                            if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+                            net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                            if (!VoidClamMod.isLight(block)) continue;
+                            double dist = modPos.getSquaredDistance(pos);
+                            if (dist < closestLightDist) {
+                                closestLightDist = dist;
+                                closestLight = pos.toImmutable();
+                            }
+                        }
+                    }
+                    if (m.seekOres) {
+                        int scanStep = 0;
+                        outerScan:
+                        for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
+                            for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
+                                for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
+                                    if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+                                        break outerScan;
+                                    }
+                                    BlockPos pos = new BlockPos(ix, iy, iz);
+                                    net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                                    double dist = modPos.getSquaredDistance(pos);
+                                    if (VoidClamMod.isOre(block) && !m.oresBlackList.contains(pos) && dist < closestOreDist) {
+                                        closestOreDist = dist;
+                                        closestOre = pos;
+                                    }
                                 }
                             }
                         }
                     }
                     if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
-                        m.busyFlagMainCycle = 0;
+                        VoidClamMod.releasePathfindingMainCycle(m);
                         return;
                     }
                 }
@@ -332,30 +368,32 @@ public final class CommandToolbox {
                 BlockPos closest = null;
                 if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
                     closest = closestLight;
-                    m.lightsBlackList.add(closest.toImmutable());
                 } else if (closestOre != null) {
                     closest = closestOre;
                     m.oresBlackList.add(closest.toImmutable());
                 }
 
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
-                    if (closest != null) {
-                        if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
-                            m.lightsBlackList.remove(closest.toImmutable());
-                        } else if (closestOre != null) {
-                            m.oresBlackList.remove(closest.toImmutable());
-                        }
+                    if (closest != null && closestOre != null && closest.equals(closestOre)) {
+                        m.oresBlackList.remove(closest.toImmutable());
                     }
-                    m.busyFlagMainCycle = 0;
+                    VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
                 if (closest != null) {
+                    if (closestLight != null && closest.equals(closestLight)) {
+                        long goalPacked = closest.asLong();
+                        m.lightsBlackList.add(goalPacked);
+                        m.lightPathGoalPacked = goalPacked;
+                    } else {
+                        m.lightPathGoalPacked = null;
+                    }
                     Pathfinder.calculatePath(world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ());
                 } else {
-                    m.busyFlagMainCycle = 0;
+                    VoidClamMod.releasePathfindingMainCycle(m);
                 }
             } catch (Throwable t) {
-                m.busyFlagMainCycle = 0;
+                VoidClamMod.releasePathfindingMainCycle(m);
                 throw t;
             }
         });
