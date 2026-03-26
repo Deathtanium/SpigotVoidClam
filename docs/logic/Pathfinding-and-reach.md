@@ -17,6 +17,8 @@
 
 ## `calculatePath` (`Pathfinder`)
 
+- **Reachability pre-pass:** Before A\*, a 6-neighbor **BFS** from the start cell checks whether the goal lies in the same connected component under the same search bounds and **hard impassability** rules as A\* (tile entities and blocks with hardness &gt; 5 are walls; wart is walkable). Movement **costs** are ignored—only disconnects from impassable cells. If there is no such path, `busyFlagMainCycle` is cleared and A\* is skipped (avoids exhausting the open set for caged targets).
+- **Performance note:** Today `calculatePath` is invoked from the pathfinder **worker** thread (`CommandToolbox.submitPathfinding`), same as A\*. If this pre-pass is ever called from the **server main thread** and proves too expensive for TPS, run it on worker threads the same way as A\*.
 - A\* on the 6-neighbor grid with custom edge costs (wart cheap, tile entities / very hard blocks cost `2500`, air/water over solid cheap, etc.).
 - Search is bounded roughly by **±4×currentSize** on X/Z and **±5×currentSize** on Y from module center (see conditions on `nextNode`).
 - **Success:** Enqueue goal `Node` on `targets`; leave busy flag for `buildPath` to clear.
