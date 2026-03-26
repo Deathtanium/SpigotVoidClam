@@ -33,6 +33,24 @@ public final class VoidClamMod {
     private static int moduleNumber = 0;
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
+    /**
+     * When true, off-thread pathfinding work ({@code CommandToolbox.submitPathfinding}) should exit promptly and must not enqueue
+     * new main-thread effects. Set during {@link net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents#SERVER_STOPPING}
+     * so the pathfinder pool can drain before save; cleared when a new server session starts.
+     */
+    private static volatile boolean asyncPathfindingShutdownRequested;
+    /** While true, {@link CommandToolbox#submitPathfinding} rejects immediately (does not queue). Used during coordinated clam kill. */
+    private static volatile boolean asyncPathfindingKillBarrierInEffect;
+    /**
+     * During kill barrier: module index (1..moduleNumber) whose async pathfinding is aborted; workers for other indices continue until
+     * the executor drains. 0 = none.
+     */
+    private static volatile int asyncPathfindingKillVictimSlot;
+    private static final Object asyncKillCoordinatorLock = new Object();
+    private static final Queue<KillRequest> pendingClamKills = new ConcurrentLinkedQueue<>();
+    private static MinecraftServer pendingKillDrainServer;
+
+    private record KillRequest(int victimSlot, boolean saveAfter) {}
     /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
     private static ServerWorld growPendingWorld = null;
     /** If > 0, when grow runs do clamReSize(world, growCommandTno, growCommandTargetSize); else run full auto grow routine. */
@@ -86,6 +104,219 @@ public final class VoidClamMod {
         baseCost.add(Blocks.SNOW_BLOCK);
     }
 
+    public static boolean isAsyncPathfindingShutdownRequested() {
+        return asyncPathfindingShutdownRequested;
+    }
+
+    /**
+     * Off-thread pathfinding should stop when the server is shutting down, the clam center chunk is unloaded, or this module
+     * slot is the coordinated-kill victim. Pass {@code pathfindingModuleSlot} = {@code tno} when known so kill targets the right
+     * clam; use {@code 0} only when matching by center X/Z against the victim slot.
+     *
+     * @param pathfindingModuleSlot module index {@code tno} for this work (1..N), or {@code 0} when only center coordinates are known
+     */
+    public static boolean shouldAbortAsyncPathfindingWork(
+        ServerWorld world,
+        int clamCenterX,
+        int clamCenterZ,
+        int pathfindingModuleSlot
+    ) {
+        if (asyncPathfindingShutdownRequested) return true;
+        int victim = asyncPathfindingKillVictimSlot;
+        if (victim > 0) {
+            if (pathfindingModuleSlot == victim) {
+                return true;
+            }
+            if (pathfindingModuleSlot == 0
+                && victim <= moduleNumber
+                && modules[victim] != null
+                && modules[victim].x == clamCenterX
+                && modules[victim].z == clamCenterZ) {
+                return true;
+            }
+        }
+        return !world.isChunkLoaded(clamCenterX >> 4, clamCenterZ >> 4);
+    }
+
+    public static boolean isAsyncPathfindingKillBarrierInEffect() {
+        return asyncPathfindingKillBarrierInEffect;
+    }
+
+    /**
+     * Remove/adjust queued path targets and grow-pending indices, then shift the module array.
+     * Call only from the server thread after async pathfinding has drained.
+     */
+    private static void finishClamKillAfterAsyncSettled(int victimSlot) {
+        if (victimSlot < 1 || victimSlot > moduleNumber) return;
+        purgeAndAdjustTargetsQueueForKill(victimSlot);
+        if (growPendingWorld != null) {
+            if (growCommandTno == victimSlot) {
+                growCommandTno = 0;
+                growCommandTargetSize = 0;
+            } else if (growCommandTno > victimSlot) {
+                growCommandTno--;
+            }
+        }
+        for (int i = victimSlot; i < moduleNumber; i++) {
+            savedSeekLights[i] = savedSeekLights[i + 1];
+            savedSeekOres[i] = savedSeekOres[i + 1];
+        }
+        clamKillShiftArrayOnly(victimSlot);
+    }
+
+    /** Drop queued path results for this slot only (no index adjustment). Call when starting a kill to narrow the enqueue race. */
+    private static void purgeTargetsForVictimSlotOnly(int victimSlot) {
+        List<Node> kept = new ArrayList<>();
+        Node n;
+        while ((n = targets.poll()) != null) {
+            if (n.tno != victimSlot) {
+                kept.add(n);
+            }
+        }
+        for (Node k : kept) {
+            targets.offer(k);
+        }
+    }
+
+    private static void purgeAndAdjustTargetsQueueForKill(int victimSlot) {
+        List<Node> kept = new ArrayList<>();
+        Node n;
+        while ((n = targets.poll()) != null) {
+            if (n.tno == victimSlot) {
+                continue;
+            }
+            if (n.tno > victimSlot) {
+                n.tno--;
+            }
+            kept.add(n);
+        }
+        for (Node k : kept) {
+            targets.offer(k);
+        }
+    }
+
+    /** Array shift only; used after async barrier. */
+    private static void clamKillShiftArrayOnly(int tno) {
+        if (tno < 1 || tno > moduleNumber) return;
+        for (int i = tno; i < moduleNumber; i++) {
+            Module swap = modules[i];
+            modules[i] = modules[i + 1];
+            modules[i + 1] = swap;
+        }
+        modules[moduleNumber] = null;
+        moduleNumber--;
+    }
+
+    /**
+     * Kill module at index: block all new async pathfinding, abort work for this slot, drain the pathfinder pool off-thread,
+     * then on the server thread adjust targets and the module array and clear the barrier. Kills are serialized; additional
+     * requests queue behind an in-progress drain. Saves after the shift when {@code saveAfter}.
+     */
+    public static void clamKillBlocking(MinecraftServer server, int tno, boolean saveAfter) {
+        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
+        synchronized (asyncKillCoordinatorLock) {
+            pendingClamKills.add(new KillRequest(tno, saveAfter));
+            pendingKillDrainServer = server;
+            tryStartNextClamKillDrainLocked();
+        }
+    }
+
+    private static void tryStartNextClamKillDrainLocked() {
+        if (asyncPathfindingKillBarrierInEffect) {
+            return;
+        }
+        KillRequest next = pendingClamKills.poll();
+        if (next == null) {
+            return;
+        }
+        int tno = next.victimSlot;
+        if (tno < 1 || tno > moduleNumber || modules[tno] == null) {
+            tryStartNextClamKillDrainLocked();
+            return;
+        }
+        Module victim = modules[tno];
+        victim.busyFlagMainCycle = 0;
+        purgeTargetsForVictimSlotOnly(tno);
+        asyncPathfindingKillVictimSlot = tno;
+        asyncPathfindingKillBarrierInEffect = true;
+        MinecraftServer server = pendingKillDrainServer;
+        if (server == null) {
+            asyncPathfindingKillVictimSlot = 0;
+            asyncPathfindingKillBarrierInEffect = false;
+            tryStartNextClamKillDrainLocked();
+            return;
+        }
+        final int victimSlot = tno;
+        final boolean saveAfterThis = next.saveAfter;
+        Thread drain = new Thread(() -> {
+            try {
+                CommandToolbox.shutdownPathfinderExecutorAfterKillDrain();
+            } finally {
+                server.execute(() -> {
+                    try {
+                        remapPendingKillSlotsAfterShift(victimSlot);
+                        finishClamKillAfterAsyncSettled(victimSlot);
+                        if (saveAfterThis) {
+                            save(server);
+                        }
+                    } finally {
+                        asyncPathfindingKillVictimSlot = 0;
+                        asyncPathfindingKillBarrierInEffect = false;
+                        synchronized (asyncKillCoordinatorLock) {
+                            tryStartNextClamKillDrainLocked();
+                        }
+                    }
+                });
+            }
+        }, "voidclam-pathfinder-kill-drain");
+        drain.setDaemon(true);
+        drain.start();
+    }
+
+    /** After removing {@code victimSlot}, decrement indices in the pending-kill queue still waiting behind this drain. */
+    private static void remapPendingKillSlotsAfterShift(int victimSlot) {
+        List<KillRequest> batch = new ArrayList<>();
+        KillRequest r;
+        while ((r = pendingClamKills.poll()) != null) {
+            batch.add(r);
+        }
+        for (KillRequest k : batch) {
+            int s = k.victimSlot();
+            if (s == victimSlot) {
+                continue;
+            }
+            if (s > victimSlot) {
+                pendingClamKills.add(new KillRequest(s - 1, k.saveAfter()));
+            } else {
+                pendingClamKills.add(k);
+            }
+        }
+    }
+
+    /** New server session: allow pathfinding tasks again (mod entry, before load). */
+    public static void onAsyncPathfindingSessionStart() {
+        asyncPathfindingShutdownRequested = false;
+        asyncPathfindingKillBarrierInEffect = false;
+        asyncPathfindingKillVictimSlot = 0;
+        pendingClamKills.clear();
+        pendingKillDrainServer = null;
+    }
+
+    /** Server stopping: stop off-thread work and drain the pathfinder pool (mod entry, before save). */
+    public static void onAsyncPathfindingSessionStop() {
+        asyncPathfindingShutdownRequested = true;
+        asyncPathfindingKillBarrierInEffect = false;
+        asyncPathfindingKillVictimSlot = 0;
+        pendingClamKills.clear();
+        pendingKillDrainServer = null;
+        CommandToolbox.shutdownPathfinderExecutorForSessionEnd();
+        for (int i = 1; i <= moduleNumber; i++) {
+            if (modules[i] != null) {
+                modules[i].busyFlagMainCycle = 0;
+            }
+        }
+    }
+
     public static Module[] getModules() { return modules; }
     public static int getModuleNumber() { return moduleNumber; }
     public static boolean isLight(Block block) { return lights.contains(block); }
@@ -97,6 +328,13 @@ public final class VoidClamMod {
         if (tno < 1 || tno > moduleNumber || modules[tno] == null) return false;
         Module m = modules[tno];
         return world.isChunkLoaded(m.x >> 4, m.z >> 4);
+    }
+
+    /** False if the slot is empty or no longer holds a module at the given center (e.g. after a kill shifted indices). */
+    public static boolean moduleAtSlotMatchesPosition(int tno, int x, int y, int z) {
+        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return false;
+        Module m = modules[tno];
+        return m.x == x && m.y == y && m.z == z;
     }
 
     public static void enqueueTarget(Node node) {
@@ -226,16 +464,12 @@ public final class VoidClamMod {
         return moduleNumber;
     }
 
-    /** Remove module at index (shift array down). */
-    public static void clamKill(int tno) {
-        if (tno < 1 || tno > moduleNumber) return;
-        for (int i = tno; i < moduleNumber; i++) {
-            Module swap = modules[i];
-            modules[i] = modules[i + 1];
-            modules[i + 1] = swap;
-        }
-        modules[moduleNumber] = null;
-        moduleNumber--;
+    /**
+     * Remove module at index after async pathfinding has drained and indices are safe. {@code saveAfter} should be true for
+     * explicit player kills; false for automatic core checks (batch saves are unnecessary).
+     */
+    public static void clamKill(MinecraftServer server, int tno, boolean saveAfter) {
+        clamKillBlocking(server, tno, saveAfter);
     }
 
     /**
@@ -274,6 +508,7 @@ public final class VoidClamMod {
     /** Called every tick. If a grow/repair is pending for this world and pathfinding is idle, runs it and restores seeks. */
     public static void tickGrowPendingCheck(ServerWorld world) {
         if (growPendingWorld == null) return;
+        if (asyncPathfindingKillBarrierInEffect) return;
         if (!growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) return;
         Module[] modules = getModules();
         int cmdTno = growCommandTno;
@@ -370,7 +605,7 @@ public final class VoidClamMod {
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             Block block = world.getBlockState(new BlockPos(m.x, m.y, m.z)).getBlock();
             if (block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN)
-                clamKill(i);
+                clamKill(world.getServer(), i, false);
         }
     }
 
