@@ -279,7 +279,7 @@ public final class BlockBfs {
                         if (s.dist.containsKey(next)) continue;
                         if (!world.isChunkLoaded(next)) continue;
                         BlockState state = world.getBlockState(next);
-                        if (state.getBlock() != Blocks.NETHER_WART_BLOCK && !state.isOf(VoidClamBlocks.HEART_BLOCK))
+                        if (!VoidClamCoreBlocks.isWartOrCore(state))
                             continue;
                         int nextDist = d + 1;
                         if (mergedResult.containsKey(next)) {

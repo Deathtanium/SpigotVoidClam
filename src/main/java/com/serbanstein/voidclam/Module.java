@@ -34,6 +34,8 @@ public class Module {
     public final Set<BlockPos> oresBlackList = new HashSet<>();
     public short busyFlagPlaceEvent;
     public short busyFlagMainCycle;
+    /** {@code false} until {@link com.serbanstein.voidclam.CommandToolbox#buildStub} has run (searing-heart placements defer until first fuel). */
+    public boolean stubBuilt = true;
 
     public void ensureClamId() {
         if (clamId == null) {

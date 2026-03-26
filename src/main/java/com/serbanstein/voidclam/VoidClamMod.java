@@ -1,21 +1,32 @@
 package com.serbanstein.voidclam;
 
+import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.Identifier;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.component.ComponentMap;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.*;
@@ -33,6 +44,8 @@ public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
 
     private static final Map<UUID, Module> modulesById = new ConcurrentHashMap<>();
+    /** Captured in break {@code BEFORE} while the clam core block entity still exists (for item drop components). */
+    private static final ThreadLocal<ComponentMap> breakingClamFurnaceComponents = new ThreadLocal<>();
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
     /**
@@ -49,7 +62,7 @@ public final class VoidClamMod {
     private static final Queue<KillRequest> pendingClamKills = new ConcurrentLinkedQueue<>();
     private static MinecraftServer pendingKillDrainServer;
 
-    private record KillRequest(UUID victimId, boolean saveAfter, @Nullable VoidClamHeartItemData heartDropData, @Nullable BlockPos heartDropPos) {}
+    private record KillRequest(UUID victimId, boolean saveAfter) {}
     /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
     private static ServerWorld growPendingWorld = null;
     /** When non-null, single-clam grow/repair pending for this id. */
@@ -57,6 +70,8 @@ public final class VoidClamMod {
     private static int growCommandTargetSize = 0;
     private static final Map<UUID, Boolean> growSavedSeekLights = new HashMap<>();
     private static final Map<UUID, Boolean> growSavedSeekOres = new HashMap<>();
+    /** Blast furnace fuel slot (see {@code AbstractFurnaceBlockEntity.FUEL_SLOT_INDEX} in mappings). */
+    private static final int CLAM_CORE_FUEL_SLOT = 1;
     private static final int DEFENSE_MIN_SIZE = 11;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
@@ -167,22 +182,9 @@ public final class VoidClamMod {
      * requests queue behind an in-progress drain. Saves after the shift when {@code saveAfter}.
      */
     public static void clamKillBlocking(MinecraftServer server, UUID victimId, boolean saveAfter) {
-        clamKillBlocking(server, victimId, saveAfter, null, null);
-    }
-
-    /**
-     * Kill clam by id; optionally drop heart item after async drain.
-     */
-    public static void clamKillBlocking(
-        MinecraftServer server,
-        UUID victimId,
-        boolean saveAfter,
-        @Nullable VoidClamHeartItemData heartDropData,
-        @Nullable BlockPos heartDropPos
-    ) {
         if (victimId == null || !modulesById.containsKey(victimId)) return;
         synchronized (asyncKillCoordinatorLock) {
-            pendingClamKills.add(new KillRequest(victimId, saveAfter, heartDropData, heartDropPos));
+            pendingClamKills.add(new KillRequest(victimId, saveAfter));
             pendingKillDrainServer = server;
             tryStartNextClamKillDrainLocked();
         }
@@ -215,8 +217,6 @@ public final class VoidClamMod {
         }
         final UUID victimIdFinal = victimId;
         final boolean saveAfterThis = next.saveAfter;
-        final VoidClamHeartItemData heartDropData = next.heartDropData;
-        final BlockPos heartDropPos = next.heartDropPos;
         Thread drain = new Thread(() -> {
             try {
                 CommandToolbox.shutdownPathfinderExecutorAfterKillDrain();
@@ -224,14 +224,6 @@ public final class VoidClamMod {
                 server.execute(() -> {
                     try {
                         finishClamKillAfterAsyncSettled(victimIdFinal);
-                        if (heartDropData != null && heartDropPos != null) {
-                            ServerWorld overworld = server.getOverworld();
-                            if (overworld != null && overworld.isChunkLoaded(heartDropPos.getX() >> 4, heartDropPos.getZ() >> 4)) {
-                                ItemStack drop = new ItemStack(VoidClamBlocks.HEART_BLOCK_ITEM);
-                                drop.set(VoidClamDataComponents.HEART_STACK, heartDropData);
-                                net.minecraft.block.Block.dropStack(overworld, heartDropPos, drop);
-                            }
-                        }
                         if (saveAfterThis) {
                             save(server);
                         }
@@ -317,56 +309,158 @@ public final class VoidClamMod {
         return true;
     }
 
-    /** Place or replace the block at {@code pos} with a heart whose BE matches {@code m}. */
-    public static void placeHeartBlockForModule(ServerWorld world, BlockPos pos, Module m) {
-        world.setBlockState(pos, VoidClamBlocks.HEART_BLOCK.getDefaultState());
-        if (world.getBlockEntity(pos) instanceof VoidClamHeartBlockEntity heart) {
-            heart.syncFromModule(m);
+    /** Placement from searing heart item (same package mixin); {@code false} if at capacity. */
+    static boolean registerModuleForSearingPlace(Module m) {
+        return registerModule(m);
+    }
+
+    public static void captureClamCoreComponentsBeforeBreak(net.minecraft.world.World world, BlockPos pos, BlockState state) {
+        breakingClamFurnaceComponents.remove();
+        if (world.isClient() || !(world instanceof ServerWorld)) return;
+        if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
+        if (findModuleAt(pos) == null) return;
+        BlockEntity be = world.getBlockEntity(pos);
+        if (be != null) {
+            breakingClamFurnaceComponents.set(be.createComponentMap());
         }
     }
 
-    /** Heart block broken: unregister clam (loot drops via table). */
-    public static void onHeartBroken(ServerWorld world, BlockPos pos) {
+    public static void clearBreakingClamFurnaceComponentsCapture() {
+        breakingClamFurnaceComponents.remove();
+    }
+
+    public static void applySearingHeartBlockLabel(ServerWorld world, BlockPos pos) {
+        BlockEntity be = world.getBlockEntity(pos);
+        if (be == null) return;
+        ComponentMap withName = ComponentMap.of(
+            be.getComponents(),
+            ComponentMap.builder()
+                .add(DataComponentTypes.CUSTOM_NAME, SearingHeartItems.SEARING_NAME)
+                .build()
+        );
+        be.setComponents(withName);
+        be.markDirty();
+    }
+
+    /** Place or replace the block at {@code pos} with the vanilla clam core block (blast furnace). */
+    public static void placeHeartBlockForModule(ServerWorld world, BlockPos pos, Module m) {
+        boolean lit = m != null && m.status == 1;
+        BlockState state = VoidClamCoreBlocks.CORE_BLOCK.getDefaultState().with(AbstractFurnaceBlock.LIT, lit);
+        world.setBlockState(pos, state);
+        applySearingHeartBlockLabel(world, pos);
+    }
+
+    public static void stripVanillaBlastFurnaceDropsNear(ServerWorld world, BlockPos pos) {
+        Box box = Box.of(Vec3d.ofCenter(pos), 0.45, 0.45, 0.45);
+        for (Entity entity : world.getOtherEntities(null, box, e -> e instanceof ItemEntity)) {
+            ItemEntity itemEntity = (ItemEntity) entity;
+            if (SearingHeartItems.isPlainBlastFurnaceDrop(itemEntity.getStack())) {
+                itemEntity.discard();
+            }
+        }
+    }
+
+    /**
+     * Clam core broken: replace the default blast furnace drop with a named stack carrying module + furnace data,
+     * then remove the module from the save. Furnace components were stored in {@link #breakingClamFurnaceComponents}.
+     */
+    public static void onClamCoreBroken(ServerWorld world, @Nullable PlayerEntity player, BlockPos pos, BlockState state) {
+        ComponentMap furnaceSnap = breakingClamFurnaceComponents.get();
+        breakingClamFurnaceComponents.remove();
         Module m = findModuleAt(pos);
         if (m == null) return;
-        clamKillBlocking(world.getServer(), m.clamId, true, null, null);
+        stripVanillaBlastFurnaceDropsNear(world, pos);
+        ItemStack drop = SearingHeartItems.createDropFromBreak(m, furnaceSnap);
+        net.minecraft.block.Block.dropStack(world, pos, drop);
+        clamKillBlocking(world.getServer(), m.clamId, true);
     }
 
-    /** Heart placed: re-link existing module at coords or register new clam. */
-    public static void onHeartPlaced(ServerWorld world, BlockPos pos) {
-        if (world.getBlockEntity(pos) instanceof VoidClamHeartBlockEntity heart) {
-            Module existing = findModuleAt(pos);
-            if (existing != null) {
-                heart.syncFromModule(existing);
-                save(world.getServer());
-                return;
-            }
-            Module m = new Module();
-            heart.getModuleData().applyToModule(m);
-            m.ensureClamId();
-            m.x = pos.getX();
-            m.y = pos.getY();
-            m.z = pos.getZ();
-            if (!registerModule(m)) {
-                world.removeBlock(pos, false);
-                return;
-            }
-            CommandToolbox.buildStub(world, m.x, m.y, m.z);
-            heart.syncFromModule(m);
-            save(world.getServer());
+    /**
+     * After a searing heart item successfully places a blast furnace: new clam id at placement position,
+     * inheriting module fields from the item.
+     */
+    public static void onSearingHeartItemPlaced(ServerWorld world, BlockPos pos, ItemStack templateFromBeforeConsume) {
+        if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
+        Module snap = SearingHeartItems.readModuleTemplateFromStack(templateFromBeforeConsume);
+        if (snap == null) return;
+        if (findModuleAt(pos) != null) return;
+        Module m = new Module();
+        m.clamId = UUID.randomUUID();
+        SearingHeartItems.applyTemplateOntoModule(snap, m);
+        m.x = pos.getX();
+        m.y = pos.getY();
+        m.z = pos.getZ();
+        if (!registerModuleForSearingPlace(m)) {
+            world.breakBlock(pos, false);
+            net.minecraft.block.Block.dropStack(world, pos, templateFromBeforeConsume.copy());
+            return;
         }
+        m.status = 0;
+        m.stubBuilt = false;
+        applySearingHeartBlockLabel(world, pos);
+        save(world.getServer());
     }
 
-    static void syncModuleToHeartBlock(ServerWorld world, UUID clamId) {
-        Module m = getModuleById(clamId);
-        if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
-        BlockPos p = new BlockPos(m.x, m.y, m.z);
-        if (world.getBlockEntity(p) instanceof VoidClamHeartBlockEntity heart) {
-            heart.syncFromModule(m);
+    /**
+     * Server tick for each loaded module: reach, core check, heartbeat, defense (formerly heart block entity tick).
+     * Runs on overworld; module coordinates are stored for the primary world.
+     */
+    public static void tickLoadedClamCores(ServerWorld world) {
+        long t = world.getTime();
+        for (Module m : modulesById.values()) {
+            if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            BlockPos pos = new BlockPos(m.x, m.y, m.z);
+            tryConsumeFuelAndWakeClam(world, m);
+            int phase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, 20);
+            UUID clamId = m.clamId;
+            if ((t + phase) % 20 == 0) {
+                tickCoreCheckAtHeart(world, pos, clamId);
+            }
+            if (m.status != 1) continue;
+            if ((t + phase) % 20 == 0) {
+                CommandToolbox.clamReach(world, clamId);
+            }
+            if ((t + phase + 11) % (4 * 20) == 0) {
+                tickHeartbeatForModule(world, getModuleByClamId(clamId));
+            }
+            if ((t + phase + 7) % (5 * 20) == 0) {
+                tickDefenseForModule(world, getModuleByClamId(clamId));
+            }
         }
     }
 
     public static boolean isLight(Block block) { return lights.contains(block); }
+
+    /** Fuel-slot items that can wake a dormant clam: edible light blocks (as items) or anything the fuel registry accepts. */
+    public static boolean isClamWakeFuel(ServerWorld world, ItemStack stack) {
+        if (stack.isEmpty()) return false;
+        if (stack.getItem() instanceof BlockItem bi && isLight(bi.getBlock())) {
+            return true;
+        }
+        return world.getServer().getFuelRegistry().isFuel(stack);
+    }
+
+    /**
+     * If the core furnace has a valid wake item in the fuel slot, consume one and mark the module awake ({@link Module#status} {@code 1}).
+     */
+    public static void tryConsumeFuelAndWakeClam(ServerWorld world, Module m) {
+        if (m == null || m.status != 0) return;
+        BlockPos pos = new BlockPos(m.x, m.y, m.z);
+        if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
+        BlockEntity be = world.getBlockEntity(pos);
+        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return;
+        ItemStack fuel = furnace.getStack(CLAM_CORE_FUEL_SLOT);
+        if (fuel.isEmpty() || !isClamWakeFuel(world, fuel)) return;
+        fuel.decrement(1);
+        furnace.setStack(CLAM_CORE_FUEL_SLOT, fuel);
+        furnace.markDirty();
+        m.status = 1;
+        if (!m.stubBuilt) {
+            CommandToolbox.buildStub(world, m.x, m.y, m.z);
+            m.stubBuilt = true;
+        }
+        save(world.getServer());
+    }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
 
@@ -473,6 +567,7 @@ public final class VoidClamMod {
                         m.clamId = null;
                     }
                 }
+                m.stubBuilt = parts.length > 12 ? Boolean.parseBoolean(parts[12]) : true;
                 m.ensureClamId();
                 modulesById.put(m.clamId, m);
             }
@@ -491,6 +586,9 @@ public final class VoidClamMod {
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             BlockPos p = new BlockPos(m.x, m.y, m.z);
             Block b = world.getBlockState(p).getBlock();
+            if (b == VoidClamCoreBlocks.CORE_BLOCK) {
+                continue;
+            }
             if (b == Blocks.NETHER_WART_BLOCK || b == Blocks.OBSIDIAN) {
                 placeHeartBlockForModule(world, p, m);
                 any = true;
@@ -518,7 +616,7 @@ public final class VoidClamMod {
                     out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
                         + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
                         + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself
-                        + "," + m.clamId);
+                        + "," + m.clamId + "," + m.stubBuilt);
                 }
             }
         } catch (IOException e) {
@@ -539,7 +637,7 @@ public final class VoidClamMod {
         m.y = y;
         m.z = z;
         m.currentSize = 1;
-        m.status = 1;
+        m.status = 0;
         m.energy = 0;
         m.age = 0;
         VoidClamConfig cfg = VoidClamConfig.get();
@@ -551,6 +649,7 @@ public final class VoidClamMod {
         }
         placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
+        m.stubBuilt = true;
         save(world.getServer());
         return m.clamId;
     }
@@ -658,7 +757,7 @@ public final class VoidClamMod {
                         BlockState state = world.getBlockState(new BlockPos(ix, iy, iz));
                         Block b = state.getBlock();
                         if (b != Blocks.AIR && b != Blocks.WATER && b != Blocks.LAVA && b != Blocks.OBSIDIAN
-                            && b != Blocks.NETHER_WART_BLOCK && b != VoidClamBlocks.HEART_BLOCK) {
+                            && b != Blocks.NETHER_WART_BLOCK && b != VoidClamCoreBlocks.CORE_BLOCK) {
                             float br = b.getBlastResistance();
                             if (br < 0) hasRoom = 0;
                             else cst += br;
@@ -684,7 +783,7 @@ public final class VoidClamMod {
             if (m == null) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             Block block = world.getBlockState(new BlockPos(m.x, m.y, m.z)).getBlock();
-            if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
+            if (block != VoidClamCoreBlocks.CORE_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
                 toKill.add(m.clamId);
             }
         }
@@ -699,7 +798,7 @@ public final class VoidClamMod {
         if (m == null || m.x != heartPos.getX() || m.y != heartPos.getY() || m.z != heartPos.getZ()) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         Block block = world.getBlockState(heartPos).getBlock();
-        if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
+        if (block != VoidClamCoreBlocks.CORE_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
             clamKill(world.getServer(), clamId, false);
         }
     }

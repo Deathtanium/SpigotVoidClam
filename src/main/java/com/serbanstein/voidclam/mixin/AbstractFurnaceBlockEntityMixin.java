@@ -1,0 +1,39 @@
+package com.serbanstein.voidclam.mixin;
+
+import com.serbanstein.voidclam.VoidClamMod;
+import com.serbanstein.voidclam.VoidClamCoreBlocks;
+import net.minecraft.block.AbstractFurnaceBlock;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/**
+ * Keep the blast furnace {@code lit} visuals in sync with clam wake state (vanilla smelting otherwise overwrites {@link AbstractFurnaceBlock#LIT}).
+ */
+@Mixin(AbstractFurnaceBlockEntity.class)
+public abstract class AbstractFurnaceBlockEntityMixin {
+    @Inject(method = "tick", at = @At("TAIL"))
+    private static void voidclam$forceLitForClamCore(
+        ServerWorld world,
+        BlockPos pos,
+        BlockState state,
+        AbstractFurnaceBlockEntity blockEntity,
+        CallbackInfo ci
+    ) {
+        if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            return;
+        }
+        var module = VoidClamMod.findModuleAt(pos);
+        if (module == null) return;
+        boolean wantLit = module.status == 1;
+        if (state.get(AbstractFurnaceBlock.LIT) != wantLit) {
+            world.setBlockState(pos, state.with(AbstractFurnaceBlock.LIT, wantLit), Block.NOTIFY_LISTENERS);
+        }
+    }
+}

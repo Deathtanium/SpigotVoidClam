@@ -7,7 +7,7 @@
   "authors": ["serbanstein"],
   "contact": {},
   "license": "MIT",
-  "environment": "*",
+  "environment": "server",
   "entrypoints": {
     "main": ["com.serbanstein.voidclam.VoidClamModEntry"]
   },

@@ -275,13 +275,12 @@ public final class CommandToolbox {
             if (ix != x || iz != z)
                 world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
-        VoidClamMod.syncModuleToHeartBlock(world, clamId);
     }
 
     /** Start light/ore search for module. Scans box off-thread, pathfinds to closest target. */
     public static void clamReach(ServerWorld world, UUID clamId) {
         Module m = VoidClamMod.getModuleById(clamId);
-        if (m == null) return;
+        if (m == null || m.status != 1) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         m.ensureClamId();
         if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) return;

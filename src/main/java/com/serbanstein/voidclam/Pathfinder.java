@@ -254,7 +254,7 @@ public final class Pathfinder {
             BlockPos nextPos = new BlockPos(nx, ny, nz);
             BlockState bl = world.getBlockState(nextPos);
             double cst;
-            if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(VoidClamBlocks.HEART_BLOCK)) {
+            if (VoidClamCoreBlocks.isWartOrCore(bl)) {
                 cst = 0;
             } else if (bl.getBlock() instanceof BlockEntityProvider) {
                 cst = 2500;
@@ -411,7 +411,7 @@ public final class Pathfinder {
      */
     private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
         BlockState bl = world.getBlockState(pos);
-            if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(VoidClamBlocks.HEART_BLOCK)) {
+            if (VoidClamCoreBlocks.isWartOrCore(bl)) {
                 return false;
             }
             if (bl.getBlock() instanceof BlockEntityProvider) {
@@ -474,6 +474,10 @@ public final class Pathfinder {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
         Module modForFlag = VoidClamMod.getModuleById(clamId);
         if (modForFlag == null) return false;
+        if (modForFlag.status != 1) {
+            modForFlag.busyFlagMainCycle = 0;
+            return false;
+        }
         modForFlag.ensureClamId();
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
@@ -545,7 +549,7 @@ public final class Pathfinder {
     /** True if block is water, air, or nether wart (for adjacent count B). */
     private static boolean isWaterAirOrWart(BlockState state) {
         return state.isOf(Blocks.WATER) || state.isAir()
-            || state.isOf(Blocks.NETHER_WART_BLOCK) || state.isOf(VoidClamBlocks.HEART_BLOCK);
+            || VoidClamCoreBlocks.isWartOrCore(state);
     }
 
     /** Number of adjacent blocks (6-neighborhood) that are not water/air/nether wart. */
@@ -589,7 +593,7 @@ public final class Pathfinder {
             public boolean expandFrom(ServerWorld w, long curLong, int distanceFromStart) {
                 if (curLong == startLong) return true;
                 BlockState st = w.getBlockState(BlockPos.fromLong(curLong));
-                return st.isOf(Blocks.NETHER_WART_BLOCK) || st.isOf(VoidClamBlocks.HEART_BLOCK);
+                return VoidClamCoreBlocks.isWartOrCore(st);
             }
 
             @Override
@@ -784,7 +788,7 @@ public final class Pathfinder {
                 }
                 BlockPos pos = new BlockPos(refNode.x, refNode.y, refNode.z);
                 BlockState mat = world.getBlockState(pos);
-                if (mat.isOf(VoidClamBlocks.HEART_BLOCK)) {
+                if (mat.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
                     int packedH = TendrilPulseManager.getPackedBrightnessAt(world, pos);
                     TendrilPulseManager.startPulse(world, pos, mat, packedH, () -> {}, TendrilPulseManager.INITIAL_SCALE_OMNI);
                     return;
@@ -841,7 +845,7 @@ public final class Pathfinder {
                     stamina[0] -= cst;
                 }
 
-                boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK) || mat.isOf(VoidClamBlocks.HEART_BLOCK));
+                boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat));
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
                     pathStopped[0] = 1; // path stops; clam does not get energy; resume next attempt
                     pathStoppedAwaitingContainer[0] = 1;
@@ -883,7 +887,7 @@ public final class Pathfinder {
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
                     VoidClamMod.addEnergy(pathClamId, 1); // energy only when light source is eaten
-                if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK) || mat.isOf(VoidClamBlocks.HEART_BLOCK))) {
+                if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
                 }
