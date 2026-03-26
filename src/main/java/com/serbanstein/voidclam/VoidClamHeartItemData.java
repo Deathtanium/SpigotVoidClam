@@ -8,11 +8,13 @@ import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Serializable module fields carried on a heart item stack (no world position; assigned on place).
  */
 public record VoidClamHeartItemData(
+    String clamIdStr,
     int type,
     int currentSize,
     int status,
@@ -27,6 +29,7 @@ public record VoidClamHeartItemData(
     private static final Codec<List<Long>> LONG_LIST_CODEC = Codec.LONG.listOf();
 
     public static final Codec<VoidClamHeartItemData> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+        Codec.STRING.optionalFieldOf("clamId", "").forGetter(VoidClamHeartItemData::clamIdStr),
         Codec.INT.fieldOf("type").forGetter(VoidClamHeartItemData::type),
         Codec.INT.fieldOf("currentSize").forGetter(VoidClamHeartItemData::currentSize),
         Codec.INT.fieldOf("status").forGetter(VoidClamHeartItemData::status),
@@ -42,6 +45,7 @@ public record VoidClamHeartItemData(
     public static VoidClamHeartItemData defaultForNewClam() {
         VoidClamConfig cfg = VoidClamConfig.get();
         return new VoidClamHeartItemData(
+            "",
             1,
             1,
             1,
@@ -65,6 +69,7 @@ public record VoidClamHeartItemData(
             ores.add(p.asLong());
         }
         return new VoidClamHeartItemData(
+            m.clamId != null ? m.clamId.toString() : "",
             m.type,
             m.currentSize,
             m.status,
@@ -79,6 +84,15 @@ public record VoidClamHeartItemData(
     }
 
     public void applyToModule(Module m) {
+        if (clamIdStr != null && !clamIdStr.isEmpty()) {
+            try {
+                m.clamId = UUID.fromString(clamIdStr);
+            } catch (IllegalArgumentException ignored) {
+                m.clamId = UUID.randomUUID();
+            }
+        } else if (m.clamId == null) {
+            m.clamId = UUID.randomUUID();
+        }
         m.type = type;
         m.currentSize = currentSize;
         m.status = status;
@@ -98,6 +112,9 @@ public record VoidClamHeartItemData(
     }
 
     public void writeModulePayload(WriteView view) {
+        if (clamIdStr != null && !clamIdStr.isEmpty()) {
+            view.putString("clamId", clamIdStr);
+        }
         view.putInt("type", type);
         view.putInt("currentSize", currentSize);
         view.putInt("status", status);
@@ -114,6 +131,7 @@ public record VoidClamHeartItemData(
         List<Long> lights = view.read("lightsBlacklist", LONG_LIST_CODEC).orElse(List.of());
         List<Long> ores = view.read("oresBlacklist", LONG_LIST_CODEC).orElse(List.of());
         return new VoidClamHeartItemData(
+            view.getString("clamId", ""),
             view.getInt("type", 1),
             view.getInt("currentSize", 1),
             view.getInt("status", 1),

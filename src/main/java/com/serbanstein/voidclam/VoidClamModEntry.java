@@ -21,12 +21,8 @@ import net.minecraft.util.math.Vec3d;
 
 /** Fabric mod entrypoint: lifecycle, server tick hook, and commands. */
 public class VoidClamModEntry implements ModInitializer {
-    private static final int TICK_REACH = 20;              // auto-reach (search for lights) every second
-    private static final int TICK_TARGETS = 20;            // drain path queue every second
     private static final int TICK_AUTO_GROW = 5 * 60 * 20; // auto-repair/grow every 5 min
-    private static final int TICK_HEARTBEAT = 4 * 20;      // heartbeat every 4s
     private static final int TICK_OMNI_PULSE = 5 * 20;     // omnidirectional pulse every ~5s
-    private static final int TICK_DEFENSE = 5 * 20;        // defense (encase + effects + horn) every 5s
     private static final int TICK_CLEANUP = 60 * 20;       // stray tendril display cleanup every 1 min
     private static final int OP_LEVEL = 2;                 // commands hidden unless player has this OP level
 
@@ -70,21 +66,8 @@ public class VoidClamModEntry implements ModInitializer {
         }
         TendrilPulseManager.tickOmniPulseJob(world);
 
-        if (tick % TICK_TARGETS == 0) {
-            for (int i = 1; i <= VoidClamMod.getModuleNumber(); i++) {
-                if (!VoidClamMod.isModuleInLoadedChunk(world, i)) continue;
-                CommandToolbox.clamReach(world, i);
-            }
-            VoidClamMod.tickCoreCheck(world);
-        }
-        if (tick % TICK_HEARTBEAT == 0)
-            VoidClamMod.tickHeartbeat(world);
         if (tick % TICK_OMNI_PULSE == 0)
             TendrilPulseManager.runOmnidirectionalPulse(world);
-        if (tick % TICK_DEFENSE == 0) {
-            for (ServerWorld w : server.getWorlds())
-                VoidClamMod.tickDefense(w);
-        }
         if (tick % TICK_AUTO_GROW == 0)
             VoidClamMod.tickAutoRepairAndGrow(world);
         if (tick % TICK_CLEANUP == 0) {

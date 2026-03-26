@@ -37,7 +37,8 @@ public final class VoidClamBlocks {
     public static final BlockEntityType<VoidClamHeartBlockEntity> HEART_BLOCK_ENTITY_TYPE = Registry.register(
         Registries.BLOCK_ENTITY_TYPE,
         Identifier.of("voidclam", "voidclam_heart"),
-        FabricBlockEntityTypeBuilder.create(VoidClamHeartBlockEntity::new, HEART_BLOCK).build()
+        FabricBlockEntityTypeBuilder.create(VoidClamHeartBlockEntity::new, HEART_BLOCK)
+            .build()
     );
 
     public static final Item HEART_BLOCK_ITEM = Registry.register(

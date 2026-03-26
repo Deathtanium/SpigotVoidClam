@@ -4,11 +4,14 @@ import net.minecraft.util.math.BlockPos;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * One VoidClam module (SIVA node). Types: 0 stub, 1 teen, 2 broadcast, 3 arming, 4 complex, -1 lightning rod.
  */
 public class Module {
+    /** Stable identity for pathfinding/kill matching; survives CSV slot shifts when persisted. */
+    public UUID clamId;
     public int type;
     public int x;
     public int y;
@@ -31,4 +34,10 @@ public class Module {
     public final Set<BlockPos> oresBlackList = new HashSet<>();
     public short busyFlagPlaceEvent;
     public short busyFlagMainCycle;
+
+    public void ensureClamId() {
+        if (clamId == null) {
+            clamId = UUID.randomUUID();
+        }
+    }
 }

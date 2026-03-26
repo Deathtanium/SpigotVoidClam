@@ -35,7 +35,7 @@ public final class TendrilPulseManager {
     private static final float INITIAL_SCALE = 1.2f;
     private static final float TARGET_SCALE = 1.0f;
     /** Omni pulse: barely noticeable — 1 pixel bigger than block (16px → 17/16). */
-    private static final float INITIAL_SCALE_OMNI = 1f + 1f / 16f;
+    public static final float INITIAL_SCALE_OMNI = 1f + 1f / 16f;
     private static final int PULSE_DURATION_TICKS = 8;
 
     /** Omnidirectional pulse: max BFS blocks per module and total; delay = distance * TICKS_PER_STEP (like path building). */
@@ -179,10 +179,10 @@ public final class TendrilPulseManager {
             VoidClamMod.scheduleDelayed(world, delay, () -> {
                 if (!world.isChunkLoaded(pos)) return;
                 BlockState state = world.getBlockState(pos);
-                if (state.getBlock() != Blocks.NETHER_WART_BLOCK)
+                if (state.getBlock() != Blocks.NETHER_WART_BLOCK && !state.isOf(VoidClamBlocks.HEART_BLOCK))
                     return;
                 int packed = getPackedBrightnessAt(world, pos);
-                startPulse(world, pos, packed, () -> {}, INITIAL_SCALE_OMNI);
+                startPulse(world, pos, state, packed, () -> {}, INITIAL_SCALE_OMNI);
             });
         }
     }
@@ -269,21 +269,18 @@ public final class TendrilPulseManager {
         throw new NoSuchFieldException("TrackedData<" + valueType.getSimpleName() + "> in " + clazz.getSimpleName());
     }
 
+    private static final double PLAYER_RANGE_SQ = 32.0 * 32.0;
+
     /**
      * Starts a pulsing tendril at the given position. Caller must sample brightness with
      * {@link #getPackedBrightnessAt(ServerWorld, BlockPos)} before placing the solid block and pass it here.
      */
     public static void startPulse(ServerWorld world, BlockPos pos, int packedBrightness, Runnable onComplete) {
-        startPulse(world, pos, packedBrightness, onComplete, INITIAL_SCALE);
+        startPulse(world, pos, Blocks.NETHER_WART_BLOCK.getDefaultState(), packedBrightness, onComplete, INITIAL_SCALE);
     }
 
-    private static final double PLAYER_RANGE_SQ = 32.0 * 32.0;
-
-    /**
-     * Starts a pulsing tendril with a custom initial scale (e.g. {@link #INITIAL_SCALE_OMNI} for a subtle omni pulse).
-     * Does not spawn a display if no player is within 32 blocks of the block position.
-     */
-    public static void startPulse(ServerWorld world, BlockPos pos, int packedBrightness, Runnable onComplete, float initialScale) {
+    /** Pulse using {@code displayState} on the BlockDisplay (e.g. heart block so omni pulses match local block). */
+    public static void startPulse(ServerWorld world, BlockPos pos, BlockState displayState, int packedBrightness, Runnable onComplete, float initialScale) {
         if (!VoidClamConfig.get().vfx_enabled) {
             onComplete.run();
             return;
@@ -301,31 +298,25 @@ public final class TendrilPulseManager {
         }
         DisplayEntity.BlockDisplayEntity display = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, world);
         display.setPosition(pos.getX(), pos.getY(), pos.getZ());
-        display.getDataTracker().set(blockStateData, Blocks.NETHER_WART_BLOCK.getDefaultState());
+        display.getDataTracker().set(blockStateData, displayState);
         display.getDataTracker().set(scaleData, new Vector3f(initialScale, initialScale, initialScale));
         if (brightnessData != null) {
             display.getDataTracker().set(brightnessData, packedBrightness);
-            if (DEBUG) {
-                int v = display.getDataTracker().get(brightnessData);
-                System.out.println(DEBUG_PREFIX + "before spawn: set brightnessData(" + brightnessDataFieldName + ")=" + packedBrightness + ", get=" + v);
-            }
-        } else if (DEBUG) {
-            System.out.println(DEBUG_PREFIX + "brightnessData is null");
         }
         display.setNoGravity(true);
         display.setInvulnerable(true);
         display.addCommandTag(VOIDCLAM_DISPLAY_TAG);
-
         if (!world.spawnEntity(display)) return;
-
-        if (DEBUG && brightnessData != null) {
-            int afterSpawn = display.getDataTracker().get(brightnessData);
-            System.out.println(DEBUG_PREFIX + "after spawn: brightnessData get=" + afterSpawn);
-            debugLogAllIntegerTrackedData(display);
-        }
-
         long startTick = world.getTime();
         entries.add(new PulseEntry(world, pos, display, startTick, onComplete, initialScale));
+    }
+
+    /**
+     * Starts a pulsing tendril with a custom initial scale (e.g. {@link #INITIAL_SCALE_OMNI} for a subtle omni pulse).
+     * Does not spawn a display if no player is within 32 blocks of the block position.
+     */
+    public static void startPulse(ServerWorld world, BlockPos pos, int packedBrightness, Runnable onComplete, float initialScale) {
+        startPulse(world, pos, Blocks.NETHER_WART_BLOCK.getDefaultState(), packedBrightness, onComplete, initialScale);
     }
 
     /** Call every server tick for each world that may have pulses. */

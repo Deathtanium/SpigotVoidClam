@@ -8,7 +8,10 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -47,12 +50,14 @@ public final class CommandToolbox {
      * {@code onAbortedBeforeRun} if non-null.
      *
      * @param pathfindingModuleSlot module index {@code tno} for this work, or 0 if unknown (position-only fallback for kill matching)
+     * @param pathfindingClamId when non-null, kill barrier matches this id (stable across slot shifts)
      */
     public static void submitPathfinding(
         ServerWorld world,
         int clamCenterX,
         int clamCenterZ,
         int pathfindingModuleSlot,
+        @Nullable UUID pathfindingClamId,
         Runnable onAbortedBeforeRun,
         Runnable task
     ) {
@@ -63,7 +68,7 @@ public final class CommandToolbox {
             return;
         }
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
-            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot, pathfindingClamId)) {
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -73,7 +78,7 @@ public final class CommandToolbox {
             return;
         }
         pathfinderExecutor.execute(() -> {
-            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot, pathfindingClamId)) {
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -283,13 +288,14 @@ public final class CommandToolbox {
         Module m = modules[tno];
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         int slot = tno;
-        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot)) return;
+        m.ensureClamId();
+        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot, m.clamId)) return;
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
-        submitPathfinding(world, m.x, m.z, slot, () -> m.busyFlagMainCycle = 0, () -> {
+        submitPathfinding(world, m.x, m.z, slot, m.clamId, () -> m.busyFlagMainCycle = 0, () -> {
             try {
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot, m.clamId)) {
                     m.busyFlagMainCycle = 0;
                     return;
                 }
@@ -306,7 +312,7 @@ public final class CommandToolbox {
                     for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
                         for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
                             for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
+                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot, m.clamId)) {
                                     break outerScan;
                                 }
                                 BlockPos pos = new BlockPos(ix, iy, iz);
@@ -323,7 +329,7 @@ public final class CommandToolbox {
                             }
                         }
                     }
-                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot, m.clamId)) {
                         m.busyFlagMainCycle = 0;
                         return;
                     }
@@ -338,7 +344,7 @@ public final class CommandToolbox {
                     m.oresBlackList.add(closest.toImmutable());
                 }
 
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot, m.clamId)) {
                     if (closest != null) {
                         if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
                             m.lightsBlackList.remove(closest.toImmutable());

@@ -48,6 +48,8 @@ public final class VoidClamMod {
      * the executor drains. 0 = none.
      */
     private static volatile int asyncPathfindingKillVictimSlot;
+    /** Matches {@link Module#clamId} for the victim during kill barrier; aborts path work by identity not array index. */
+    private static volatile @Nullable UUID asyncPathfindingKillVictimClamId;
     private static final Object asyncKillCoordinatorLock = new Object();
     private static final Queue<KillRequest> pendingClamKills = new ConcurrentLinkedQueue<>();
     private static MinecraftServer pendingKillDrainServer;
@@ -116,16 +118,22 @@ public final class VoidClamMod {
      * clam; use {@code 0} only when matching by center X/Z against the victim slot.
      *
      * @param pathfindingModuleSlot module index {@code tno} for this work (1..N), or {@code 0} when only center coordinates are known
+     * @param pathfindingClamId stable id for this path job; when non-null, kill barrier matches this instead of slot
      */
     public static boolean shouldAbortAsyncPathfindingWork(
         ServerWorld world,
         int clamCenterX,
         int clamCenterZ,
-        int pathfindingModuleSlot
+        int pathfindingModuleSlot,
+        @Nullable UUID pathfindingClamId
     ) {
         if (asyncPathfindingShutdownRequested) return true;
+        UUID victimId = asyncPathfindingKillVictimClamId;
+        if (victimId != null && pathfindingClamId != null && victimId.equals(pathfindingClamId)) {
+            return true;
+        }
         int victim = asyncPathfindingKillVictimSlot;
-        if (victim > 0) {
+        if (victim > 0 && pathfindingClamId == null) {
             if (pathfindingModuleSlot == victim) {
                 return true;
             }
@@ -164,16 +172,39 @@ public final class VoidClamMod {
             savedSeekOres[i] = savedSeekOres[i + 1];
         }
         clamKillShiftArrayOnly(victimSlot);
+        remapTargetsQueueTnoFromClamIds();
+    }
+
+    private static void remapTargetsQueueTnoFromClamIds() {
+        List<Node> batch = new ArrayList<>();
+        Node n;
+        while ((n = targets.poll()) != null) {
+            batch.add(n);
+        }
+        for (Node node : batch) {
+            if (node.clamId != null) {
+                int s = getSlotByClamId(node.clamId);
+                if (s < 1) continue;
+                node.tno = s;
+            }
+            targets.offer(node);
+        }
     }
 
     /** Drop queued path results for this slot only (no index adjustment). Call when starting a kill to narrow the enqueue race. */
     private static void purgeTargetsForVictimSlotOnly(int victimSlot) {
+        UUID victimClamId = victimSlot >= 1 && victimSlot <= moduleNumber && modules[victimSlot] != null
+            ? modules[victimSlot].clamId : null;
         List<Node> kept = new ArrayList<>();
         Node n;
         while ((n = targets.poll()) != null) {
-            if (n.tno != victimSlot) {
-                kept.add(n);
+            if (victimClamId != null && n.clamId != null && victimClamId.equals(n.clamId)) {
+                continue;
             }
+            if (n.clamId == null && n.tno == victimSlot) {
+                continue;
+            }
+            kept.add(n);
         }
         for (Node k : kept) {
             targets.offer(k);
@@ -181,13 +212,18 @@ public final class VoidClamMod {
     }
 
     private static void purgeAndAdjustTargetsQueueForKill(int victimSlot) {
+        UUID victimClamId = victimSlot >= 1 && victimSlot <= moduleNumber && modules[victimSlot] != null
+            ? modules[victimSlot].clamId : null;
         List<Node> kept = new ArrayList<>();
         Node n;
         while ((n = targets.poll()) != null) {
-            if (n.tno == victimSlot) {
+            if (victimClamId != null && n.clamId != null && victimClamId.equals(n.clamId)) {
                 continue;
             }
-            if (n.tno > victimSlot) {
+            if (n.clamId == null && n.tno == victimSlot) {
+                continue;
+            }
+            if (n.clamId == null && n.tno > victimSlot) {
                 n.tno--;
             }
             kept.add(n);
@@ -253,10 +289,12 @@ public final class VoidClamMod {
         victim.busyFlagMainCycle = 0;
         purgeTargetsForVictimSlotOnly(tno);
         asyncPathfindingKillVictimSlot = tno;
+        asyncPathfindingKillVictimClamId = victim.clamId;
         asyncPathfindingKillBarrierInEffect = true;
         MinecraftServer server = pendingKillDrainServer;
         if (server == null) {
             asyncPathfindingKillVictimSlot = 0;
+            asyncPathfindingKillVictimClamId = null;
             asyncPathfindingKillBarrierInEffect = false;
             tryStartNextClamKillDrainLocked();
             return;
@@ -286,6 +324,7 @@ public final class VoidClamMod {
                         }
                     } finally {
                         asyncPathfindingKillVictimSlot = 0;
+                        asyncPathfindingKillVictimClamId = null;
                         asyncPathfindingKillBarrierInEffect = false;
                         synchronized (asyncKillCoordinatorLock) {
                             tryStartNextClamKillDrainLocked();
@@ -323,6 +362,7 @@ public final class VoidClamMod {
         asyncPathfindingShutdownRequested = false;
         asyncPathfindingKillBarrierInEffect = false;
         asyncPathfindingKillVictimSlot = 0;
+        asyncPathfindingKillVictimClamId = null;
         pendingClamKills.clear();
         pendingKillDrainServer = null;
     }
@@ -332,6 +372,7 @@ public final class VoidClamMod {
         asyncPathfindingShutdownRequested = true;
         asyncPathfindingKillBarrierInEffect = false;
         asyncPathfindingKillVictimSlot = 0;
+        asyncPathfindingKillVictimClamId = null;
         pendingClamKills.clear();
         pendingKillDrainServer = null;
         CommandToolbox.shutdownPathfinderExecutorForSessionEnd();
@@ -355,7 +396,8 @@ public final class VoidClamMod {
         }
     }
 
-    private static int findModuleSlotByCenter(BlockPos pos) {
+    /** CSV slot for module whose center matches {@code pos}, or -1. */
+    public static int findModuleSlotByCenter(BlockPos pos) {
         int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
         for (int i = 1; i <= moduleNumber; i++) {
             Module m = modules[i];
@@ -396,6 +438,7 @@ public final class VoidClamMod {
             }
             Module m = new Module();
             heart.getModuleData().applyToModule(m);
+            m.ensureClamId();
             m.x = pos.getX();
             m.y = pos.getY();
             m.z = pos.getZ();
@@ -431,6 +474,28 @@ public final class VoidClamMod {
         if (tno < 1 || tno > moduleNumber || modules[tno] == null) return false;
         Module m = modules[tno];
         return m.x == x && m.y == y && m.z == z;
+    }
+
+    /** Resolve CSV slot by stable id, or -1. */
+    public static int getSlotByClamId(@Nullable UUID clamId) {
+        if (clamId == null) return -1;
+        for (int i = 1; i <= moduleNumber; i++) {
+            Module m = modules[i];
+            if (m != null && clamId.equals(m.clamId)) return i;
+        }
+        return -1;
+    }
+
+    public static @Nullable Module getModuleByClamId(@Nullable UUID clamId) {
+        int s = getSlotByClamId(clamId);
+        return s >= 1 ? modules[s] : null;
+    }
+
+    /** True if a module with this id still exists at the recorded center. */
+    public static boolean moduleMatchesClamAt(@Nullable UUID clamId, int x, int y, int z) {
+        if (clamId == null) return false;
+        Module m = getModuleByClamId(clamId);
+        return m != null && m.x == x && m.y == y && m.z == z;
     }
 
     public static void enqueueTarget(Node node) {
@@ -505,6 +570,14 @@ public final class VoidClamMod {
                 m.seekLights = parts.length > 8 ? Boolean.parseBoolean(parts[8]) : false;
                 m.seekOres = parts.length > 9 ? Boolean.parseBoolean(parts[9]) : false;
                 m.protectItself = parts.length > 10 ? Boolean.parseBoolean(parts[10]) : true;
+                if (parts.length > 11 && !parts[11].isEmpty()) {
+                    try {
+                        m.clamId = UUID.fromString(parts[11]);
+                    } catch (IllegalArgumentException ignored) {
+                        m.clamId = null;
+                    }
+                }
+                m.ensureClamId();
                 modules[moduleNumber] = m;
             }
         } catch (IOException e) {
@@ -545,9 +618,11 @@ public final class VoidClamMod {
                 for (int i = 1; i <= moduleNumber; i++) {
                     Module m = modules[i];
                     if (m != null) {
+                        m.ensureClamId();
                         out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
                             + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
-                            + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself);
+                            + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself
+                            + "," + m.clamId);
                     }
                 }
             }
@@ -568,6 +643,7 @@ public final class VoidClamMod {
             return -1;
         }
         Module m = new Module();
+        m.clamId = UUID.randomUUID();
         m.type = 1;
         m.x = x;
         m.y = y;
@@ -735,45 +811,65 @@ public final class VoidClamMod {
         }
     }
 
-    /** Defense: every 5s, players inside clam octahedron (except 'serbanstein') get encased in nether wart, hunger 0, mining fatigue I for 6s, Dream horn sound. */
-    public static void tickDefense(ServerWorld world) {
-        Module[] modules = getModules();
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
-            if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
-            float volume = Math.min(3f, (float) m.currentSize / 4f);
-            // Dream goat horn: minecraft:item.goat_horn.sound.dream_goat_horn (static registry)
-            SoundEvent dreamHornSound = net.minecraft.registry.Registries.SOUND_EVENT.get(Identifier.of("minecraft", "item.goat_horn.sound.dream_goat_horn"));
-            final SoundEvent soundRef = dreamHornSound;
-            for (ServerPlayerEntity player : world.getPlayers()) {
-                if (player.isSpectator()) continue;
-                if ("serbantein".equalsIgnoreCase(player.getName().getString())) continue;
-                if (!CommandToolbox.isPlayerInsideOctahedron(player, m)) continue;
-                BlockPos playerBlock = player.getBlockPos();
-                for (Direction d : Direction.values()) {
-                    BlockPos adj = playerBlock.offset(d);
-                    BlockState state = world.getBlockState(adj);
-                    if (state.isReplaceable() || state.isAir())
-                        world.setBlockState(adj, Blocks.NETHER_WART_BLOCK.getDefaultState());
-                }
-                SoundEvent hornSound = soundRef != null ? soundRef : SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
-                VoidClamSfx.playBlockSound(world, null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,
-                    hornSound, SoundCategory.HOSTILE, volume, DEFENSE_HORN_PITCH);
-                player.addStatusEffect(new StatusEffectInstance(StatusEffects.HUNGER, DEFENSE_EFFECT_TICKS, 0));
-                player.addStatusEffect(new StatusEffectInstance(StatusEffects.MINING_FATIGUE, DEFENSE_EFFECT_TICKS, 0));
-            }
+    /** Core check for the module at this heart position (from heart BE tick). */
+    public static void tickCoreCheckAtHeart(ServerWorld world, BlockPos heartPos, @Nullable UUID clamId) {
+        int slot = getSlotByClamId(clamId);
+        if (slot < 1 || modules[slot] == null) return;
+        Module m = modules[slot];
+        if (m.x != heartPos.getX() || m.y != heartPos.getY() || m.z != heartPos.getZ()) return;
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        Block block = world.getBlockState(heartPos).getBlock();
+        if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
+            clamKill(world.getServer(), slot, false);
         }
     }
 
-    /** Heartbeat sound for loaded modules (every 4s). */
+    /** Defense for one module (called from heart block entity tick when interval matches). */
+    public static void tickDefenseForModule(ServerWorld world, Module m) {
+        if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        float volume = Math.min(3f, (float) m.currentSize / 4f);
+        SoundEvent dreamHornSound = net.minecraft.registry.Registries.SOUND_EVENT.get(Identifier.of("minecraft", "item.goat_horn.sound.dream_goat_horn"));
+        final SoundEvent soundRef = dreamHornSound;
+        for (ServerPlayerEntity player : world.getPlayers()) {
+            if (player.isSpectator()) continue;
+            if ("serbantein".equalsIgnoreCase(player.getName().getString())) continue;
+            if (!CommandToolbox.isPlayerInsideOctahedron(player, m)) continue;
+            BlockPos playerBlock = player.getBlockPos();
+            for (Direction d : Direction.values()) {
+                BlockPos adj = playerBlock.offset(d);
+                BlockState state = world.getBlockState(adj);
+                if (state.isReplaceable() || state.isAir())
+                    world.setBlockState(adj, Blocks.NETHER_WART_BLOCK.getDefaultState());
+            }
+            SoundEvent hornSound = soundRef != null ? soundRef : SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
+            VoidClamSfx.playBlockSound(world, null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,
+                hornSound, SoundCategory.HOSTILE, volume, DEFENSE_HORN_PITCH);
+            player.addStatusEffect(new StatusEffectInstance(StatusEffects.HUNGER, DEFENSE_EFFECT_TICKS, 0));
+            player.addStatusEffect(new StatusEffectInstance(StatusEffects.MINING_FATIGUE, DEFENSE_EFFECT_TICKS, 0));
+        }
+    }
+
+    /** Legacy: defense for all modules (prefer {@link #tickDefenseForModule} from heart ticks). */
+    public static void tickDefense(ServerWorld world) {
+        Module[] modules = getModules();
+        for (int i = 1; i <= moduleNumber; i++) {
+            tickDefenseForModule(world, modules[i]);
+        }
+    }
+
+    /** Heartbeat for one module (from heart block entity tick). */
+    public static void tickHeartbeatForModule(ServerWorld world, Module m) {
+        if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        float volume = (float) m.currentSize / 4;
+        VoidClamSfx.playBlockSound(world, null, m.x + 0.5, m.y + 0.5, m.z + 0.5,
+            net.minecraft.sound.SoundEvents.BLOCK_CONDUIT_AMBIENT, net.minecraft.sound.SoundCategory.BLOCKS, volume, 0.7f);
+    }
+
+    /** Legacy: heartbeat for all loaded modules. */
     public static void tickHeartbeat(ServerWorld world) {
         Module[] modules = getModules();
         for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
-            if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
-            float volume = (float) m.currentSize / 4;
-            VoidClamSfx.playBlockSound(world, null, m.x + 0.5, m.y + 0.5, m.z + 0.5,
-                net.minecraft.sound.SoundEvents.BLOCK_CONDUIT_AMBIENT, net.minecraft.sound.SoundCategory.BLOCKS, volume, 0.7f);
+            tickHeartbeatForModule(world, modules[i]);
         }
     }
 
