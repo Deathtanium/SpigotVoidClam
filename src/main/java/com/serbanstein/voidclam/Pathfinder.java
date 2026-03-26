@@ -94,6 +94,80 @@ public final class Pathfinder {
         return null;
     }
 
+    /**
+     * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}).
+     */
+    private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
+        BlockState bl = world.getBlockState(pos);
+        if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(Blocks.WARPED_WART_BLOCK)) {
+            return false;
+        }
+        if (bl.getBlock() instanceof BlockEntityProvider) {
+            return true;
+        }
+        return getHardness(world, pos, bl) > 5;
+    }
+
+    private static boolean inPathfindSearchBounds(Module mod, int x, int y, int z) {
+        int c = mod.currentSize;
+        return !(Math.abs(x - mod.x) > 4 * c
+            || Math.abs(y - mod.y) > 5 * c
+            || Math.abs(z - mod.z) > 5 * c);
+    }
+
+    /**
+     * 6-neighbor BFS from start within the same axis bounds as A*. Edges match A* impassability (cells with cost 2500 are walls).
+     * Ignores movement costs; only detects hard disconnects so unreachable goals skip the expensive A* search.
+     * <p>
+     * Today {@link #calculatePath} runs from a worker thread ({@link CommandToolbox#submitPathfinding}). If this prepass is ever
+     * invoked from the server main thread and proves too heavy for TPS, move it to the same executor pattern as A*.
+     */
+    private static boolean isGoalReachableByPrepass(
+        ServerWorld world,
+        int tno,
+        int sx, int sy, int sz,
+        int gx, int gy, int gz,
+        Module mod,
+        Module[] modules,
+        int moduleNumber
+    ) {
+        if (sx == gx && sy == gy && sz == gz) {
+            return true;
+        }
+        if (tno > moduleNumber || modules[tno] == null) {
+            return false;
+        }
+        long goalLong = BlockPos.asLong(gx, gy, gz);
+        long startLong = BlockPos.asLong(sx, sy, sz);
+        Set<Long> seen = new HashSet<>();
+        Queue<Long> queue = new ArrayDeque<>();
+        seen.add(startLong);
+        queue.add(startLong);
+        while (!queue.isEmpty()) {
+            long cur = queue.poll();
+            BlockPos curPos = BlockPos.fromLong(cur);
+            for (Cursor c : xc) {
+                int nx = curPos.getX() + c.x;
+                int ny = curPos.getY() + c.y;
+                int nz = curPos.getZ() + c.z;
+                long nextLong = BlockPos.asLong(nx, ny, nz);
+                if (nextLong == goalLong) {
+                    return true;
+                }
+                if (!inPathfindSearchBounds(mod, nx, ny, nz) || seen.contains(nextLong)) {
+                    continue;
+                }
+                BlockPos nextPos = new BlockPos(nx, ny, nz);
+                if (isPathfindCellImpassable(world, nextPos)) {
+                    continue;
+                }
+                seen.add(nextLong);
+                queue.add(nextLong);
+            }
+        }
+        return false;
+    }
+
     /** Cheaper than Euclidean: no sqrt, O(1). Not admissible when edge costs can be 0 (e.g. wart). */
     private static double manhattanH(int x, int y, int z, int gx, int gy, int gz) {
         return Math.abs(x - gx) + Math.abs(y - gy) + Math.abs(z - gz);
@@ -104,6 +178,11 @@ public final class Pathfinder {
         Module[] modules = VoidClamMod.getModules();
         Module modForFlag = modules[tno];
         if (modForFlag == null) return false;
+        int moduleNumber = VoidClamMod.getModuleNumber();
+        if (!isGoalReachableByPrepass(world, tno, sx, sy, sz, gx, gy, gz, modForFlag, modules, moduleNumber)) {
+            modForFlag.busyFlagMainCycle = 0;
+            return false;
+        }
         List<Node> open = new ArrayList<>();
         List<Node> closed = new ArrayList<>();
 
@@ -112,8 +191,6 @@ public final class Pathfinder {
         firstNode.h = manhattanH(sx, sy, sz, gx, gy, gz);
         firstNode.f = firstNode.g + firstNode.h;
         open.add(firstNode);
-
-        int moduleNumber = VoidClamMod.getModuleNumber();
 
         while (!open.isEmpty()) {
             Node nextCheapestNode = leastF(open);
