@@ -143,6 +143,7 @@ public final class TendrilPulseManager {
      * BFS runs over multiple ticks (see {@link #tickOmniPulseJob}); when done, pulses are scheduled.
      */
     public static void runOmnidirectionalPulse(ServerWorld world) {
+        if (!VoidClamConfig.get().vfx_enabled) return;
         if (omniPulseJob != null) return;
         Module[] modules = VoidClamMod.getModules();
         int moduleNumber = VoidClamMod.getModuleNumber();
@@ -283,6 +284,10 @@ public final class TendrilPulseManager {
      * Does not spawn a display if no player is within 32 blocks of the block position.
      */
     public static void startPulse(ServerWorld world, BlockPos pos, int packedBrightness, Runnable onComplete, float initialScale) {
+        if (!VoidClamConfig.get().vfx_enabled) {
+            onComplete.run();
+            return;
+        }
         boolean playerInRange = false;
         for (ServerPlayerEntity player : world.getPlayers()) {
             if (pos.getSquaredDistance(player.getBlockPos()) <= PLAYER_RANGE_SQ) {

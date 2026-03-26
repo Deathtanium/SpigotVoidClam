@@ -310,6 +310,8 @@ public final class VoidClamMod {
         pendingClamKills.clear();
         pendingKillDrainServer = null;
         CommandToolbox.shutdownPathfinderExecutorForSessionEnd();
+        Pathfinder.clearSyncPathJobsForSessionEnd();
+        NaturalSpawnHandler.clearForSessionEnd();
         for (int i = 1; i <= moduleNumber; i++) {
             if (modules[i] != null) {
                 modules[i].busyFlagMainCycle = 0;
@@ -408,6 +410,7 @@ public final class VoidClamMod {
                 m.age = Integer.parseInt(parts[7]);
                 m.seekLights = parts.length > 8 ? Boolean.parseBoolean(parts[8]) : false;
                 m.seekOres = parts.length > 9 ? Boolean.parseBoolean(parts[9]) : false;
+                m.protectItself = parts.length > 10 ? Boolean.parseBoolean(parts[10]) : true;
                 modules[moduleNumber] = m;
             }
         } catch (IOException e) {
@@ -429,7 +432,7 @@ public final class VoidClamMod {
                     if (m != null) {
                         out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
                             + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
-                            + "," + m.seekLights + "," + m.seekOres);
+                            + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself);
                     }
                 }
             }
@@ -458,6 +461,10 @@ public final class VoidClamMod {
         m.status = 1;
         m.energy = 0;
         m.age = 0;
+        VoidClamConfig cfg = VoidClamConfig.get();
+        m.seekLights = cfg.clam_light_flag_default;
+        m.seekOres = cfg.clam_ores_flag_default;
+        m.protectItself = cfg.clam_protect_itself_default;
         modules[moduleNumber] = m;
         CommandToolbox.buildStub(world, x, y, z);
         save(world.getServer());
@@ -569,7 +576,8 @@ public final class VoidClamMod {
             CommandToolbox.clamReSize(world, i, m.currentSize); // repair
             m.lightsBlackList.clear();
             m.oresBlackList.clear();
-            if (m.energy <= 4 * m.currentSize || m.currentSize >= 15) continue;
+            VoidClamConfig cfg = VoidClamConfig.get();
+            if (m.energy <= cfg.clam_grow_energymultiplier * m.currentSize || m.currentSize >= cfg.clam_size_max) continue;
             double cst = 0;
             int hasRoom = 1;
             for (int ix = x - csize + 2; ix <= x + csize - 2; ix++) {
@@ -588,9 +596,11 @@ public final class VoidClamMod {
             }
             if (cst > 10 * csize) hasRoom = 0;
             if (hasRoom == 1) {
+                int nextSize = Math.min(m.currentSize + 2, cfg.clam_size_max);
+                if (nextSize <= m.currentSize) continue;
                 m.energy = 0;
-                CommandToolbox.clamReSize(world, i, m.currentSize + 2);
-                m.currentSize += 2;
+                CommandToolbox.clamReSize(world, i, nextSize);
+                m.currentSize = nextSize;
             }
         }
         save(world.getServer());
@@ -614,7 +624,7 @@ public final class VoidClamMod {
         Module[] modules = getModules();
         for (int i = 1; i <= moduleNumber; i++) {
             Module m = modules[i];
-            if (m == null || m.currentSize < DEFENSE_MIN_SIZE || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             float volume = Math.min(3f, (float) m.currentSize / 4f);
             // Dream goat horn: minecraft:item.goat_horn.sound.dream_goat_horn (static registry)
             SoundEvent dreamHornSound = net.minecraft.registry.Registries.SOUND_EVENT.get(Identifier.of("minecraft", "item.goat_horn.sound.dream_goat_horn"));
@@ -631,7 +641,7 @@ public final class VoidClamMod {
                         world.setBlockState(adj, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 }
                 SoundEvent hornSound = soundRef != null ? soundRef : SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
-                world.playSound(null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,
+                VoidClamSfx.playBlockSound(world, null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,
                     hornSound, SoundCategory.HOSTILE, volume, DEFENSE_HORN_PITCH);
                 player.addStatusEffect(new StatusEffectInstance(StatusEffects.HUNGER, DEFENSE_EFFECT_TICKS, 0));
                 player.addStatusEffect(new StatusEffectInstance(StatusEffects.MINING_FATIGUE, DEFENSE_EFFECT_TICKS, 0));
@@ -646,7 +656,7 @@ public final class VoidClamMod {
             Module m = modules[i];
             if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             float volume = (float) m.currentSize / 4;
-            world.playSound(null, m.x + 0.5, m.y + 0.5, m.z + 0.5,
+            VoidClamSfx.playBlockSound(world, null, m.x + 0.5, m.y + 0.5, m.z + 0.5,
                 net.minecraft.sound.SoundEvents.BLOCK_CONDUIT_AMBIENT, net.minecraft.sound.SoundCategory.BLOCKS, volume, 0.7f);
         }
     }

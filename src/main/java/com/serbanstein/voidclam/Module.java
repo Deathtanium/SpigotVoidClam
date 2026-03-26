@@ -23,6 +23,8 @@ public class Module {
     public boolean seekLights = false;
     /** Whether this module seeks ores */
     public boolean seekOres = false;
+    /** Encase intruders and apply defense effects when large enough */
+    public boolean protectItself = true;
     /** Positions of light sources we've failed or are ignoring for this cycle */
     public final Set<BlockPos> lightsBlackList = new HashSet<>();
     /** Positions of ores we've failed or are ignoring for this cycle */

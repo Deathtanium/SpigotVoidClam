@@ -20,6 +20,8 @@ dependencies {
     mappings "net.fabricmc:yarn:${project.findProperty('yarn.mappings')}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.findProperty('loader.version')}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.findProperty('fabric.version')}"
+    implementation "com.google.code.gson:gson:2.11.0"
+    include "com.google.code.gson:gson:2.11.0"
 }
 
 processResources {
