@@ -114,4 +114,5 @@ run/
 
 # Gradle
 .gradle/
+.gradle-local/
 build/

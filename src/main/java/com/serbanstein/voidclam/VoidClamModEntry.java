@@ -8,6 +8,8 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.command.CommandRegistryAccess;
@@ -18,7 +20,12 @@ import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.ClickEvent;
+import net.minecraft.text.HoverEvent;
+import net.minecraft.text.Style;
 import net.minecraft.text.Text;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
@@ -33,8 +40,26 @@ public class VoidClamModEntry implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        VoidClamDataComponents.register();
-        VoidClamBlocks.register();
+        PlayerBlockBreakEvents.BEFORE.register((world, player, pos, state, blockEntity) -> {
+            VoidClamMod.captureClamCoreComponentsBeforeBreak(world, pos, state);
+            return true;
+        });
+        PlayerBlockBreakEvents.CANCELED.register((world, player, pos, state, blockEntity) -> {
+            VoidClamMod.clearBreakingClamFurnaceComponentsCapture();
+        });
+        PlayerBlockBreakEvents.AFTER.register((world, player, pos, state, blockEntity) -> {
+            if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return;
+            if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
+            VoidClamMod.onClamCoreBroken(serverWorld, player, pos, state);
+        });
+        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+            if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return ActionResult.PASS;
+            BlockPos pos = hitResult.getBlockPos();
+            if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return ActionResult.PASS;
+            if (VoidClamMod.findModuleAt(pos) == null) return ActionResult.PASS;
+            VoidClamMod.applySearingHeartBlockLabel(serverWorld, pos);
+            return ActionResult.PASS;
+        });
         VoidClamConfig.loadFromDisk();
         ServerChunkEvents.CHUNK_GENERATE.register(NaturalSpawnHandler::onChunkGenerated);
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
@@ -67,6 +92,7 @@ public class VoidClamModEntry implements ModInitializer {
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             Pathfinder.tickSyncAStarJobs(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
         }
+        VoidClamMod.tickLoadedClamCores(world);
         VoidClamMod.tickTargets(world);
         VoidClamModScheduler.tick(world);
         for (ServerWorld w : server.getWorlds()) {
@@ -367,10 +393,56 @@ public class VoidClamModEntry implements ModInitializer {
                         ctx.getSource().sendMessage(Text.literal("Removed " + total + " nether wart block display(s) across all worlds."));
                         return 1;
                     }))
+                .then(CommandManager.literal("giveheart")
+                    .executes(ctx -> {
+                        if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
+                            ctx.getSource().sendError(Text.literal("giveheart must be run by a player"));
+                            return 0;
+                        }
+                        player.giveOrDropStack(SearingHeartItems.createFreshHeartStack());
+                        ctx.getSource().sendFeedback(() -> Text.literal("Gave Searing Heart."), true);
+                        return 1;
+                    })
+                    .then(CommandManager.argument("count", IntegerArgumentType.integer(1, 64))
+                        .executes(ctx -> {
+                            if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
+                                ctx.getSource().sendError(Text.literal("giveheart must be run by a player"));
+                                return 0;
+                            }
+                            int count = IntegerArgumentType.getInteger(ctx, "count");
+                            for (int i = 0; i < count; i++) {
+                                player.giveOrDropStack(SearingHeartItems.createFreshHeartStack());
+                            }
+                            int fcount = count;
+                            ctx.getSource().sendFeedback(() -> Text.literal("Gave " + fcount + " Searing Heart(s)."), true);
+                            return 1;
+                        })))
                 .then(CommandManager.literal("ping")
                     .executes(ctx -> {
                         String worldName = ctx.getSource().getWorld().getRegistryKey().getValue().getPath();
-                        ctx.getSource().sendMessage(Text.literal(worldName + " " + VoidClamMod.getModuleCount()));
+                        int count = VoidClamMod.getModuleCount();
+                        ctx.getSource().sendMessage(Text.literal(worldName + " " + count));
+                        Vec3d pos = ctx.getSource().getPosition();
+                        Module closest = null;
+                        double best = Double.MAX_VALUE;
+                        for (Module m : VoidClamMod.getAllModules()) {
+                            if (m == null) continue;
+                            double d = pos.squaredDistanceTo(m.x + 0.5, m.y + 0.5, m.z + 0.5);
+                            if (d < best) {
+                                best = d;
+                                closest = m;
+                            }
+                        }
+                        if (closest == null) {
+                            ctx.getSource().sendMessage(Text.literal("No voidclams — nothing to copy."));
+                            return 1;
+                        }
+                        String uuidStr = closest.clamId.toString();
+                        Text copiable = Text.literal(uuidStr).setStyle(Style.EMPTY
+                            .withClickEvent(new ClickEvent.CopyToClipboard(uuidStr))
+                            .withUnderline(true)
+                            .withHoverEvent(new HoverEvent.ShowText(Text.literal("Click to copy UUID"))));
+                        ctx.getSource().sendMessage(Text.literal("Nearest voidclam UUID: ").append(copiable));
                         return 1;
                     }))
                 .then(CommandManager.literal("testfile")
