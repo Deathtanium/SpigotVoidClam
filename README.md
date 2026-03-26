@@ -1,12 +1,16 @@
 # VoidClam (Fabric)
 
-Server-side-only Fabric mod (1.21.1). Port of the Spigot VoidClam plugin: spreading SIVA-like organisms that feed on light sources and convert blocks.
+Server-side Fabric mod for **Minecraft 1.21.x**. Spreading SIVA-like organisms that feed on light sources, seek ores, and convert blocks.
 
-## What’s preserved
+## Behavior and porting
+
+Loader-specific wiring (Fabric entrypoint, tick events, commands) lives in code under `src/`. **Loader-agnostic rules** — ticks, locks, queues, pathfinding, grow/repair, save format — are documented for humans and agents in [`docs/logic/README.md`](docs/logic/README.md) (Obsidian-friendly `[[wikilinks]]` between notes).
+
+## Features (summary)
 
 - **Logic**: Module types, energy, growth, A* pathfinding, shell building, light “food” list, base cost, blast resistance checks.
-- **Locks / queues**: `busyFlagPlaceEvent`, `busyFlagMainCycle`; path results enqueued and applied on main thread; delayed tasks via `VoidClamModScheduler`.
-- **Save format**: Same CSV in world folder: `world/modules.siva` (and `modules.siva.old` rotation). Fields: type, x, y, z, currentSize, status, energy, age.
+- **Concurrency**: `busyFlagMainCycle` (reach/path lifecycle); path results queued for the main thread; staggered placement via `VoidClamModScheduler` (world-time delayed runnables).
+- **Save format**: CSV in the world save root: `modules.siva` (with `modules.siva.old` rotation). Fields: type, x, y, z, currentSize, status, energy, age, seekLights, seekOres.
 
 ## Build
 
@@ -39,13 +43,12 @@ All commands are under `/voidclam` and only visible to players with OP level 2 o
 - `/voidclam ping` – debug: world name + module count
 - `/voidclam testfile` – debug: print `modules.siva` lines
 
-## Differences from Spigot version
+## Implementation notes
 
-- **Environment**: Fabric server-only; no Bukkit. Uses `ServerWorld`, `BlockPos`, Brigadier commands, Fabric lifecycle and tick events.
-- **Block place**: No Fabric “block place” event; uses a mixin on `Block.onBlockAdded` to detect light blocks and notify modules.
-- **Async pathfinding**: Same idea (executor + queue); pathfinding runs off-thread, results applied on main tick. World reads from worker thread are unchanged from the plugin (same caveats).
-- **Delayed tasks**: `VoidClamModScheduler` replaces Bukkit’s `runTaskLater` (world time + delay, run on next tick when due).
-- **Save path**: `server.getSavePath(WorldSavePath.ROOT).resolve("modules.siva")` (world root = default world folder).
-- **Bug fix**: Core-check loop iterates backwards when killing modules so indices stay correct after shift.
+- **Environment**: Fabric server; `ServerWorld`, `BlockPos`, Brigadier commands, Fabric lifecycle and tick events.
+- **Async pathfinding**: Fixed thread pool; pathfinding and some BFS run off-thread. Results and block writes are applied on the main tick thread. World reads from workers are not thread-safe by vanilla contract — see `docs/logic/Threading-queues-locks.md`.
+- **Delayed tasks**: `VoidClamModScheduler` runs runnables when `world.getTime()` reaches a stored deadline (see `docs/logic/Tick-order-and-intervals.md`).
+- **Save path**: `server.getSavePath(WorldSavePath.ROOT).resolve("modules.siva")`.
+- **Core check**: Iterates module indices **backwards** when killing invalid cores so index shifts do not skip entries.
 
-Old Spigot sources (`Main.java`, `VoidclamEventListener.java`) were removed so the project builds as a single Fabric mod; the Maven `pom.xml` is left for reference only.
+The Maven `pom.xml` in the repo is legacy reference only; the build is Gradle.

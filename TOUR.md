@@ -8,7 +8,7 @@ A short tour of the project for someone new to Fabric modding. Covers structure,
 
 - **`fabric.mod.json`** (in `src/main/resources/`) is the mod manifest. Fabric Loader reads it when the game starts.
   - **`entrypoints.main`** → your mod’s “main” class that runs at load time.
-  - **`environment: "server"`** → this mod only runs on the server (no client-only code).
+  - **`environment`** — see manifest; server logic is driven from the server tick.
   - **`mixins`** → list of mixin config JSON files (see below).
 - **`ModInitializer`** is the main entrypoint interface. Your class (`VoidClamModEntry`) implements it; Fabric calls `onInitialize()` once when the mod loads.
 - **Fabric API** provides events (lifecycle, tick, commands, etc.). You register callbacks; the game calls them at the right time.
@@ -20,10 +20,11 @@ So the flow is: **Fabric Loader** → reads **fabric.mod.json** → loads your m
 ## 2. Project layout (what lives where)
 
 ```
-SpigotVoidClam/
+VoidClam/
 ├── build.gradle              # Build config (Loom, deps, Java 17)
 ├── gradle.properties         # Versions (Minecraft, Fabric API, mod version)
 ├── settings.gradle           # Project name
+├── docs/logic/               # Behavior docs (Obsidian-friendly, loader-agnostic)
 ├── src/main/
 │   ├── java/.../voidclam/
 │   │   ├── VoidClamModEntry.java   # ★ Entrypoint: init, commands, tick hook
@@ -34,13 +35,11 @@ SpigotVoidClam/
 │   │   ├── Module.java             # Data: one VoidClam node
 │   │   ├── Node.java               # A* node
 │   │   ├── Cursor.java             # 6-direction offset for A*
-│   │   └── mixin/
-│   │       └── BlockPlaceMixin.java  # ★ Hook when a block is placed
+│   │   └── mixin/                  # Mixin classes (when registered in voidclam.mixins.json)
 │   └── resources/
 │       ├── fabric.mod.json   # ★ Mod manifest (id, entrypoints, mixins)
 │       └── voidclam.mixins.json   # Declares which mixin classes apply
-├── plugin.yml                # Leftover from Spigot; not used by Fabric
-└── pom.xml                   # Leftover from Maven; build is Gradle
+└── pom.xml                   # Legacy Maven reference; build is Gradle
 ```
 
 ---
@@ -70,7 +69,6 @@ SpigotVoidClam/
 |------|------|
 | **`Module.java`** | One VoidClam: position, size, energy, type, blacklists, busy flags. |
 | **`Node.java`** | One A* node (position, f/g/h, parent, module index). |
-| **`BlockPlaceMixin.java`** | Injects into `AbstractBlock.onBlockAdded`; when a light block is placed, notifies `VoidClamMod.onLightPlaced`. |
 
 ### Build / config (change when upgrading or tweaking)
 
@@ -87,13 +85,14 @@ SpigotVoidClam/
 - **Every tick**: `ServerTickEvents.END_SERVER_TICK` →  
   - Drain path queue and apply paths (`tickTargets` → `Pathfinder.buildPath`).  
   - Run due delayed tasks (`VoidClamModScheduler.tick`).  
-  - Every 20 ticks: trigger reach for all modules, core integrity check.  
+  - Every 20 ticks: trigger reach for all modules (overworld), core integrity check.  
   - Every 4s: heartbeat sound.  
   - Every 5 min: auto-repair/grow, then save.
-- **Block placed**: Mixin in `AbstractBlock.onBlockAdded` → if block is a “light”, `VoidClamMod.onLightPlaced` → pathfinding submitted to executor; result is enqueued and applied on main thread later.
 - **Commands**: Registered in `VoidClamModEntry.registerCommands` (Brigadier). All require op level 2.
 
-So: **entrypoint** wires **lifecycle + tick + commands**; **state and save/load** live in **VoidClamMod**; **world changes** go through **Pathfinder** and **CommandToolbox**; **block place** is hooked via **mixin**.
+So: **entrypoint** wires **lifecycle + tick + commands**; **state and save/load** live in **VoidClamMod**; **world changes** go through **Pathfinder** and **CommandToolbox**.
+
+For exact order and intervals, see **`docs/logic/Tick-order-and-intervals.md`**.
 
 ---
 
@@ -102,10 +101,10 @@ So: **entrypoint** wires **lifecycle + tick + commands**; **state and save/load*
 - **ModInitializer** — entrypoint run once at load.
 - **ServerLifecycleEvents** — server started / stopping (for load/save).
 - **ServerTickEvents.END_SERVER_TICK** — run logic once per server tick (main thread).
-- **CommandRegistrationCallback (v1)** — register commands; callback receives `(dispatcher, dedicated)`.
-- **Mixin** — inject into vanilla code without editing it. Here we inject into `AbstractBlock.onBlockAdded`; the config is in `voidclam.mixins.json`, and the class is in the `mixins` package.
-- **ServerWorld** — the server-side world object. Block access, time, sounds, etc. All world operations use this (or `World` where the code accepts it).
-- **Yarn** — the mapping set that turns obfuscated names into readable ones (e.g. `ServerWorld`, `BlockPos`). Loom applies it at build time.
+- **CommandRegistrationCallback** — register commands.
+- **Mixin** — inject into vanilla code without editing it. Config is in `voidclam.mixins.json`; classes live under `.../mixin/` when used.
+- **ServerWorld** — the server-side world object. Block access, time, sounds, etc.
+- **Yarn** — the mapping set that turns obfuscated names into readable ones. Loom applies it at build time.
 
 ---
 
@@ -113,22 +112,20 @@ So: **entrypoint** wires **lifecycle + tick + commands**; **state and save/load*
 
 ### Concurrency / thread safety
 
-- **Pathfinding runs off the main thread** (`CommandToolbox.pathfinderExecutor`). It calls `world.getBlockState()` from that thread. In vanilla, the world is not guaranteed thread-safe; this can theoretically cause rare bugs or crashes if the world changes during pathfinding. The original Spigot plugin did the same; if you see weird behaviour, consider moving pathfinding to the main thread (e.g. one module per tick) or copying chunk data for the search.
+- **Pathfinding runs off the main thread** (`CommandToolbox.pathfinderExecutor`). It calls `world.getBlockState()` from that thread. In vanilla, the world is not guaranteed thread-safe; this can theoretically cause rare bugs or crashes if the world changes during pathfinding. If you see weird behaviour, consider moving pathfinding to the main thread (e.g. one module per tick) or copying chunk data for the search.
 - **`VoidClamMod` state** (modules array, `moduleNumber`) is mutated from both main thread and executor. Index checks (e.g. `tno <= moduleNumber && modules[tno] != null`) reduce the risk but are not a full concurrency design; a stricter approach would be to confine all module mutations to the main thread and have the executor only produce path results.
 
 ### Design / structure
 
 - **Global static state** in `VoidClamMod` (modules, queue, lights/baseCost sets) makes testing and “multiple worlds” harder. A cleaner design would be a per-server or per-world object holding modules and queue, injected or accessed from the server context.
 - **Module array + index shifting**: Killing a module shifts indices and can make stored indices stale. The code tries to mitigate (e.g. core check iterates backwards). A list or map keyed by a stable id would avoid index invalidation.
-- **`CommandToolbox`** both builds blocks and triggers pathfinding; it’s a bit of a “toolbox” in name only. Splitting “world building” and “pathfinding trigger” could make the flow clearer.
+- **`CommandToolbox`** both builds blocks and triggers pathfinding; splitting “world building” and “pathfinding trigger” could make the flow clearer.
 
 ### Minor / cleanup
 
 - **Unused**: `VoidClamModEntry.TICK_REACH` is defined but the tick divisor used for reach is `TICK_TARGETS` (20). Either use `TICK_REACH` in the tick callback or remove it.
-- **`Pathfinder`**: `Random` is imported but not used; can be removed.
-- **`plugin.yml`**: Spigot leftover; safe to delete if you don’t need it.
-- **Permission**: `PERMISSION = "debugvoidclam"` in the entrypoint is not used (commands use op level 2). Remove or use it if you add permission checks later.
-- **Save path**: Uses `WorldSavePath.ROOT` (world root). That’s correct for the default world; if you ever support multiple dimensions/worlds, you may want a path per world.
+- **`busyFlagPlaceEvent`** on `Module` is not referenced in current sources.
+- **Delayed tasks**: `VoidClamModScheduler.tick` matches `ServerWorld` by reference; `hasPendingTasks` uses dimension key — see `docs/logic/Threading-queues-locks.md`.
 
 ### Robustness
 
@@ -146,7 +143,7 @@ So: **entrypoint** wires **lifecycle + tick + commands**; **state and save/load*
 | Add a command | `VoidClamModEntry.registerCommands` |
 | Change when things tick | `VoidClamModEntry.onServerTick` (and constants) |
 | Change save format or path | `VoidClamMod.load/save`, `getModulesPath` |
-| Add another “event” (e.g. block break) | New mixin class + entry in `voidclam.mixins.json` |
+| Add another vanilla hook | New mixin class + entry in `voidclam.mixins.json` |
 | Change which blocks are “light” or “base cost” | `VoidClamMod` static blocks (lights, baseCost) |
 | Tweak A* or path application | `Pathfinder` |
 | Tweak shell/stub building | `CommandToolbox` |
