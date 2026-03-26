@@ -2,10 +2,10 @@
 
 ## Threads
 
-1. **Server main thread** — All `ServerTickEvents`, command handlers, `buildPath` scheduled steps that call `world.setBlockState`, container snapshot `buildContainerSnapshot`, and `world.getServer().execute(...)` run here.
+1. **Server main thread** — All `ServerTickEvents`, command handlers, `buildPath` scheduled steps that call `world.setBlockState`, and `world.getServer().execute(...)` (container apply after off-thread BFS) run here.
 2. **Pathfinder executor** — Fixed pool of **2** threads (`CommandToolbox.pathfinderExecutor`). Used for:
    - `clamReach` scan + `Pathfinder.calculatePath` (world reads from worker thread),
-   - Off-thread BFS on a **snapshot** for container routing after a snapshot is built on the main thread.
+   - Off-thread **container BFS** on the live world (`Pathfinder.runContainerBfsOnWorld` — no separate snapshot map).
 
 **Caveat:** Vanilla `ServerWorld` is not documented as safe for arbitrary concurrent reads; the design matches historical behavior. Safer ports may snapshot chunk sections or confine reads to the main thread.
 
@@ -33,7 +33,7 @@ Per-module **binary lock** (0 = idle, non-zero = busy) for the **reach → pathf
 | No target after scan | Cleared to `0` on worker thread |
 | `calculatePath` fails (no path) | Cleared to `0` at end of search |
 | `calculatePath` succeeds | Left at `1` until `buildPath` finishes or aborts |
-| `buildPath` | Cleared on early exit (bad cost, unloaded chunk, seek flags off, ore/light handling, stamina blocked, path stopped, or final goal step) |
+| `buildPath` | Cleared on early exit (bad cost, unloaded chunk, seek flags off, stamina blocked, final light/empty goal step) or **after** container apply for ore / path-stopped block breaks (see `pathStoppedAwaitingContainer` in `Pathfinder`) |
 
 **Grow/repair idle check** (`tickGrowPendingCheck`): Waits until `busyFlagMainCycle == 0` for the relevant module(s), **`targets` is empty**, and **`!VoidClamModScheduler.hasPendingTasks(world)`** for that dimension before running resize logic.
 

@@ -38,9 +38,9 @@ Runs on **main thread** from `tickTargets`.
 
 - Set `blocked`; if the block was not air/water/lava, **blacklist the goal** for both lights and ores and **`addEnergy(tno, -1)`**.
 
-**Path stop (`pathStopped`):** If the step would replace a non-goal block that has a non-air item drop, the path **stops** (no energy change for that case): schedule container routing with a snapshot, clear busy flag.
+**Path stop (`pathStopped`):** If the step would replace a non-goal block that has a non-air item drop, the path **stops** (no energy change for that case): schedule off-thread container BFS + main-thread apply (see below); busy flag clears after apply.
 
-**Ore goal:** Fortune-3 style drops from `getFortune3Drops`, container BFS from snapshot, then replace or barrel; clear busy flag.
+**Ore goal:** Fortune-3 style drops from `getFortune3Drops`, off-thread container BFS, then replace or barrel; busy clears after apply (or immediately if no fortune drops).
 
 **Light goal:** Replacing the light with wart grants **`addEnergy(tno, 1)`**; clear busy flag on that final scheduled step.
 
@@ -48,9 +48,21 @@ Runs on **main thread** from `tickTargets`.
 
 **Scheduling:** Walks from goal toward start; each step schedules a `VoidClamMod.scheduleDelayed` at `timer`, `timer-2`, … so pulses fire in order along the path.
 
-## Container snapshot (`buildContainerSnapshot` / `runContainerBfsOnSnapshot`)
+## Container routing (off-thread BFS + main-thread apply)
 
-For storing drops: main thread builds a **BFS map** from clam center (cap `CONTAINER_SNAPSHOT_MAX_STEPS`), classifying nether wart, warped wart, chest-like blocks, other. Worker runs BFS on the map; main thread applies insertions via `world.getServer().execute`.
+**Intended behavior:** Storage routing is anchored to the **module center** (clam core coordinates), not the block being broken. There is **no in-memory snapshot**: `Pathfinder.runContainerBfsOnWorld` runs on **`CommandToolbox.pathfinderExecutor`**, reading the **live `ServerWorld`** with the same rules as before (expand once from the center cell; continue only through nether / warped wart; same AABB as `calculatePath`: ±4×`currentSize` on X, ±5×`currentSize` on Y and Z). It returns container positions in **BFS order from the clam center**. The main thread applies via `world.getServer().execute` → `tryInsertInto` / barrel / wart.
+
+**Pause / lock:** When a step needs container routing, **`busyFlagMainCycle` stays non-zero** until the executor finishes BFS **and** the main thread has run `applyContainerResult`. That blocks **`clamReach`** (and thus new targets) for that module. For **path-stopped** breaks (non-goal block with an item), earlier scheduled path steps along the same path would otherwise still run and clear the busy flag early; those steps **no-op** while waiting for the container apply (`pathStoppedAwaitingContainer`).
+
+So “nearer” means **fewer graph steps from the clam center through wart (and the root cell’s neighbors)**, not Euclidean distance from the break position. A chest sitting on wart closer to the center than another chest should appear **earlier** in the list unless it is never reached (see below).
+
+**Situations where pre-placed “near” storage might be skipped or not receive items:**
+
+1. **Outside pathfinding range** — Storage beyond the `calculatePath` box (same limits as above) is never visited by the BFS, even if connected by wart outside that box.
+2. **No path inside the box** — Traversal continues only through nether wart, warped wart, and the root cell. A chest that is not adjacent to wart reachable from the center inside the box does not appear in the list.
+3. **Block not treated as storage** — Only `CHEST`, `TRAPPED_CHEST`, and `BARREL` are containers. Other inventories (e.g. shulker, hopper, decorated pot) are not candidates.
+4. **Insert failure** — `tryInsertInto` uses `Inventory` on the block entity; if the entity is missing or the inventory is not usable as expected, that position effectively does nothing and the stack may fall through to a barrel at the break position.
+5. **Concurrent breaks** — Each break schedules BFS from world state at that moment; ordering can differ under rapid changes, but should not systematically ignore center-near chests unless one of the above applies.
 
 ## Related notes
 
