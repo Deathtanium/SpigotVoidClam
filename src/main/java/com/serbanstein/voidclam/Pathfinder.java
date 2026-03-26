@@ -16,15 +16,12 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
-import java.util.Set;
+import java.util.concurrent.Executor;
 
 public final class Pathfinder {
     static final List<Cursor> xc = new ArrayList<>();
@@ -150,33 +147,24 @@ public final class Pathfinder {
         }
         long goalLong = BlockPos.asLong(gx, gy, gz);
         long startLong = BlockPos.asLong(sx, sy, sz);
-        Set<Long> seen = new HashSet<>();
-        Queue<Long> queue = new ArrayDeque<>();
-        seen.add(startLong);
-        queue.add(startLong);
-        while (!queue.isEmpty()) {
-            long cur = queue.poll();
-            BlockPos curPos = BlockPos.fromLong(cur);
-            for (Cursor c : xc) {
-                int nx = curPos.getX() + c.x;
-                int ny = curPos.getY() + c.y;
-                int nz = curPos.getZ() + c.z;
-                long nextLong = BlockPos.asLong(nx, ny, nz);
-                if (nextLong == goalLong) {
-                    return true;
-                }
-                if (!inPathfindSearchBounds(mod, nx, ny, nz) || seen.contains(nextLong)) {
-                    continue;
-                }
-                BlockPos nextPos = new BlockPos(nx, ny, nz);
-                if (isPathfindCellImpassable(world, nextPos)) {
-                    continue;
-                }
-                seen.add(nextLong);
-                queue.add(nextLong);
-            }
-        }
-        return false;
+        BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
+            BlockPos nextPos = BlockPos.fromLong(toLong);
+            return inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())
+                && !isPathfindCellImpassable(w, nextPos);
+        };
+        BlockBfs bfs = BlockBfs.start(
+            world,
+            startLong,
+            prepassPolicy,
+            Integer.MAX_VALUE,
+            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
+            null,
+            null,
+            null,
+            goalLong
+        );
+        bfs.runToCompletionOnCurrentThread();
+        return bfs.isEarlyGoalNeighborHit();
     }
 
     /** Cheaper than Euclidean: no sqrt, O(1). Not admissible when edge costs can be 0 (e.g. wart). */
@@ -327,10 +315,6 @@ public final class Pathfinder {
     private static final byte TYPE_NETHER_WART = 1;
     private static final byte TYPE_WARPED_WART = 2;
     private static final byte TYPE_CONTAINER = 3;
-    private static final int[] DX = {1, -1, 0, 0, 0, 0};
-    private static final int[] DY = {0, 0, 1, -1, 0, 0};
-    private static final int[] DZ = {0, 0, 0, 0, 1, -1};
-
     private static boolean isContainerBlock(net.minecraft.block.Block block) {
         return block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL;
     }
@@ -343,32 +327,60 @@ public final class Pathfinder {
     }
 
     /**
-     * BFS from {@code startLong} (clam center) over the live world. Call only from {@link CommandToolbox#pathfinderExecutor}.
-     * Same traversal rules as the old main-thread snapshot: expand from root once; otherwise only through nether/warped wart.
-     * Bounded by the same AABB as {@link #calculatePath}.
+     * BFS from {@code startLong} (clam center) over the live world. Same traversal rules as before: expand from root once;
+     * otherwise only through nether/warped wart. Bounded by the same AABB as {@link #calculatePath}.
+     * Appends container positions to {@code containersOut} via {@link BlockBfs}.
+     *
+     * @param executionMode {@link BlockBfs.ExecutionMode#MAIN_THREAD_BATCHED} drains on the current thread (e.g. inside
+     *                      {@link CommandToolbox#submitPathfinding}); {@link BlockBfs.ExecutionMode#BACKGROUND} runs on {@code executor}
+     *                      and invokes {@code onComplete} on that executor thread when done.
      */
-    private static List<Long> runContainerBfsOnWorld(ServerWorld world, int cx, int cy, int cz, int cSize, long startLong) {
-        List<Long> containers = new ArrayList<>();
-        Set<Long> seen = new HashSet<>();
-        Queue<Long> queue = new ArrayDeque<>();
-        queue.add(startLong);
-        seen.add(startLong);
-        while (!queue.isEmpty()) {
-            long cur = queue.poll();
-            BlockPos pos = BlockPos.fromLong(cur);
-            if (!isWithinPathfindingRange(pos.getX(), pos.getY(), pos.getZ(), cx, cy, cz, cSize)) continue;
-            BlockState state = world.getBlockState(pos);
-            byte type = classifyForContainerBfs(state);
-            if (type == TYPE_CONTAINER) containers.add(cur);
-            if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
-            for (int i = 0; i < 6; i++) {
-                BlockPos nextPos = pos.add(DX[i], DY[i], DZ[i]);
-                if (!isWithinPathfindingRange(nextPos.getX(), nextPos.getY(), nextPos.getZ(), cx, cy, cz, cSize)) continue;
-                long next = nextPos.asLong();
-                if (seen.add(next)) queue.add(next);
+    private static void runContainerBfsOnWorld(
+        ServerWorld world,
+        int cx,
+        int cy,
+        int cz,
+        int cSize,
+        long startLong,
+        List<Long> containersOut,
+        BlockBfs.ExecutionMode executionMode,
+        Executor executor,
+        Runnable onComplete
+    ) {
+        BlockBfs.EdgePolicy containerPolicy = new BlockBfs.EdgePolicy() {
+            @Override
+            public boolean expandFrom(ServerWorld w, long curLong, int distanceFromStart) {
+                if (curLong == startLong) return true;
+                BlockState st = w.getBlockState(BlockPos.fromLong(curLong));
+                return st.isOf(Blocks.NETHER_WART_BLOCK) || st.isOf(Blocks.WARPED_WART_BLOCK);
             }
+
+            @Override
+            public boolean canTraverseTo(ServerWorld w, long fromLong, long toLong, int fromDistance) {
+                BlockPos p = BlockPos.fromLong(toLong);
+                return isWithinPathfindingRange(p.getX(), p.getY(), p.getZ(), cx, cy, cz, cSize);
+            }
+        };
+        BlockBfs bfs = BlockBfs.start(
+            world,
+            startLong,
+            containerPolicy,
+            Integer.MAX_VALUE,
+            executionMode,
+            executor,
+            onComplete,
+            null,
+            BlockBfs.NO_EARLY_GOAL,
+            (w, posLong, d) -> {
+                BlockState state = w.getBlockState(BlockPos.fromLong(posLong));
+                if (classifyForContainerBfs(state) == TYPE_CONTAINER) {
+                    containersOut.add(posLong);
+                }
+            }
+        );
+        if (executionMode == BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED) {
+            bfs.runToCompletionOnCurrentThread();
         }
-        return containers;
     }
 
     private static void replaceWithWartAndPulse(ServerWorld world, BlockPos breakPos) {
@@ -538,7 +550,10 @@ public final class Pathfinder {
                         long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
                         int mx = mod.x, my = mod.y, mz = mod.z;
                         CommandToolbox.submitPathfinding(() -> {
-                            List<Long> containers = runContainerBfsOnWorld(world, mx, my, mz, cSize, clamCenterLong);
+                            List<Long> containers = new ArrayList<>();
+                            runContainerBfsOnWorld(
+                                world, mx, my, mz, cSize, clamCenterLong, containers,
+                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
                             world.getServer().execute(() -> {
                                 applyContainerResult(world, containers, breakPos, drops);
                                 modForFlag.busyFlagMainCycle = 0;
@@ -571,7 +586,10 @@ public final class Pathfinder {
                     long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
                     int mx = mod.x, my = mod.y, mz = mod.z;
                     CommandToolbox.submitPathfinding(() -> {
-                        List<Long> containers = runContainerBfsOnWorld(world, mx, my, mz, cSize, clamCenterLong);
+                        List<Long> containers = new ArrayList<>();
+                        runContainerBfsOnWorld(
+                            world, mx, my, mz, cSize, clamCenterLong, containers,
+                            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null);
                         world.getServer().execute(() -> {
                             applyContainerResult(world, containers, breakPos, toStore);
                             pathStoppedAwaitingContainer[0] = 0;
