@@ -12,7 +12,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Runs delayed tasks on the main thread. Each tick we check world time and run tasks whose delay has passed.
- * Used for path-building steps (original Bukkit runTaskLater behaviour).
+ * Used for staggered path application, stub/shell placement, and similar world-time–keyed steps.
  */
 public final class VoidClamModScheduler {
     private static final List<PendingTask> pending = new CopyOnWriteArrayList<>();

@@ -23,8 +23,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Central state and helpers for the VoidClam mod. Preserves original logic, locks (busy flags),
- * and CSV save format (modules.siva in world folder).
+ * Central state and helpers: module array, path-result queue, grow-pending coordination,
+ * CSV save format ({@code modules.siva} in world save root).
  */
 public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
@@ -145,7 +145,7 @@ public final class VoidClamMod {
             Pathfinder.buildPath(world, n);
     }
 
-    /** Load modules from world save folder (same format as original: CSV in world/modules.siva). */
+    /** Load modules from world save folder (CSV {@code modules.siva}). */
     public static void load(MinecraftServer server) {
         Path savePath = getModulesPath(server);
         modules = new Module[MAX_MODULES];
@@ -173,11 +173,11 @@ public final class VoidClamMod {
                 modules[moduleNumber] = m;
             }
         } catch (IOException e) {
-            // no-op like original
+            // no-op
         }
     }
 
-    /** Save modules to world folder. Preserves original CSV format and modules.siva / modules.siva.old rotation. */
+    /** Save modules; CSV format and {@code modules.siva} / {@code modules.siva.old} rotation. */
     public static void save(MinecraftServer server) {
         Path path = getModulesPath(server);
         Path oldPath = path.getParent().resolve("modules.siva.old");
@@ -196,7 +196,7 @@ public final class VoidClamMod {
                 }
             }
         } catch (IOException e) {
-            // no-op like original
+            // no-op
         }
     }
 
@@ -226,7 +226,7 @@ public final class VoidClamMod {
         return moduleNumber;
     }
 
-    /** Remove module at index (shift array down like original). */
+    /** Remove module at index (shift array down). */
     public static void clamKill(int tno) {
         if (tno < 1 || tno > moduleNumber) return;
         for (int i = tno; i < moduleNumber; i++) {
@@ -361,7 +361,7 @@ public final class VoidClamMod {
         save(world.getServer());
     }
 
-    /** Kill modules whose core block is not nether wart or obsidian (original integrity check). Iterate backwards so kill shift doesn't skip. Skip unloaded chunks. */
+    /** Kill modules whose core block is not nether wart or obsidian. Iterate backwards so kill shift doesn't skip. Skip unloaded chunks. */
     public static void tickCoreCheck(ServerWorld world) {
         Module[] modules = getModules();
         for (int i = moduleNumber; i >= 1; i--) {
@@ -404,7 +404,7 @@ public final class VoidClamMod {
         }
     }
 
-    /** Heartbeat sound for loaded modules (original every 4s). */
+    /** Heartbeat sound for loaded modules (every 4s). */
     public static void tickHeartbeat(ServerWorld world) {
         Module[] modules = getModules();
         for (int i = 1; i <= moduleNumber; i++) {
