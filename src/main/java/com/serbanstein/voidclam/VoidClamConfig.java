@@ -52,12 +52,17 @@ public final class VoidClamConfig {
     /** {@code sync_batched} or {@code async} — see {@link BfsMode}. */
     public String bfs_mode = "sync_batched";
     /**
-     * Total A* node expansions per tick shared across all clams in {@link AstarMode#SYNC_BATCHED}.
-     * 0 = estimate from available processors.
+     * Sync A* + prepass budget source: when &gt; 0, effective steps per tick = this value divided by 4.
+     * When {@code 0}, estimates {@code max(1, processors) * 128} and uses one quarter of that (not tied to omni BFS).
      */
     public int astar_sync_global_max_steps_per_tick = 0;
     /** Max parallel async pathfinding threads. 0 = estimate from available processors (minimum 2). */
     public int astar_async_global_max_threads = 0;
+    /**
+     * Prepass BFS cell visits + A* expansions allowed for one sync-batched job before it aborts and releases the clam.
+     * Stops “infinite” searches when the budget per tick is tiny or there is no path. 0 = default {@code 400_000}.
+     */
+    public int astar_sync_max_total_expansions_per_job = 0;
 
     public int clam_size_max = 15;
     /**
@@ -116,6 +121,7 @@ public final class VoidClamConfig {
         if (sfx_volume_multiplier < 0) sfx_volume_multiplier = 0;
         if (astar_sync_global_max_steps_per_tick < 0) astar_sync_global_max_steps_per_tick = 0;
         if (astar_async_global_max_threads < 0) astar_async_global_max_threads = 0;
+        if (astar_sync_max_total_expansions_per_job < 0) astar_sync_max_total_expansions_per_job = 0;
         if (bfs_mode != null && bfs_mode.equalsIgnoreCase("async")) {
             bfs_mode = "async";
         } else {
@@ -152,17 +158,29 @@ public final class VoidClamConfig {
 
     /**
      * Global A* + prepass BFS expansion budget per server tick for {@link AstarMode#SYNC_BATCHED}.
-     * Reduced to 25% of the configured/estimated value (75% reduction) to lower main-thread load.
+     * Quarter of {@code astar_sync_global_max_steps_per_tick} when set; when {@code 0}, quarter of {@code processors * 128}.
+     * Floored at {@link #ASTAR_SYNC_MIN_STEPS_PER_TICK} so very small configured values do not stall jobs for an excessive number of ticks.
      */
+    public static final int ASTAR_SYNC_MIN_STEPS_PER_TICK = 48;
+
     public int effectiveSyncMaxStepsPerTick() {
         int base;
         if (astar_sync_global_max_steps_per_tick > 0) {
             base = astar_sync_global_max_steps_per_tick;
         } else {
             int n = Math.max(1, Runtime.getRuntime().availableProcessors());
-            base = n * 512;
+            base = n * 128;
         }
-        return Math.max(1, base / 4);
+        return Math.max(ASTAR_SYNC_MIN_STEPS_PER_TICK, Math.max(1, base / 4));
+    }
+
+    /** Max prepass visits + A* expansions for one {@link Pathfinder} sync job; then {@link VoidClamMod#releasePathfindingMainCycle}. */
+    public int effectiveSyncMaxTotalExpansionsPerJob() {
+        int v = astar_sync_max_total_expansions_per_job;
+        if (v <= 0) {
+            v = 400_000;
+        }
+        return Math.min(5_000_000, Math.max(5_000, v));
     }
 
     public int effectiveAsyncThreadPoolSize() {

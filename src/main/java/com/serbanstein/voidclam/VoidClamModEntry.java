@@ -129,6 +129,7 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect set <true|false> <target> — bool before target"), false);
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect get <target>"), false);
                         s.sendFeedback(() -> Text.literal("info [target] — list all (console) or nearest (player)"), false);
+                        s.sendFeedback(() -> Text.literal("debug <target> — flags, grow/async globals, sync A*, executor + scheduler stats"), false);
                         s.sendFeedback(() -> Text.literal("save — write modules.siva (creates file) | ingestlegacy — import modules.siva into hearts"), false);
                         s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping | testfile"), false);
                         s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode — each sync_batched or async"), false);
@@ -301,6 +302,40 @@ public class VoidClamModEntry implements ModInitializer {
                                         return 0;
                                     }
                                 })))))
+                    .then(CommandManager.literal("debug")
+                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            try {
+                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                ServerWorld world = ctx.getSource().getWorld();
+                                ServerCommandSource src = ctx.getSource();
+                                src.sendFeedback(() -> Text.literal("--- voidclam debug " + m.clamId + " ---"), false);
+                                for (String line : VoidClamMod.debugModuleFlagLines(m, world)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                for (String line : VoidClamMod.debugGrowAndAsyncLinesForClam(m.clamId)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                for (String line : Pathfinder.debugSyncAStarJobsForClam(m.clamId)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                for (String line : CommandToolbox.debugPathfinderExecutorLines()) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                for (String line : VoidClamModScheduler.debugSchedulerLinesForWorld(world)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                return 1;
+                            } catch (CommandSyntaxException e) {
+                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                return 0;
+                            }
+                        })))
                 .then(CommandManager.literal("info")
                     .executes(ctx -> {
                         if (ctx.getSource().getEntity() instanceof ServerPlayerEntity player) {

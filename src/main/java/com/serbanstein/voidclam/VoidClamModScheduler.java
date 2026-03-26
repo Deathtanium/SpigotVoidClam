@@ -8,6 +8,8 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -29,6 +31,30 @@ public final class VoidClamModScheduler {
             if (t.world.getRegistryKey().equals(key)) return true;
         }
         return false;
+    }
+
+    /** OP debug: delayed main-thread tasks for {@code world} (not attributed to individual clams). */
+    public static List<String> debugSchedulerLinesForWorld(ServerWorld world) {
+        long now = world.getTime();
+        int nThis = 0;
+        long earliest = Long.MAX_VALUE;
+        int nAll = pending.size();
+        for (PendingTask t : pending) {
+            if (t.world != world) {
+                continue;
+            }
+            nThis++;
+            if (t.runAtTick < earliest) {
+                earliest = t.runAtTick;
+            }
+        }
+        List<String> lines = new ArrayList<>(3);
+        lines.add("mainThreadScheduler: pendingThisWorld=" + nThis + " pendingAllWorlds=" + nAll + " worldTime=" + now);
+        if (nThis > 0) {
+            lines.add("  earliestRunAtTick=" + earliest + " ticksUntil=" + (earliest - now));
+        }
+        lines.add("  grow/repair idle gate: hasPendingTasks(this dimension)=" + hasPendingTasks(world));
+        return lines;
     }
 
     /** Call from server tick; runs due tasks in schedule order (earliest runAt first) so path steps run start→goal. */

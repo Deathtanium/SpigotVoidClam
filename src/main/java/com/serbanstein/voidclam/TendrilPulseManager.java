@@ -39,12 +39,22 @@ public final class TendrilPulseManager {
     public static final float INITIAL_SCALE_OMNI = 1f + 1f / 16f;
     private static final int PULSE_DURATION_TICKS = 8;
 
-    /** Omnidirectional pulse: max BFS blocks per module and total; delay = distance * TICKS_PER_STEP (like path building). */
-    private static final int MAX_OMNI_BFS_PER_MODULE = Integer.MAX_VALUE;
-    private static final int MAX_OMNI_TOTAL_BLOCKS = Integer.MAX_VALUE;
+    /**
+     * Omnidirectional pulse: caps for merged BFS. Previously {@code Integer.MAX_VALUE}, which let async mode
+     * {@linkplain CommandToolbox#pathfindingExecutor() monopolize a pool thread} until the entire wart graph was visited.
+     */
+    private static final int MAX_OMNI_BFS_PER_MODULE = 350_000;
+    private static final int MAX_OMNI_TOTAL_BLOCKS = 800_000;
+    /** Async batching: expansions per inner {@link BlockBfs.MergedOmniBfsJob#step} to avoid one giant step. */
+    private static final int OMNI_ASYNC_STEP_EXPANSIONS = 65_536;
     private static final int OMNI_TICKS_PER_STEP = 2;
     /** Max BFS node expansions per tick so omni pulse doesn't block main thread (sync batched mode uses 25% of this). */
     private static final int OMNI_BFS_BATCH_PER_TICK = 300;
+
+    /** Expansions advanced per server tick in sync omni BFS — default sync A* budget matches this (see {@link VoidClamConfig#effectiveSyncMaxStepsPerTick}). */
+    public static int omniBfsExpansionsPerServerTick() {
+        return Math.max(1, OMNI_BFS_BATCH_PER_TICK / 4);
+    }
 
     /** Entity tag persisted by vanilla in NBT (Tags); used to identify our tendril block displays after restart. */
     public static final String VOIDCLAM_DISPLAY_TAG = "voidclam_tendril_display";
@@ -141,6 +151,11 @@ public final class TendrilPulseManager {
     /** When {@link VoidClamConfig.BfsMode#ASYNC}: full omni graph runs on {@link CommandToolbox#pathfindingExecutor()}. */
     private static volatile boolean omniAsyncRunning = false;
 
+    /** OP/debug: true while async omnidirectional BFS is running on the pathfinder pool. */
+    public static boolean isOmniAsyncPulseRunning() {
+        return omniAsyncRunning;
+    }
+
     /**
      * Run an omnidirectional pulse: starts an incremental BFS job if none is running.
      * BFS runs over multiple ticks (see {@link #tickOmniPulseJob}); when done, pulses are scheduled.
@@ -163,10 +178,11 @@ public final class TendrilPulseManager {
             MinecraftServer server = world.getServer();
             omniAsyncRunning = true;
             CommandToolbox.pathfindingExecutor().execute(() -> {
+                CommandToolbox.pathfinderWorkerTaskBegin("omniPulse MergedOmniBfsJob sources=" + bfsList.size());
                 try {
                     BlockBfs.MergedOmniBfsJob job = new BlockBfs.MergedOmniBfsJob(world, bfsList);
                     while (!job.isDone()) {
-                        job.step(Integer.MAX_VALUE, MAX_OMNI_TOTAL_BLOCKS);
+                        job.step(OMNI_ASYNC_STEP_EXPANSIONS, MAX_OMNI_TOTAL_BLOCKS);
                     }
                     Map<BlockPos, Integer> result = job.getMergedResult();
                     server.execute(() -> {
@@ -176,6 +192,8 @@ public final class TendrilPulseManager {
                 } catch (Throwable t) {
                     server.execute(() -> omniAsyncRunning = false);
                     throw t;
+                } finally {
+                    CommandToolbox.pathfinderWorkerTaskEnd();
                 }
             });
             return;
@@ -205,7 +223,7 @@ public final class TendrilPulseManager {
     public static void tickOmniPulseJob(ServerWorld world) {
         BlockBfs.MergedOmniBfsJob job = omniPulseJob;
         if (job == null) return;
-        int batch = Math.max(1, OMNI_BFS_BATCH_PER_TICK / 4);
+        int batch = omniBfsExpansionsPerServerTick();
         job.step(batch, MAX_OMNI_TOTAL_BLOCKS);
         if (!job.isDone()) return;
         Map<BlockPos, Integer> result = job.getMergedResult();

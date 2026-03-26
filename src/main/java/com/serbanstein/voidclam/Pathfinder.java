@@ -27,7 +27,11 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public final class Pathfinder {
+    private static final Logger LOGGER = LoggerFactory.getLogger("voidclam/Pathfinder");
     /** Main-thread A* jobs when {@link VoidClamConfig.AstarMode#SYNC_BATCHED} is active. */
     private static final ConcurrentLinkedQueue<AStarJob> syncAStarJobs = new ConcurrentLinkedQueue<>();
     private static final Deque<AStarJob> syncAStarFairness = new ArrayDeque<>();
@@ -35,6 +39,53 @@ public final class Pathfinder {
     public static void clearSyncPathJobsForSessionEnd() {
         syncAStarJobs.clear();
         syncAStarFairness.clear();
+    }
+
+    /** OP debug: sync-batched A* rows for {@code clamId} (empty list if none). */
+    public static List<String> debugSyncAStarJobsForClam(UUID clamId) {
+        List<String> out = new ArrayList<>();
+        if (clamId == null) {
+            return out;
+        }
+        int fairnessMatches = 0;
+        for (AStarJob j : syncAStarFairness) {
+            if (clamId.equals(j.clamId)) {
+                fairnessMatches++;
+            }
+        }
+        List<String> jobLines = new ArrayList<>();
+        for (AStarJob j : syncAStarJobs) {
+            if (!clamId.equals(j.clamId)) {
+                continue;
+            }
+            String prepassState = "null";
+            if (j.prepassBfs != null) {
+                prepassState = j.prepassBfs.isFinished() ? "finished" : "running";
+            }
+            int openSz = j.open != null ? j.open.size() : -1;
+            int closedSz = j.closed != null ? j.closed.size() : -1;
+            jobLines.add(String.format(
+                "  job phase=%s %d,%d,%d -> %d,%d,%d prepass=%s open=%d closed=%d totalExp=%d astarIter=%s",
+                j.phase,
+                j.sx, j.sy, j.sz,
+                j.gx, j.gy, j.gz,
+                prepassState,
+                openSz,
+                closedSz,
+                j.totalSyncExpansions,
+                j.astarIterations));
+        }
+        out.add(String.format(
+            "sync A*: astar_mode=%s queuedJobs=%d fairnessDequeEntriesForClam=%d",
+            VoidClamConfig.get().astarModeEnum(),
+            jobLines.size(),
+            fairnessMatches));
+        if (jobLines.isEmpty()) {
+            out.add("  (no entries in syncAStarJobs for this clam)");
+        } else {
+            out.addAll(jobLines);
+        }
+        return out;
     }
 
     /** Remove queued sync A* jobs for one clam (e.g. before {@link CommandToolbox#clamReSize}). */
@@ -66,7 +117,8 @@ public final class Pathfinder {
         if (syncAStarFairness.isEmpty()) {
             syncAStarFairness.addAll(syncAStarJobs);
         }
-        int safety = syncAStarFairness.size() + syncAStarJobs.size() + 8;
+        // Generous cap so many “paused” jobs (resize cooldown) in the round-robin do not burn the budget before an eligible job runs.
+        int safety = Math.max(4096, syncAStarFairness.size() * 4 + syncAStarJobs.size() * 4 + 64);
         while (globalStepBudget > 0 && safety-- > 0) {
             AStarJob job = syncAStarFairness.pollFirst();
             if (job == null) {
@@ -107,6 +159,10 @@ public final class Pathfinder {
         List<Node> open;
         List<Node> closed;
         long astarIterations;
+        /** Prepass {@link BlockBfs} node steps plus A* {@link #expandOneAStarIteration} calls for this job (cross-tick). */
+        long totalSyncExpansions;
+        /** Refreshed at the start of each {@link #step}; prepass policy reads this field each expansion (not a stale closure). */
+        PathfindChunkCache activePathChunkCache;
 
         AStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
             this.worldRef = world;
@@ -135,6 +191,12 @@ public final class Pathfinder {
                 finishFail(modForFlag);
                 return 0;
             }
+            long cap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
+            if (totalSyncExpansions >= cap) {
+                finishFail(modForFlag);
+                return 0;
+            }
+            activePathChunkCache = new PathfindChunkCache(world, modForFlag);
             if (phase == AStarPhase.PREPASS) {
                 return stepPrepass(world, modForFlag, budget);
             }
@@ -155,7 +217,7 @@ public final class Pathfinder {
                 BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
                     BlockPos nextPos = BlockPos.fromLong(toLong);
                     return inPathfindSearchBounds(modForFlag, nextPos.getX(), nextPos.getY(), nextPos.getZ())
-                        && !isPathfindCellImpassable(w, nextPos);
+                        && !isPathfindCellImpassable(w, activePathChunkCache, nextPos);
                 };
                 prepassBfs = BlockBfs.start(
                     world,
@@ -170,8 +232,14 @@ public final class Pathfinder {
                 );
             }
             int used = 0;
+            long expandCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
             while (used < budget && !prepassBfs.isFinished()) {
+                if (totalSyncExpansions >= expandCap) {
+                    finishFail(modForFlag);
+                    return used;
+                }
                 prepassBfs.step(1);
+                totalSyncExpansions++;
                 used++;
             }
             if (!prepassBfs.isFinished()) {
@@ -202,10 +270,16 @@ public final class Pathfinder {
 
         private int stepAstar(ServerWorld world, Module modForFlag, int budget) {
             int used = 0;
+            long expandCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
             while (used < budget) {
+                if (totalSyncExpansions >= expandCap) {
+                    finishFail(modForFlag);
+                    return used;
+                }
                 AStarExpandResult r = expandOneAStarIteration(
-                    world, clamId, gx, gy, gz, modForFlag, open, closed, astarIterations);
+                    world, clamId, gx, gy, gz, modForFlag, open, closed, astarIterations, activePathChunkCache);
                 astarIterations++;
+                totalSyncExpansions++;
                 if (r == AStarExpandResult.ABORT) {
                     finishFail(modForFlag);
                     return used + 1;
@@ -249,7 +323,8 @@ public final class Pathfinder {
         Module modForFlag,
         List<Node> open,
         List<Node> closed,
-        long astarIterationsBeforeStep
+        long astarIterationsBeforeStep,
+        PathfindChunkCache pathChunkCache
     ) {
         UUID effectiveClamId = pathClamId != null ? pathClamId : modForFlag.clamId;
         if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
@@ -267,7 +342,7 @@ public final class Pathfinder {
             int nz = nextCheapestNode.z + c.z;
 
             BlockPos nextPos = new BlockPos(nx, ny, nz);
-            BlockState bl = world.getBlockState(nextPos);
+            BlockState bl = pathChunkCache.getBlockState(nextPos);
             double cst;
             if (VoidClamCoreBlocks.isWartOrCore(bl)) {
                 cst = 0;
@@ -278,10 +353,10 @@ public final class Pathfinder {
                 // Negative hardness: bedrock, barrier, etc. Impervious to break; do not path or apply as diggable.
                 if (hard > 5 || hard < 0) {
                     cst = 2500;
-                } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, nextPos) && isSolid(world, nextPos.down()))) {
+                } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, pathChunkCache, nextPos) && isSolid(world, pathChunkCache, nextPos.down()))) {
                     cst = 1;
-                } else if (isAirLike(bl, world, nextPos)) {
-                    int b = countAdjacentNotWaterAirWart(world, nextPos);
+                } else if (isAirLike(bl, world, pathChunkCache, nextPos)) {
+                    int b = countAdjacentNotWaterAirWart(world, pathChunkCache, nextPos);
                     cst = 6 - b;
                 } else {
                     cst = 10 + getBlastResistance(bl);
@@ -293,7 +368,11 @@ public final class Pathfinder {
             }
 
             Module pathMod = modForFlag;
-            if (!isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
+            // Prepass can mark the goal reachable via a 6-neighbor adjacent to the goal even when the goal cell lies
+            // just outside the pathfinding AABB (common for a torch one block past the Y cap). A* must allow that final
+            // step; otherwise we exhaust the open set after a long search (async "stuck") or return NO_PATH.
+            boolean isGoalCell = nx == gx && ny == gy && nz == gz;
+            if (!isGoalCell && !isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
                 continue;
             }
 
@@ -394,9 +473,13 @@ public final class Pathfinder {
     }
 
     public static Node leastF(List<Node> list) {
-        double minf = 100_000;
-        Node mini = null;
-        for (Node n : list) {
+        if (list.isEmpty()) {
+            return null;
+        }
+        Node mini = list.getFirst();
+        double minf = mini.f;
+        for (int i = 1; i < list.size(); i++) {
+            Node n = list.get(i);
             if (n.f < minf) {
                 minf = n.f;
                 mini = n;
@@ -418,9 +501,9 @@ public final class Pathfinder {
      * Half-extents for A* expansion, reachability prepass, and container BFS, in block units from module center.
      * Must match {@link #calculatePath} bounds: ±4×{@code cSize} on X, ±5×{@code cSize} on Y and Z.
      */
-    private static final int PATHFINDING_RANGE_XZ_HALF = 4;
-    private static final int PATHFINDING_RANGE_Y_HALF = 5;
-    private static final int PATHFINDING_RANGE_Z_HALF = 5;
+    static final int PATHFINDING_RANGE_XZ_HALF = 4;
+    static final int PATHFINDING_RANGE_Y_HALF = 5;
+    static final int PATHFINDING_RANGE_Z_HALF = 5;
 
     private static boolean isWithinPathfindingRange(int x, int y, int z, int cx, int cy, int cz, int cSize) {
         return Math.abs(x - cx) <= PATHFINDING_RANGE_XZ_HALF * cSize
@@ -431,8 +514,8 @@ public final class Pathfinder {
     /**
      * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}).
      */
-    private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
-        BlockState bl = world.getBlockState(pos);
+    private static boolean isPathfindCellImpassable(ServerWorld world, PathfindChunkCache pathChunkCache, BlockPos pos) {
+        BlockState bl = pathChunkCache.getBlockState(pos);
         if (VoidClamCoreBlocks.isWartOrCore(bl)) {
             return false;
         }
@@ -460,7 +543,8 @@ public final class Pathfinder {
         ServerWorld world,
         int sx, int sy, int sz,
         int gx, int gy, int gz,
-        Module mod
+        Module mod,
+        PathfindChunkCache pathChunkCache
     ) {
         if (sx == gx && sy == gy && sz == gz) {
             return true;
@@ -473,7 +557,7 @@ public final class Pathfinder {
         BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
             BlockPos nextPos = BlockPos.fromLong(toLong);
             return inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())
-                && !isPathfindCellImpassable(w, nextPos);
+                && !isPathfindCellImpassable(w, pathChunkCache, nextPos);
         };
         BlockBfs bfs = BlockBfs.start(
             world,
@@ -493,6 +577,37 @@ public final class Pathfinder {
     /** Cheaper than Euclidean: no sqrt, O(1). Not admissible when edge costs can be 0 (e.g. wart). */
     private static double manhattanH(int x, int y, int z, int gx, int gy, int gz) {
         return Math.abs(x - gx) + Math.abs(y - gy) + Math.abs(z - gz);
+    }
+
+    /** SLF4J debug: enable {@code voidclam/Pathfinder} or parent logger at DEBUG (e.g. in log4j2.xml). */
+    private static void logPathfindingStartDebug(UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+        if (!LOGGER.isDebugEnabled()) {
+            return;
+        }
+        VoidClamConfig cfg = VoidClamConfig.get();
+        String from = "(" + sx + "," + sy + "," + sz + ")";
+        String goal = "(" + gx + "," + gy + "," + gz + ")";
+        if (cfg.astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            int raw = cfg.astar_sync_global_max_steps_per_tick;
+            int perTick = cfg.effectiveSyncMaxStepsPerTick();
+            if (raw == 0) {
+                int n = Math.max(1, Runtime.getRuntime().availableProcessors());
+                LOGGER.debug(
+                    "[VoidClam] pathfinding start sync_batched clamId={} {} -> {} expansionsPerTick={} (astar_sync_global_max_steps_per_tick=0 guessedBase={} cpus={})",
+                    clamId, from, goal, perTick, n * 128, n
+                );
+            } else {
+                LOGGER.debug(
+                    "[VoidClam] pathfinding start sync_batched clamId={} {} -> {} expansionsPerTick={} (astar_sync_global_max_steps_per_tick={})",
+                    clamId, from, goal, perTick, raw
+                );
+            }
+        } else {
+            LOGGER.debug(
+                "[VoidClam] pathfinding start async clamId={} {} -> {} threadPoolSize={}",
+                clamId, from, goal, cfg.effectiveAsyncThreadPoolSize()
+            );
+        }
     }
 
     /**
@@ -519,11 +634,13 @@ public final class Pathfinder {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
         }
+        logPathfindingStartDebug(clamId, sx, sy, sz, gx, gy, gz);
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
             return true;
         }
-        if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag)) {
+        PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag);
+        if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag, asyncPathCache)) {
             VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
@@ -538,9 +655,19 @@ public final class Pathfinder {
         open.add(firstNode);
 
         long astarIterations = 0;
+        long maxAstarExpansions = (long) VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
         while (!open.isEmpty()) {
+            if (astarIterations >= maxAstarExpansions) {
+                LOGGER.warn(
+                    "[voidclam/Pathfinder] async A* exceeded expansion cap {} clamId={} goal=({},{},{}) open={} closed={}",
+                    maxAstarExpansions, clamId, gx, gy, gz,
+                    open.size(), closed.size());
+                VoidClamMod.removeLightFromClamCacheAfterFailedPath(clamId, new BlockPos(gx, gy, gz));
+                VoidClamMod.releasePathfindingMainCycle(modForFlag);
+                return false;
+            }
             AStarExpandResult r = expandOneAStarIteration(
-                world, pathCid, gx, gy, gz, modForFlag, open, closed, astarIterations);
+                world, pathCid, gx, gy, gz, modForFlag, open, closed, astarIterations, asyncPathCache);
             astarIterations++;
             if (r == AStarExpandResult.ABORT) {
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
@@ -575,15 +702,15 @@ public final class Pathfinder {
     }
 
     /** True if block at pos is "solid" for tendril stickiness (not air/fluid/soft/wart). */
-    private static boolean isSolid(World world, BlockPos pos) {
-        BlockState state = world.getBlockState(pos);
+    private static boolean isSolid(World world, PathfindChunkCache pathChunkCache, BlockPos pos) {
+        BlockState state = pathChunkCache.getBlockState(pos);
         if (state.isOf(Blocks.NETHER_WART_BLOCK)) return false;
         if (VoidClamMod.isBaseCost(state.getBlock())) return false;
         return getHardness(world, pos, state) > 0.2f;
     }
 
     /** True if block is traversable without breaking (air, baseCost, or soft hardness). */
-    private static boolean isAirLike(BlockState state, World world, BlockPos pos) {
+    private static boolean isAirLike(BlockState state, World world, PathfindChunkCache pathChunkCache, BlockPos pos) {
         return VoidClamMod.isBaseCost(state.getBlock()) || getHardness(world, pos, state) <= 0.2f;
     }
 
@@ -594,10 +721,12 @@ public final class Pathfinder {
     }
 
     /** Number of adjacent blocks (6-neighborhood) that are not water/air/nether wart. */
-    private static int countAdjacentNotWaterAirWart(World world, BlockPos pos) {
+    private static int countAdjacentNotWaterAirWart(World world, PathfindChunkCache pathChunkCache, BlockPos pos) {
         int b = 0;
         for (Cursor c : xc) {
-            if (!isWaterAirOrWart(world.getBlockState(pos.add(c.x, c.y, c.z)))) b++;
+            if (!isWaterAirOrWart(pathChunkCache.getBlockState(pos.getX() + c.x, pos.getY() + c.y, pos.getZ() + c.z))) {
+                b++;
+            }
         }
         return b;
     }

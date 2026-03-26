@@ -433,16 +433,16 @@ public final class VoidClamMod {
     }
 
     /**
-     * Clam core broken: replace the default blast furnace drop with a named stack carrying module + furnace data,
-     * then remove the module from the save. Furnace components were stored in {@link #breakingClamFurnaceComponents}.
+     * Clam core broken: replace the default blast furnace drop with a fresh Searing Heart (baby template),
+     * then remove the module from the save.
      */
     public static void onClamCoreBroken(ServerWorld world, @Nullable PlayerEntity player, BlockPos pos, BlockState state) {
-        ComponentMap furnaceSnap = breakingClamFurnaceComponents.get();
         breakingClamFurnaceComponents.remove();
         Module m = findModuleAt(pos);
         if (m == null) return;
         stripVanillaBlastFurnaceDropsNear(world, pos);
-        ItemStack drop = SearingHeartItems.createDropFromBreak(m, furnaceSnap);
+        // Baby heart only: no carry-over module size/stats or furnace contents (furnaceSnap ignored).
+        ItemStack drop = SearingHeartItems.createFreshHeartStack();
         net.minecraft.block.Block.dropStack(world, pos, drop);
         clamKillBlocking(world.getServer(), m.clamId, true);
     }
@@ -764,6 +764,58 @@ public final class VoidClamMod {
 
     public static boolean isTargetsQueueEmpty() {
         return targets.isEmpty();
+    }
+
+    /** OP debug: weakly consistent count of queued path ends for {@code clamId}. */
+    public static int countTargetsQueuedForClam(@Nullable UUID clamId) {
+        if (clamId == null) {
+            return 0;
+        }
+        int c = 0;
+        for (Node node : targets) {
+            if (clamId.equals(node.clamId)) {
+                c++;
+            }
+        }
+        return c;
+    }
+
+    /** OP debug: flags, busy state, caches, and queue stats for one module. */
+    public static List<String> debugModuleFlagLines(Module m, ServerWorld world) {
+        List<String> lines = new ArrayList<>();
+        if (m == null || world == null) {
+            return lines;
+        }
+        lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
+            + " status=" + m.status + " stubBuilt=" + m.stubBuilt);
+        lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
+            + " pathApplyPendingSteps=" + m.pathApplyPendingSteps);
+        lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " resumeWorldTime=" + m.pathfindingResumeWorldTime
+            + " pathAllowed=" + isPathfindingAllowedYet(world, m));
+        lines.add("caches: lightsCache=" + m.lightsCache.size() + " lightsBL=" + m.lightsBlackList.size()
+            + " oresBL=" + m.oresBlackList.size() + " lightCacheRebuildTicks=" + m.lightCacheRebuildTicksRemaining);
+        lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=" + world.getTime());
+        lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
+        return lines;
+    }
+
+    /** OP debug: global async pathfinding barrier and grow-pending coordinator; optional per-clam snapshot rows. */
+    public static List<String> debugGrowAndAsyncLinesForClam(@Nullable UUID clamId) {
+        List<String> lines = new ArrayList<>();
+        lines.add("asyncPathfinding: shutdownRequested=" + asyncPathfindingShutdownRequested
+            + " killBarrier=" + asyncPathfindingKillBarrierInEffect
+            + " killVictim=" + asyncPathfindingKillVictimClamId);
+        lines.add("growPending: active=" + (growPendingWorld != null)
+            + " cmdClamId=" + growCommandClamId
+            + " targetSize=" + growCommandTargetSize
+            + " dim=" + (growPendingWorld == null ? "null" : growPendingWorld.getRegistryKey().getValue().toString()));
+        if (clamId != null) {
+            Boolean savedL = growSavedSeekLights.get(clamId);
+            Boolean savedO = growSavedSeekOres.get(clamId);
+            lines.add("thisClam: isGrowCmdTarget=" + Objects.equals(growCommandClamId, clamId)
+                + " savedSeekLightsWhilePending=" + savedL + " savedSeekOresWhilePending=" + savedO);
+        }
+        return lines;
     }
 
     public static void removeOresBlackList(UUID clamId, BlockPos pos) {

@@ -1,5 +1,6 @@
 package com.serbanstein.voidclam;
 
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -10,8 +11,13 @@ import net.minecraft.util.math.Box;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,9 +32,43 @@ public final class CommandToolbox {
     private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(
         VoidClamConfig.effectiveAsyncThreadPoolSize(0));
 
+    /** Each pathfinder worker thread may register a short description while its runnable runs (debug only). */
+    private static final ConcurrentMap<Long, String> PATHFINDER_THREAD_TASK_LABELS = new ConcurrentHashMap<>();
+
+    public static void pathfinderWorkerTaskBegin(String label) {
+        PATHFINDER_THREAD_TASK_LABELS.put(Thread.currentThread().getId(), label);
+    }
+
+    public static void pathfinderWorkerTaskEnd() {
+        PATHFINDER_THREAD_TASK_LABELS.remove(Thread.currentThread().getId());
+    }
+
+    public static List<String> pathfinderWorkerTaskLabelsSnapshot() {
+        return Collections.unmodifiableList(new ArrayList<>(PATHFINDER_THREAD_TASK_LABELS.values()));
+    }
+
     /** Same pool used for async A* work and {@link BlockBfs.ExecutionMode#BACKGROUND} when {@code bfs_mode} is async. */
     public static Executor pathfindingExecutor() {
         return pathfinderExecutor;
+    }
+
+    /** OP debug: thread-pool stats for async pathfinding / background BFS (not per-clam). */
+    public static List<String> debugPathfinderExecutorLines() {
+        List<String> lines = new ArrayList<>(2);
+        ExecutorService ex = pathfinderExecutor;
+        if (ex instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
+            lines.add("pathfinderExecutor: poolSize=" + tpe.getPoolSize()
+                + " active=" + tpe.getActiveCount()
+                + " queue=" + tpe.getQueue().size()
+                + " completed=" + tpe.getCompletedTaskCount()
+                + " largestPool=" + tpe.getLargestPoolSize()
+                + " shutdown=" + tpe.isShutdown());
+        } else {
+            lines.add("pathfinderExecutor: (not ThreadPoolExecutor) isShutdown=" + ex.isShutdown());
+        }
+        lines.add("  workerTaskLabels=" + pathfinderWorkerTaskLabelsSnapshot());
+        lines.add("  omniAsyncPulseRunning=" + TendrilPulseManager.isOmniAsyncPulseRunning());
+        return lines;
     }
 
     public static void configurePathfinderExecutorSize(int poolSize) {
@@ -89,13 +129,21 @@ public final class CommandToolbox {
             return;
         }
         pathfinderExecutor.execute(() -> {
-            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
-                if (onAbortedBeforeRun != null) {
-                    onAbortedBeforeRun.run();
+            String label = pathfindingClamId != null
+                ? "submitPathfinding clamReach clamId=" + pathfindingClamId
+                : "submitPathfinding (no clamId)";
+            pathfinderWorkerTaskBegin(label);
+            try {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
+                    if (onAbortedBeforeRun != null) {
+                        onAbortedBeforeRun.run();
+                    }
+                    return;
                 }
-                return;
+                task.run();
+            } finally {
+                pathfinderWorkerTaskEnd();
             }
-            task.run();
         });
     }
 
@@ -165,6 +213,34 @@ public final class CommandToolbox {
         double horiz = Math.abs(px) + Math.abs(pz);
         if (py >= 0) return horiz <= (tsize - 2) - py;
         return horiz <= (tsize - 2) + py;
+    }
+
+    /**
+     * Replaces obsidian with {@code mat} where the block lies inside {@link #isInsideOctahedronInterior}
+     * for shell size {@code octahedronShellSize} (same metric as clam volume / player-interior checks).
+     */
+    public static void replaceObsidianInsideOctahedronInterior(
+        ServerWorld world,
+        int cx, int cy, int cz,
+        int octahedronShellSize,
+        net.minecraft.block.Block mat
+    ) {
+        int t = Math.max(1, octahedronShellSize);
+        int yMin = cy + (-t / 2 + 1);
+        int yMax = cy + (t - 2);
+        int horizBound = Math.max(0, t - 2);
+        BlockState replaceState = mat.getDefaultState();
+        for (int iy = yMin; iy <= yMax; iy++) {
+            for (int ix = cx - horizBound; ix <= cx + horizBound; ix++) {
+                for (int iz = cz - horizBound; iz <= cz + horizBound; iz++) {
+                    if (!isInsideOctahedronInterior(ix - cx, iy - cy, iz - cz, t)) continue;
+                    BlockPos pos = new BlockPos(ix, iy, iz);
+                    if (world.getBlockState(pos).isOf(Blocks.OBSIDIAN)) {
+                        world.setBlockState(pos, replaceState);
+                    }
+                }
+            }
+        }
     }
 
     /** True if the player's bounding box intersects the module's octahedron interior. */
@@ -243,15 +319,9 @@ public final class CommandToolbox {
             timer++;
         }
 
-        for (int ix = x - csize; ix <= x + csize; ix++) {
-            for (int iy = y - csize - 1; iy <= y + csize + 1; iy++) {
-                for (int iz = z - csize; iz <= z + csize; iz++) {
-                    BlockPos pos = new BlockPos(ix, iy, iz);
-                    if (world.getBlockState(pos).isOf(Blocks.OBSIDIAN))
-                        world.setBlockState(pos, mat.getDefaultState());
-                }
-            }
-        }
+        // Obsidian from the prior shell: convert to wart inside the octahedron for the target shell, or (on repair) one size larger than csize.
+        int octObsidianReplace = Math.max(tsize, csize + 1);
+        replaceObsidianInsideOctahedronInterior(world, x, y, z, octObsidianReplace, mat);
 
         for (int i = y + csize; i <= y + tsize - 1; i++) {
             if (i != y)
