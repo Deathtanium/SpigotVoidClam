@@ -153,7 +153,7 @@ public final class TendrilPulseManager {
             BlockPos center = new BlockPos(m.x, m.y, m.z);
             if (!world.isChunkLoaded(center)) continue;
             BlockState startState = world.getBlockState(center);
-            if (startState.getBlock() != Blocks.NETHER_WART_BLOCK && startState.getBlock() != Blocks.WARPED_WART_BLOCK)
+            if (startState.getBlock() != Blocks.NETHER_WART_BLOCK)
                 continue;
             bfsList.add(new BlockBfs.MergedOmniBfsJob.SingleSource(center.asLong(), MAX_OMNI_BFS_PER_MODULE));
         }
@@ -178,7 +178,7 @@ public final class TendrilPulseManager {
             VoidClamMod.scheduleDelayed(world, delay, () -> {
                 if (!world.isChunkLoaded(pos)) return;
                 BlockState state = world.getBlockState(pos);
-                if (state.getBlock() != Blocks.NETHER_WART_BLOCK && state.getBlock() != Blocks.WARPED_WART_BLOCK)
+                if (state.getBlock() != Blocks.NETHER_WART_BLOCK)
                     return;
                 int packed = getPackedBrightnessAt(world, pos);
                 startPulse(world, pos, packed, () -> {}, INITIAL_SCALE_OMNI);

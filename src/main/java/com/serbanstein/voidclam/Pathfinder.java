@@ -110,7 +110,7 @@ public final class Pathfinder {
      */
     private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
         BlockState bl = world.getBlockState(pos);
-        if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(Blocks.WARPED_WART_BLOCK)) {
+        if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
             return false;
         }
         if (bl.getBlock() instanceof BlockEntityProvider) {
@@ -203,7 +203,7 @@ public final class Pathfinder {
                 BlockPos nextPos = new BlockPos(nx, ny, nz);
                 BlockState bl = world.getBlockState(nextPos);
                 double cst;
-                if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(Blocks.WARPED_WART_BLOCK)) {
+                if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
                     cst = 0;
                 } else if (bl.getBlock() instanceof BlockEntityProvider) {
                     cst = 2500; // tile entities are insurpassible
@@ -285,7 +285,7 @@ public final class Pathfinder {
     /** True if block at pos is "solid" for tendril stickiness (not air/fluid/soft/wart). */
     private static boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        if (state.isOf(Blocks.NETHER_WART_BLOCK) || state.isOf(Blocks.WARPED_WART_BLOCK)) return false;
+        if (state.isOf(Blocks.NETHER_WART_BLOCK)) return false;
         if (VoidClamMod.isBaseCost(state.getBlock())) return false;
         return getHardness(world, pos, state) > 0.2f;
     }
@@ -298,7 +298,7 @@ public final class Pathfinder {
     /** True if block is water, air, or nether wart (for adjacent count B). */
     private static boolean isWaterAirOrWart(BlockState state) {
         return state.isOf(Blocks.WATER) || state.isAir()
-            || state.isOf(Blocks.NETHER_WART_BLOCK) || state.isOf(Blocks.WARPED_WART_BLOCK);
+            || state.isOf(Blocks.NETHER_WART_BLOCK);
     }
 
     /** Number of adjacent blocks (6-neighborhood) that are not water/air/nether wart. */
@@ -311,24 +311,13 @@ public final class Pathfinder {
     }
 
     // --- Container logic: off-thread BFS on live world (same rules as former snapshot), within pathfinding AABB ---
-    private static final byte TYPE_OTHER = 0;
-    private static final byte TYPE_NETHER_WART = 1;
-    private static final byte TYPE_WARPED_WART = 2;
-    private static final byte TYPE_CONTAINER = 3;
     private static boolean isContainerBlock(net.minecraft.block.Block block) {
         return block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL;
     }
 
-    private static byte classifyForContainerBfs(BlockState state) {
-        if (state.isOf(Blocks.NETHER_WART_BLOCK)) return TYPE_NETHER_WART;
-        if (state.isOf(Blocks.WARPED_WART_BLOCK)) return TYPE_WARPED_WART;
-        if (isContainerBlock(state.getBlock())) return TYPE_CONTAINER;
-        return TYPE_OTHER;
-    }
-
     /**
      * BFS from {@code startLong} (clam center) over the live world. Same traversal rules as before: expand from root once;
-     * otherwise only through nether/warped wart. Bounded by the same AABB as {@link #calculatePath}.
+     * otherwise only through nether wart. Bounded by the same AABB as {@link #calculatePath}.
      * Appends container positions to {@code containersOut} via {@link BlockBfs}.
      *
      * @param executionMode {@link BlockBfs.ExecutionMode#MAIN_THREAD_BATCHED} drains on the current thread (e.g. inside
@@ -352,7 +341,7 @@ public final class Pathfinder {
             public boolean expandFrom(ServerWorld w, long curLong, int distanceFromStart) {
                 if (curLong == startLong) return true;
                 BlockState st = w.getBlockState(BlockPos.fromLong(curLong));
-                return st.isOf(Blocks.NETHER_WART_BLOCK) || st.isOf(Blocks.WARPED_WART_BLOCK);
+                return st.isOf(Blocks.NETHER_WART_BLOCK);
             }
 
             @Override
@@ -373,7 +362,7 @@ public final class Pathfinder {
             BlockBfs.NO_EARLY_GOAL,
             (w, posLong, d) -> {
                 BlockState state = w.getBlockState(BlockPos.fromLong(posLong));
-                if (classifyForContainerBfs(state) == TYPE_CONTAINER) {
+                if (isContainerBlock(state.getBlock())) {
                     containersOut.add(posLong);
                 }
             }

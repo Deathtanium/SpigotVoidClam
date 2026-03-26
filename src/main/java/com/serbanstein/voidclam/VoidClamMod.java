@@ -343,7 +343,7 @@ public final class VoidClamMod {
                         BlockState state = world.getBlockState(new BlockPos(ix, iy, iz));
                         Block b = state.getBlock();
                         if (b != Blocks.AIR && b != Blocks.WATER && b != Blocks.LAVA && b != Blocks.OBSIDIAN
-                            && b != Blocks.NETHER_WART_BLOCK && b != Blocks.WARPED_WART_BLOCK) {
+                            && b != Blocks.NETHER_WART_BLOCK) {
                             float br = b.getBlastResistance();
                             if (br < 0) hasRoom = 0;
                             else cst += br;
