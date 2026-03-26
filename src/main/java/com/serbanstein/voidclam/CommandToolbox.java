@@ -19,7 +19,27 @@ public final class CommandToolbox {
      * Shared executor for pathfinding (reach + container scan) so it doesn't block main thread.
      * Replaced after each server session ends so a new pool exists if the JVM loads another world.
      */
-    private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
+    private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(
+        VoidClamConfig.effectiveAsyncThreadPoolSize(0));
+
+    public static void configurePathfinderExecutorSize(int poolSize) {
+        int n = Math.max(1, poolSize);
+        if (pathfinderExecutor instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
+            tpe.setMaximumPoolSize(n);
+            tpe.setCorePoolSize(n);
+            return;
+        }
+        pathfinderExecutor.shutdown();
+        try {
+            if (!pathfinderExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                pathfinderExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            pathfinderExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        pathfinderExecutor = Executors.newFixedThreadPool(n);
+    }
 
     /**
      * Run pathfinding off-thread (used by clamReach and container BFS). Rejects without queuing while a coordinated kill barrier
@@ -40,6 +60,16 @@ public final class CommandToolbox {
             if (onAbortedBeforeRun != null) {
                 onAbortedBeforeRun.run();
             }
+            return;
+        }
+        if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)) {
+                if (onAbortedBeforeRun != null) {
+                    onAbortedBeforeRun.run();
+                }
+                return;
+            }
+            task.run();
             return;
         }
         pathfinderExecutor.execute(() -> {
@@ -70,7 +100,7 @@ public final class CommandToolbox {
             pathfinderExecutor.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        pathfinderExecutor = Executors.newFixedThreadPool(2);
+        pathfinderExecutor = Executors.newFixedThreadPool(VoidClamConfig.get().effectiveAsyncThreadPoolSize());
     }
 
     /**
@@ -94,7 +124,7 @@ public final class CommandToolbox {
                         long delay = Math.abs(iy - y) * 20L;
                         VoidClamMod.scheduleDelayed(world, delay, () -> {
                             world.setBlockState(new BlockPos(ux, uy, uz), Blocks.NETHER_WART_BLOCK.getDefaultState());
-                            world.playSound(null, ux + 0.5, uy + 0.5, uz + 0.5,
+                            VoidClamSfx.playBlockSound(world, null, ux + 0.5, uy + 0.5, uz + 0.5,
                                 SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
                         });
                     }
@@ -102,7 +132,7 @@ public final class CommandToolbox {
                         long delay = Math.abs(iy - y) * 30L;
                         VoidClamMod.scheduleDelayed(world, delay, () -> {
                             world.setBlockState(new BlockPos(ux, uy, uz), Blocks.OBSIDIAN.getDefaultState());
-                            world.playSound(null, ux + 0.5, uy + 0.5, uz + 0.5,
+                            VoidClamSfx.playBlockSound(world, null, ux + 0.5, uy + 0.5, uz + 0.5,
                                 SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
                         });
                     }
@@ -189,7 +219,7 @@ public final class CommandToolbox {
             final int iFinal = i;
             VoidClamMod.scheduleDelayed(world, timer * 10L, () -> {
                 buildShell(world, x, y, z, iFinal, Blocks.NETHER_WART_BLOCK);
-                world.playSound(null, x + 0.5, y + 0.5, z + 0.5,
+                VoidClamSfx.playBlockSound(world, null, x + 0.5, y + 0.5, z + 0.5,
                     SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
             });
             timer++;

@@ -16,14 +16,305 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 
 public final class Pathfinder {
+    /** Main-thread A* jobs when {@link VoidClamConfig.AstarMode#SYNC_BATCHED} is active. */
+    private static final ConcurrentLinkedQueue<AStarJob> syncAStarJobs = new ConcurrentLinkedQueue<>();
+    private static final Deque<AStarJob> syncAStarFairness = new ArrayDeque<>();
+
+    public static void clearSyncPathJobsForSessionEnd() {
+        syncAStarJobs.clear();
+        syncAStarFairness.clear();
+    }
+
+    /**
+     * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncAStarJobs}.
+     */
+    public static void enqueueSyncAStarJob(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
+        syncAStarJobs.add(new AStarJob(world, tno, sx, sy, sz, gx, gy, gz));
+    }
+
+    /**
+     * Spread {@code globalStepBudget} expansions across queued sync jobs (round-robin).
+     */
+    public static void tickSyncAStarJobs(int globalStepBudget) {
+        if (globalStepBudget <= 0 || syncAStarJobs.isEmpty()) return;
+        if (syncAStarFairness.isEmpty()) {
+            syncAStarFairness.addAll(syncAStarJobs);
+        }
+        int safety = syncAStarFairness.size() + syncAStarJobs.size() + 8;
+        while (globalStepBudget > 0 && safety-- > 0) {
+            AStarJob job = syncAStarFairness.pollFirst();
+            if (job == null) {
+                if (syncAStarJobs.isEmpty()) break;
+                syncAStarFairness.addAll(syncAStarJobs);
+                continue;
+            }
+            if (!syncAStarJobs.contains(job)) {
+                continue;
+            }
+            int used = job.step(job.worldRef, globalStepBudget);
+            globalStepBudget -= used;
+            if (job.isFinished()) {
+                syncAStarJobs.remove(job);
+            } else {
+                syncAStarFairness.addLast(job);
+            }
+        }
+    }
+
+    private enum AStarPhase {
+        PREPASS,
+        ASTAR,
+        DONE
+    }
+
+    private static final class AStarJob {
+        final ServerWorld worldRef;
+        final int tno;
+        final int sx, sy, sz, gx, gy, gz;
+        AStarPhase phase = AStarPhase.PREPASS;
+        BlockBfs prepassBfs;
+        List<Node> open;
+        List<Node> closed;
+        long astarIterations;
+
+        AStarJob(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
+            this.worldRef = world;
+            this.tno = tno;
+            this.sx = sx;
+            this.sy = sy;
+            this.sz = sz;
+            this.gx = gx;
+            this.gy = gy;
+            this.gz = gz;
+        }
+
+        boolean isFinished() {
+            return phase == AStarPhase.DONE;
+        }
+
+        /** @return prepass or A* expansions consumed */
+        int step(ServerWorld world, int budget) {
+            Module[] modules = VoidClamMod.getModules();
+            Module modForFlag = modules[tno];
+            if (modForFlag == null) {
+                finishFail(null);
+                return 0;
+            }
+            if (world != worldRef) {
+                finishFail(modForFlag);
+                return 0;
+            }
+            if (phase == AStarPhase.PREPASS) {
+                return stepPrepass(world, modForFlag, modules, budget);
+            }
+            if (phase == AStarPhase.ASTAR) {
+                return stepAstar(world, modForFlag, modules, VoidClamMod.getModuleNumber(), budget);
+            }
+            return 0;
+        }
+
+        private int stepPrepass(ServerWorld world, Module modForFlag, Module[] modules, int budget) {
+            if (prepassBfs == null) {
+                if (sx == gx && sy == gy && sz == gz) {
+                    beginAstarPhase();
+                    return 1;
+                }
+                if (tno > VoidClamMod.getModuleNumber() || modules[tno] == null) {
+                    finishFail(modForFlag);
+                    return 1;
+                }
+                long goalLong = BlockPos.asLong(gx, gy, gz);
+                long startLong = BlockPos.asLong(sx, sy, sz);
+                BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
+                    BlockPos nextPos = BlockPos.fromLong(toLong);
+                    return inPathfindSearchBounds(modForFlag, nextPos.getX(), nextPos.getY(), nextPos.getZ())
+                        && !isPathfindCellImpassable(w, nextPos);
+                };
+                prepassBfs = BlockBfs.start(
+                    world,
+                    startLong,
+                    prepassPolicy,
+                    Integer.MAX_VALUE,
+                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
+                    null,
+                    null,
+                    asyncPathfindingAbortChecker(world, modForFlag.x, modForFlag.z, tno),
+                    goalLong
+                );
+            }
+            int used = 0;
+            while (used < budget && !prepassBfs.isFinished()) {
+                prepassBfs.step(1);
+                used++;
+            }
+            if (!prepassBfs.isFinished()) {
+                return used;
+            }
+            boolean reachable = prepassBfs.isEarlyGoalNeighborHit();
+            prepassBfs = null;
+            if (!reachable) {
+                finishFail(modForFlag);
+                return used;
+            }
+            beginAstarPhase();
+            return used;
+        }
+
+        private void beginAstarPhase() {
+            open = new ArrayList<>();
+            closed = new ArrayList<>();
+            Node firstNode = new Node(sx, sy, sz, null, tno);
+            firstNode.g = 0;
+            firstNode.h = manhattanH(sx, sy, sz, gx, gy, gz);
+            firstNode.f = firstNode.g + firstNode.h;
+            open.add(firstNode);
+            astarIterations = 0;
+            phase = AStarPhase.ASTAR;
+        }
+
+        private int stepAstar(ServerWorld world, Module modForFlag, Module[] modules, int moduleNumber, int budget) {
+            int used = 0;
+            while (used < budget) {
+                AStarExpandResult r = expandOneAStarIteration(
+                    world, tno, gx, gy, gz, modForFlag, modules, moduleNumber, open, closed, astarIterations);
+                astarIterations++;
+                if (r == AStarExpandResult.ABORT) {
+                    finishFail(modForFlag);
+                    return used + 1;
+                }
+                if (r == AStarExpandResult.SUCCESS) {
+                    phase = AStarPhase.DONE;
+                    return used + 1;
+                }
+                if (r == AStarExpandResult.NO_PATH) {
+                    finishFail(modForFlag);
+                    return used + 1;
+                }
+                used++;
+            }
+            return used;
+        }
+
+        private void finishFail(Module modForFlag) {
+            phase = AStarPhase.DONE;
+            if (modForFlag != null) {
+                modForFlag.busyFlagMainCycle = 0;
+            }
+        }
+    }
+
+    private enum AStarExpandResult {
+        CONTINUE,
+        SUCCESS,
+        NO_PATH,
+        ABORT
+    }
+
+    /**
+     * One A* iteration: pop best open node, expand neighbors, maybe enqueue goal to {@link VoidClamMod#enqueueTarget}.
+     * {@code astarIterations} is the count before this iteration (for cooperative abort every 1024 steps).
+     */
+    private static AStarExpandResult expandOneAStarIteration(
+        ServerWorld world,
+        int tno,
+        int gx, int gy, int gz,
+        Module modForFlag,
+        Module[] modules,
+        int moduleNumber,
+        List<Node> open,
+        List<Node> closed,
+        long astarIterationsBeforeStep
+    ) {
+        if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno)) {
+            return AStarExpandResult.ABORT;
+        }
+        if (open.isEmpty()) {
+            return AStarExpandResult.NO_PATH;
+        }
+        Node nextCheapestNode = leastF(open);
+        open.remove(nextCheapestNode);
+
+        for (Cursor c : xc) {
+            int nx = nextCheapestNode.x + c.x;
+            int ny = nextCheapestNode.y + c.y;
+            int nz = nextCheapestNode.z + c.z;
+
+            BlockPos nextPos = new BlockPos(nx, ny, nz);
+            BlockState bl = world.getBlockState(nextPos);
+            double cst;
+            if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
+                cst = 0;
+            } else if (bl.getBlock() instanceof BlockEntityProvider) {
+                cst = 2500;
+            } else if (getHardness(world, nextPos, bl) > 5) {
+                cst = 2500;
+            } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, nextPos) && isSolid(world, nextPos.down()))) {
+                cst = 1;
+            } else if (isAirLike(bl, world, nextPos)) {
+                int b = countAdjacentNotWaterAirWart(world, nextPos);
+                cst = 6 - b;
+            } else {
+                cst = 10 + getBlastResistance(bl);
+            }
+
+            if (cst == 2500) {
+                continue;
+            }
+
+            Module pathMod = modules[tno];
+            if (tno > moduleNumber || pathMod == null
+                || !isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
+                continue;
+            }
+
+            double tentativeG = nextCheapestNode.g + cst;
+            Node probe = new Node(nx, ny, nz, nextCheapestNode, tno);
+            Node inOpen = nodeExists(open, probe);
+            Node inClosed = nodeExists(closed, probe);
+            if (inOpen != null && tentativeG >= inOpen.g) {
+                continue;
+            }
+            if (inClosed != null && tentativeG >= inClosed.g) {
+                continue;
+            }
+
+            if (inOpen != null) {
+                open.remove(inOpen);
+            }
+            if (inClosed != null) {
+                closed.remove(inClosed);
+            }
+
+            Node nextNode = new Node(nx, ny, nz, nextCheapestNode, tno);
+            nextNode.g = tentativeG;
+            nextNode.h = manhattanH(nx, ny, nz, gx, gy, gz);
+            nextNode.f = nextNode.g + nextNode.h;
+
+            if (nx == gx && ny == gy && nz == gz) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno)) {
+                    return AStarExpandResult.ABORT;
+                }
+                VoidClamMod.enqueueTarget(nextNode);
+                return AStarExpandResult.SUCCESS;
+            }
+
+            open.add(nextNode);
+        }
+        closed.add(nextCheapestNode);
+        return AStarExpandResult.CONTINUE;
+    }
+
     private static BlockBfs.AbortChecker asyncPathfindingAbortChecker(
         ServerWorld world,
         int clamCenterX,
@@ -187,6 +478,10 @@ public final class Pathfinder {
         Module[] modules = VoidClamMod.getModules();
         Module modForFlag = modules[tno];
         if (modForFlag == null) return false;
+        if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            enqueueSyncAStarJob(world, tno, sx, sy, sz, gx, gy, gz);
+            return true;
+        }
         int moduleNumber = VoidClamMod.getModuleNumber();
         if (!isGoalReachableByPrepass(world, tno, sx, sy, sz, gx, gy, gz, modForFlag, modules, moduleNumber)) {
             modForFlag.busyFlagMainCycle = 0;
@@ -194,7 +489,6 @@ public final class Pathfinder {
         }
         List<Node> open = new ArrayList<>();
         List<Node> closed = new ArrayList<>();
-
         Node firstNode = new Node(sx, sy, sz, null, tno);
         firstNode.g = 0;
         firstNode.h = manhattanH(sx, sy, sz, gx, gy, gz);
@@ -203,84 +497,21 @@ public final class Pathfinder {
 
         long astarIterations = 0;
         while (!open.isEmpty()) {
-            if ((astarIterations++ & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno)) {
+            AStarExpandResult r = expandOneAStarIteration(
+                world, tno, gx, gy, gz, modForFlag, modules, moduleNumber, open, closed, astarIterations);
+            astarIterations++;
+            if (r == AStarExpandResult.ABORT) {
                 modForFlag.busyFlagMainCycle = 0;
                 return false;
             }
-            Node nextCheapestNode = leastF(open);
-            open.remove(nextCheapestNode);
-
-            for (Cursor c : xc) {
-                int nx = nextCheapestNode.x + c.x;
-                int ny = nextCheapestNode.y + c.y;
-                int nz = nextCheapestNode.z + c.z;
-
-                BlockPos nextPos = new BlockPos(nx, ny, nz);
-                BlockState bl = world.getBlockState(nextPos);
-                double cst;
-                if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
-                    cst = 0;
-                } else if (bl.getBlock() instanceof BlockEntityProvider) {
-                    cst = 2500; // tile entities are insurpassible
-                } else if (getHardness(world, nextPos, bl) > 5) {
-                    cst = 2500;
-                } else if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, nextPos) && isSolid(world, nextPos.down()))) {
-                    cst = 1;
-                } else if (isAirLike(bl, world, nextPos)) {
-                    int b = countAdjacentNotWaterAirWart(world, nextPos);
-                    cst = 6 - b;
-                } else {
-                    cst = 10 + getBlastResistance(bl);
-                }
-
-                if (cst == 2500) {
-                    continue;
-                }
-
-                Module pathMod = modules[tno];
-                if (tno > moduleNumber || pathMod == null
-                    || !isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
-                    continue;
-                }
-
-                double tentativeG = nextCheapestNode.g + cst;
-                Node probe = new Node(nx, ny, nz, nextCheapestNode, tno);
-                Node inOpen = nodeExists(open, probe);
-                Node inClosed = nodeExists(closed, probe);
-                if (inOpen != null && tentativeG >= inOpen.g) {
-                    continue;
-                }
-                if (inClosed != null && tentativeG >= inClosed.g) {
-                    continue;
-                }
-
-                if (inOpen != null) {
-                    open.remove(inOpen);
-                }
-                if (inClosed != null) {
-                    closed.remove(inClosed);
-                }
-
-                Node nextNode = new Node(nx, ny, nz, nextCheapestNode, tno);
-                nextNode.g = tentativeG;
-                nextNode.h = manhattanH(nx, ny, nz, gx, gy, gz);
-                nextNode.f = nextNode.g + nextNode.h;
-
-                if (nx == gx && ny == gy && nz == gz) {
-                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno)) {
-                        modForFlag.busyFlagMainCycle = 0;
-                        return false;
-                    }
-                    VoidClamMod.enqueueTarget(nextNode);
-                    //we do not reset the busy flag here, because if CommandToolbox.clamReach was called, the reset is handled there
-                    return true;
-                }
-
-                open.add(nextNode);
+            if (r == AStarExpandResult.SUCCESS) {
+                return true;
             }
-            closed.add(nextCheapestNode);
+            if (r == AStarExpandResult.NO_PATH) {
+                modForFlag.busyFlagMainCycle = 0;
+                return false;
+            }
         }
-
         modForFlag.busyFlagMainCycle = 0;
         return false;
     }
@@ -395,7 +626,7 @@ public final class Pathfinder {
     private static void replaceWithWartAndPulse(ServerWorld world, BlockPos breakPos) {
         int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, breakPos);
         world.setBlockState(breakPos, Blocks.NETHER_WART_BLOCK.getDefaultState());
-        world.playSound(null, breakPos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+        VoidClamSfx.playBlockSound(world, breakPos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
         TendrilPulseManager.startPulse(world, breakPos, packedBrightness, () -> {});
     }
 
@@ -646,7 +877,7 @@ public final class Pathfinder {
 
                 int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, pos);
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
-                world.playSound(null, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+                VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
                     VoidClamMod.addEnergy(pathTno, 1); // energy only when light source is eaten
                 if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK))) {

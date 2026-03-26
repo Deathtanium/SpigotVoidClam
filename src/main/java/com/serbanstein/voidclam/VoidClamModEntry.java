@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.command.CommandRegistryAccess;
@@ -31,6 +32,8 @@ public class VoidClamModEntry implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        VoidClamConfig.loadFromDisk();
+        ServerChunkEvents.CHUNK_GENERATE.register(NaturalSpawnHandler::onChunkGenerated);
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(this::onServerStopping);
         ServerTickEvents.END_SERVER_TICK.register(this::onServerTick);
@@ -38,6 +41,7 @@ public class VoidClamModEntry implements ModInitializer {
     }
 
     private void onServerStarted(MinecraftServer server) {
+        VoidClamConfig.loadFromDisk();
         VoidClamMod.onAsyncPathfindingSessionStart();
         VoidClamMod.load(server);
     }
@@ -52,6 +56,9 @@ public class VoidClamModEntry implements ModInitializer {
         if (world == null) return;
         long tick = world.getTime();
 
+        if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            Pathfinder.tickSyncAStarJobs(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
+        }
         VoidClamMod.tickTargets(world);
         VoidClamModScheduler.tick(world);
         for (ServerWorld w : server.getWorlds()) {
@@ -127,6 +134,11 @@ public class VoidClamModEntry implements ModInitializer {
                                     ctx.getSource().sendError(Text.literal("target size cannot be smaller than current size"));
                                     return 0;
                                 }
+                                int maxSize = VoidClamConfig.get().clam_size_max;
+                                if (tsize > maxSize) {
+                                    ctx.getSource().sendError(Text.literal("target size cannot exceed config clam_size_max (" + maxSize + ")"));
+                                    return 0;
+                                }
                                 CommandToolbox.clamReSize(ctx.getSource().getWorld(), tno, tsize);
                                 return 1;
                             }))))
@@ -180,6 +192,34 @@ public class VoidClamModEntry implements ModInitializer {
                                     }
                                     boolean val = VoidClamMod.getModules()[tno].seekOres;
                                     ctx.getSource().sendMessage(Text.literal("Module " + tno + " seek ores = " + val));
+                                    return 1;
+                                }))))
+                    .then(CommandManager.literal("protect")
+                        .then(CommandManager.literal("set")
+                            .then(CommandManager.argument("index", IntegerArgumentType.integer(1))
+                                .then(CommandManager.argument("value", BoolArgumentType.bool())
+                                    .executes(ctx -> {
+                                        int tno = IntegerArgumentType.getInteger(ctx, "index");
+                                        boolean val = BoolArgumentType.getBool(ctx, "value");
+                                        if (tno > VoidClamMod.getModuleNumber() || VoidClamMod.getModules()[tno] == null) {
+                                            ctx.getSource().sendError(Text.literal("Bad number"));
+                                            return 0;
+                                        }
+                                        VoidClamMod.getModules()[tno].protectItself = val;
+                                        VoidClamMod.save(ctx.getSource().getServer());
+                                        ctx.getSource().sendMessage(Text.literal("Module " + tno + " protect itself = " + val));
+                                        return 1;
+                                    }))))
+                        .then(CommandManager.literal("get")
+                            .then(CommandManager.argument("index", IntegerArgumentType.integer(1))
+                                .executes(ctx -> {
+                                    int tno = IntegerArgumentType.getInteger(ctx, "index");
+                                    if (tno > VoidClamMod.getModuleNumber() || VoidClamMod.getModules()[tno] == null) {
+                                        ctx.getSource().sendError(Text.literal("Bad number"));
+                                        return 0;
+                                    }
+                                    boolean val = VoidClamMod.getModules()[tno].protectItself;
+                                    ctx.getSource().sendMessage(Text.literal("Module " + tno + " protect itself = " + val));
                                     return 1;
                                 }))))
                     .then(CommandManager.literal("lights")
@@ -252,7 +292,13 @@ public class VoidClamModEntry implements ModInitializer {
                                 ctx.getSource().sendError(Text.literal("Bad number"));
                                 return 0;
                             }
-                            int cSize = VoidClamMod.getModules()[tno].currentSize + 2;
+                            int maxSize = VoidClamConfig.get().clam_size_max;
+                            int cur = VoidClamMod.getModules()[tno].currentSize;
+                            int cSize = Math.min(cur + 2, maxSize);
+                            if (cSize <= cur) {
+                                ctx.getSource().sendError(Text.literal("Already at max size (" + maxSize + ")"));
+                                return 0;
+                            }
                             VoidClamMod.requestGrowCommand(ctx.getSource().getWorld(), tno, cSize);
                             ctx.getSource().sendFeedback(() -> Text.literal("Grow scheduled; will run once pathfinding is idle."), false);
                             return 1;
