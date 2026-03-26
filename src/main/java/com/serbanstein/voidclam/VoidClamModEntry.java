@@ -322,6 +322,12 @@ public class VoidClamModEntry implements ModInitializer {
                         ctx.getSource().sendMessage(Text.literal("Saved"));
                         return 1;
                     }))
+                .then(CommandManager.literal("ingestlegacy")
+                    .executes(ctx -> {
+                        String msg = VoidClamMod.importLegacyModulesSiva(ctx.getSource().getServer());
+                        ctx.getSource().sendFeedback(() -> Text.literal(msg), true);
+                        return 1;
+                    }))
                 .then(CommandManager.literal("cleanup")
                     .executes(ctx -> {
                         int count = 0;

@@ -16,6 +16,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
+import net.minecraft.world.chunk.ChunkStatus;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.*;
@@ -442,6 +443,39 @@ public final class VoidClamMod {
             Pathfinder.buildPath(world, n);
     }
 
+    /** One line of legacy {@code modules.siva} CSV, or null if empty/invalid. */
+    public static @Nullable Module parseModuleFromSivaLine(String line) {
+        String t = line.trim();
+        if (t.isEmpty()) return null;
+        String[] parts = t.split(",", -1);
+        if (parts.length < 8) return null;
+        try {
+            Module m = new Module();
+            m.type = Integer.parseInt(parts[0]);
+            m.x = Integer.parseInt(parts[1]);
+            m.y = Integer.parseInt(parts[2]);
+            m.z = Integer.parseInt(parts[3]);
+            m.currentSize = Integer.parseInt(parts[4]);
+            m.status = Integer.parseInt(parts[5]);
+            m.energy = Integer.parseInt(parts[6]);
+            m.age = Integer.parseInt(parts[7]);
+            m.seekLights = parts.length > 8 ? Boolean.parseBoolean(parts[8]) : false;
+            m.seekOres = parts.length > 9 ? Boolean.parseBoolean(parts[9]) : false;
+            m.protectItself = parts.length > 10 ? Boolean.parseBoolean(parts[10]) : true;
+            if (parts.length > 11 && !parts[11].isEmpty()) {
+                try {
+                    m.clamId = UUID.fromString(parts[11]);
+                } catch (IllegalArgumentException ignored) {
+                    m.clamId = null;
+                }
+            }
+            m.ensureClamId();
+            return m;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     /** Load modules from CSV {@code modules.siva} into {@link #modulesById}. */
     public static void load(MinecraftServer server) {
         Path savePath = getModulesPath(server);
@@ -449,36 +483,81 @@ public final class VoidClamMod {
         if (!Files.exists(savePath)) return;
         try (Scanner s = new Scanner(Files.newInputStream(savePath))) {
             while (s.hasNextLine()) {
-                String line = s.nextLine().trim();
-                if (line.isEmpty()) continue;
-                String[] parts = line.split(",", -1);
-                if (parts.length < 8) continue;
                 if (modulesById.size() >= MAX_MODULES) break;
-                Module m = new Module();
-                m.type = Integer.parseInt(parts[0]);
-                m.x = Integer.parseInt(parts[1]);
-                m.y = Integer.parseInt(parts[2]);
-                m.z = Integer.parseInt(parts[3]);
-                m.currentSize = Integer.parseInt(parts[4]);
-                m.status = Integer.parseInt(parts[5]);
-                m.energy = Integer.parseInt(parts[6]);
-                m.age = Integer.parseInt(parts[7]);
-                m.seekLights = parts.length > 8 ? Boolean.parseBoolean(parts[8]) : false;
-                m.seekOres = parts.length > 9 ? Boolean.parseBoolean(parts[9]) : false;
-                m.protectItself = parts.length > 10 ? Boolean.parseBoolean(parts[10]) : true;
-                if (parts.length > 11 && !parts[11].isEmpty()) {
-                    try {
-                        m.clamId = UUID.fromString(parts[11]);
-                    } catch (IllegalArgumentException ignored) {
-                        m.clamId = null;
-                    }
+                Module m = parseModuleFromSivaLine(s.nextLine());
+                if (m != null) {
+                    modulesById.put(m.clamId, m);
                 }
-                m.ensureClamId();
-                modulesById.put(m.clamId, m);
             }
         } catch (IOException e) {
             // no-op
         }
+    }
+
+    /**
+     * Read {@code modules.siva} from the world save root and register each row as a voidclam when possible:
+     * places heart + stub shell in the overworld (loads chunks as needed). Skips rows whose UUID is already registered
+     * or whose center is already occupied. Does not clear existing clams first.
+     *
+     * @return short summary for command feedback
+     */
+    public static String importLegacyModulesSiva(MinecraftServer server) {
+        Path savePath = getModulesPath(server);
+        if (!Files.exists(savePath)) {
+            return "No modules.siva in save root.";
+        }
+        ServerWorld world = server.getOverworld();
+        if (world == null) {
+            return "No overworld.";
+        }
+        int lines = 0;
+        int imported = 0;
+        int bad = 0;
+        int dupId = 0;
+        int occupied = 0;
+        int cap = 0;
+        int chunkFail = 0;
+        try {
+            List<String> allLines = Files.readAllLines(savePath);
+            for (String raw : allLines) {
+                lines++;
+                Module m = parseModuleFromSivaLine(raw);
+                if (m == null) {
+                    bad++;
+                    continue;
+                }
+                if (modulesById.containsKey(m.clamId)) {
+                    dupId++;
+                    continue;
+                }
+                BlockPos center = new BlockPos(m.x, m.y, m.z);
+                Module at = findModuleAt(center);
+                if (at != null) {
+                    occupied++;
+                    continue;
+                }
+                if (!registerModule(m)) {
+                    cap++;
+                    break;
+                }
+                int cx = m.x >> 4;
+                int cz = m.z >> 4;
+                try {
+                    world.getChunk(cx, cz, ChunkStatus.FULL, true);
+                } catch (Exception e) {
+                    modulesById.remove(m.clamId);
+                    chunkFail++;
+                    continue;
+                }
+                placeHeartBlockForModule(world, center, m);
+                CommandToolbox.buildStub(world, m.x, m.y, m.z);
+                imported++;
+            }
+        } catch (IOException e) {
+            return "Read failed: " + e.getMessage();
+        }
+        save(server);
+        return "legacy import: +" + imported + " (lines " + lines + ", bad " + bad + ", dupId " + dupId + ", occupied " + occupied + ", cap " + cap + ", chunkFail " + chunkFail + ")";
     }
 
     /** After CSV load: overworld centers still wart/obsidian get a heart block. */
