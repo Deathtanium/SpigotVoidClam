@@ -38,10 +38,12 @@ public class VoidClamModEntry implements ModInitializer {
     }
 
     private void onServerStarted(MinecraftServer server) {
+        VoidClamMod.onAsyncPathfindingSessionStart();
         VoidClamMod.load(server);
     }
 
     private void onServerStopping(MinecraftServer server) {
+        VoidClamMod.onAsyncPathfindingSessionStop();
         VoidClamMod.save(server);
     }
 

@@ -3,11 +3,24 @@
 ## Threads
 
 1. **Server main thread** — All `ServerTickEvents`, command handlers, `buildPath` scheduled steps that call `world.setBlockState`, and `world.getServer().execute(...)` (container apply after off-thread BFS) run here.
-2. **Pathfinder executor** — Fixed pool of **2** threads (`CommandToolbox.pathfinderExecutor`). Used for:
+2. **Pathfinder executor** — Fixed pool of **2** threads (package-private in `CommandToolbox`, recreated after each server session). Used for:
    - `clamReach` scan + `Pathfinder.calculatePath` (world reads from worker thread),
    - Off-thread **container BFS** on the live world (`Pathfinder.runContainerBfsOnWorld` — no separate snapshot map).
 
 **Caveat:** Vanilla `ServerWorld` is not documented as safe for arbitrary concurrent reads; the design matches historical behavior. Safer ports may snapshot chunk sections or confine reads to the main thread.
+
+## Async pathfinding shutdown flag
+
+- **API**: `VoidClamMod.isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
+- **Set**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). It sets the flag, **shuts down and awaits** the pathfinder executor (with timeout + `shutdownNow`), **replaces** the pool for a possible next world in the same JVM, and clears every module’s `busyFlagMainCycle` so nothing stays “stuck busy” after skipped queue entries.
+- **Cleared**: `VoidClamMod.onAsyncPathfindingSessionStart()` at `SERVER_STARTED` (before `load`).
+- **Where it is polled**:
+  - `CommandToolbox.submitPathfinding` wrapper (skips running new work if already shut down),
+  - `clamReach` (early return; periodic checks in the light/ore scan),
+  - `Pathfinder.calculatePath` (A* loop + goal enqueue guard),
+  - `Pathfinder.isGoalReachableByPrepass` / `runContainerBfsOnWorld` via `BlockBfs.AbortChecker`.
+
+**Porting:** Any new off-thread VoidClam work should use the same flag (or extend it) so shutdown does not enqueue world mutations after the server has begun stopping.
 
 ## `targets` queue
 

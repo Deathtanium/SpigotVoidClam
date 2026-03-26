@@ -11,15 +11,44 @@ import net.minecraft.util.math.Box;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /** Block building, shell/stub construction, resize/repair, and reach (pathfind trigger). */
 public final class CommandToolbox {
-    /** Shared executor for pathfinding (reach + block-place) so it doesn't block main thread. */
-    static final ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
+    /**
+     * Shared executor for pathfinding (reach + container scan) so it doesn't block main thread.
+     * Replaced after each server session ends so a new pool exists if the JVM loads another world.
+     */
+    private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);
 
-    /** Run pathfinding off-thread (used by clamReach). */
+    /** Run pathfinding off-thread (used by clamReach and container BFS). */
     public static void submitPathfinding(Runnable task) {
-        pathfinderExecutor.execute(task);
+        pathfinderExecutor.execute(() -> {
+            if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                return;
+            }
+            task.run();
+        });
+    }
+
+    /**
+     * Waits for queued/running pathfinding tasks after {@link VoidClamMod#onAsyncPathfindingSessionStop()} sets the shutdown flag,
+     * then replaces the executor. Called from the server lifecycle only.
+     */
+    static void shutdownPathfinderExecutorForSessionEnd() {
+        pathfinderExecutor.shutdown();
+        try {
+            if (!pathfinderExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                pathfinderExecutor.shutdownNow();
+                if (!pathfinderExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        } catch (InterruptedException e) {
+            pathfinderExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        pathfinderExecutor = Executors.newFixedThreadPool(2);
     }
 
     public static void buildStub(ServerWorld world, int x, int y, int z) {
@@ -181,11 +210,16 @@ public final class CommandToolbox {
         if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
         Module m = modules[tno];
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (VoidClamMod.isAsyncPathfindingShutdownRequested()) return;
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
         submitPathfinding(() -> {
             try {
+                if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                    m.busyFlagMainCycle = 0;
+                    return;
+                }
                 int x = m.x, y = m.y, z = m.z, cSize = m.currentSize;
                 BlockPos modPos = new BlockPos(x, y, z);
                 BlockPos closestLight = null;
@@ -194,9 +228,14 @@ public final class CommandToolbox {
                 double closestOreDist = Double.MAX_VALUE;
 
                 if (m.seekLights || m.seekOres) {
+                    int scanStep = 0;
+                    outerScan:
                     for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
                         for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
                             for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
+                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                                    break outerScan;
+                                }
                                 BlockPos pos = new BlockPos(ix, iy, iz);
                                 net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
                                 double dist = modPos.getSquaredDistance(pos);
@@ -211,6 +250,10 @@ public final class CommandToolbox {
                             }
                         }
                     }
+                    if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                        m.busyFlagMainCycle = 0;
+                        return;
+                    }
                 }
 
                 BlockPos closest = null;
@@ -222,13 +265,25 @@ public final class CommandToolbox {
                     m.oresBlackList.add(closest.toImmutable());
                 }
 
+                if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                    if (closest != null) {
+                        if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
+                            m.lightsBlackList.remove(closest.toImmutable());
+                        } else if (closestOre != null) {
+                            m.oresBlackList.remove(closest.toImmutable());
+                        }
+                    }
+                    m.busyFlagMainCycle = 0;
+                    return;
+                }
                 if (closest != null) {
                     Pathfinder.calculatePath(world, tno, x, y, z, closest.getX(), closest.getY(), closest.getZ());
                 } else {
                     m.busyFlagMainCycle = 0;
                 }
-            } finally {
-                //m.busyFlagMainCycle = 0;
+            } catch (Throwable t) {
+                m.busyFlagMainCycle = 0;
+                throw t;
             }
         });
     }

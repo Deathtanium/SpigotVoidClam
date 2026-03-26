@@ -24,6 +24,10 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 
 public final class Pathfinder {
+    private static BlockBfs.AbortChecker asyncPathfindingShutdownAbortChecker() {
+        return (w, posLong, distanceFromStart) -> VoidClamMod.isAsyncPathfindingShutdownRequested();
+    }
+
     static final List<Cursor> xc = new ArrayList<>();
     static final List<Cursor> yc = new ArrayList<>();
     private static final Map<net.minecraft.block.Block, List<ItemStack>> FORTUNE3_DROPS = new HashMap<>();
@@ -160,7 +164,7 @@ public final class Pathfinder {
             BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
             null,
             null,
-            null,
+            asyncPathfindingShutdownAbortChecker(),
             goalLong
         );
         bfs.runToCompletionOnCurrentThread();
@@ -191,7 +195,12 @@ public final class Pathfinder {
         firstNode.f = firstNode.g + firstNode.h;
         open.add(firstNode);
 
+        long astarIterations = 0;
         while (!open.isEmpty()) {
+            if ((astarIterations++ & 0x3FF) == 0 && VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                modForFlag.busyFlagMainCycle = 0;
+                return false;
+            }
             Node nextCheapestNode = leastF(open);
             open.remove(nextCheapestNode);
 
@@ -252,6 +261,10 @@ public final class Pathfinder {
                 nextNode.f = nextNode.g + nextNode.h;
 
                 if (nx == gx && ny == gy && nz == gz) {
+                    if (VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+                        modForFlag.busyFlagMainCycle = 0;
+                        return false;
+                    }
                     VoidClamMod.enqueueTarget(nextNode);
                     //we do not reset the busy flag here, because if CommandToolbox.clamReach was called, the reset is handled there
                     return true;
@@ -358,7 +371,7 @@ public final class Pathfinder {
             executionMode,
             executor,
             onComplete,
-            null,
+            asyncPathfindingShutdownAbortChecker(),
             BlockBfs.NO_EARLY_GOAL,
             (w, posLong, d) -> {
                 BlockState state = w.getBlockState(BlockPos.fromLong(posLong));

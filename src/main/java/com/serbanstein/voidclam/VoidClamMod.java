@@ -33,6 +33,12 @@ public final class VoidClamMod {
     private static int moduleNumber = 0;
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
+    /**
+     * When true, off-thread pathfinding work ({@link CommandToolbox#submitPathfinding}) should exit promptly and must not enqueue
+     * new main-thread effects. Set during {@link net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents#SERVER_STOPPING}
+     * so the pathfinder pool can drain before save; cleared when a new server session starts.
+     */
+    private static volatile boolean asyncPathfindingShutdownRequested;
     /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
     private static ServerWorld growPendingWorld = null;
     /** If > 0, when grow runs do clamReSize(world, growCommandTno, growCommandTargetSize); else run full auto grow routine. */
@@ -84,6 +90,26 @@ public final class VoidClamMod {
         baseCost.add(Blocks.LAVA);
         baseCost.add(Blocks.SNOW);
         baseCost.add(Blocks.SNOW_BLOCK);
+    }
+
+    public static boolean isAsyncPathfindingShutdownRequested() {
+        return asyncPathfindingShutdownRequested;
+    }
+
+    /** New server session: allow pathfinding tasks again (mod entry, before load). */
+    public static void onAsyncPathfindingSessionStart() {
+        asyncPathfindingShutdownRequested = false;
+    }
+
+    /** Server stopping: stop off-thread work and drain the pathfinder pool (mod entry, before save). */
+    public static void onAsyncPathfindingSessionStop() {
+        asyncPathfindingShutdownRequested = true;
+        CommandToolbox.shutdownPathfinderExecutorForSessionEnd();
+        for (int i = 1; i <= moduleNumber; i++) {
+            if (modules[i] != null) {
+                modules[i].busyFlagMainCycle = 0;
+            }
+        }
     }
 
     public static Module[] getModules() { return modules; }
