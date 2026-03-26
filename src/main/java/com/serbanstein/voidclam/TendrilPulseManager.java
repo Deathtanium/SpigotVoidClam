@@ -17,15 +17,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -139,7 +136,7 @@ public final class TendrilPulseManager {
     }
 
     /** Incremental omni-pulse BFS job: runs over multiple ticks so main thread doesn't block. */
-    private static volatile OmniPulseJob omniPulseJob = null;
+    private static volatile BlockBfs.MergedOmniBfsJob omniPulseJob = null;
 
     /**
      * Run an omnidirectional pulse: starts an incremental BFS job if none is running.
@@ -149,7 +146,7 @@ public final class TendrilPulseManager {
         if (omniPulseJob != null) return;
         Module[] modules = VoidClamMod.getModules();
         int moduleNumber = VoidClamMod.getModuleNumber();
-        List<OmniPulseJob.SingleModuleBfs> bfsList = new ArrayList<>();
+        List<BlockBfs.MergedOmniBfsJob.SingleSource> bfsList = new ArrayList<>();
         for (int i = 1; i <= moduleNumber; i++) {
             Module m = modules[i];
             if (m == null) continue;
@@ -158,22 +155,21 @@ public final class TendrilPulseManager {
             BlockState startState = world.getBlockState(center);
             if (startState.getBlock() != Blocks.NETHER_WART_BLOCK && startState.getBlock() != Blocks.WARPED_WART_BLOCK)
                 continue;
-            OmniPulseJob.SingleModuleBfs bfs = new OmniPulseJob.SingleModuleBfs(center, MAX_OMNI_BFS_PER_MODULE);
-            bfsList.add(bfs);
+            bfsList.add(new BlockBfs.MergedOmniBfsJob.SingleSource(center.asLong(), MAX_OMNI_BFS_PER_MODULE));
         }
         if (bfsList.isEmpty()) return;
-        omniPulseJob = new OmniPulseJob(world, bfsList);
+        omniPulseJob = new BlockBfs.MergedOmniBfsJob(world, bfsList);
     }
 
     /**
      * Call every server tick (overworld). Advances the omni-pulse BFS by a batch; when done, schedules all pulses and clears the job.
      */
     public static void tickOmniPulseJob(ServerWorld world) {
-        OmniPulseJob job = omniPulseJob;
-        if (job == null || job.world != world) return;
-        int processed = job.tick(world, OMNI_BFS_BATCH_PER_TICK, MAX_OMNI_TOTAL_BLOCKS);
-        if (!job.done) return;
-        Map<BlockPos, Integer> result = job.mergedResult;
+        BlockBfs.MergedOmniBfsJob job = omniPulseJob;
+        if (job == null) return;
+        job.step(OMNI_BFS_BATCH_PER_TICK, MAX_OMNI_TOTAL_BLOCKS);
+        if (!job.isDone()) return;
+        Map<BlockPos, Integer> result = job.getMergedResult();
         omniPulseJob = null;
         for (Map.Entry<BlockPos, Integer> e : result.entrySet()) {
             BlockPos pos = e.getKey();
@@ -187,79 +183,6 @@ public final class TendrilPulseManager {
                 int packed = getPackedBrightnessAt(world, pos);
                 startPulse(world, pos, packed, () -> {}, INITIAL_SCALE_OMNI);
             });
-        }
-    }
-
-    /** Per-module BFS state for incremental omni pulse. */
-    private static final class OmniPulseJob {
-        final ServerWorld world;
-        final Map<BlockPos, Integer> mergedResult = new HashMap<>();
-        final List<SingleModuleBfs> bfsList;
-        boolean done = false;
-
-        OmniPulseJob(ServerWorld world, List<SingleModuleBfs> bfsList) {
-            this.world = world;
-            this.bfsList = bfsList;
-            for (SingleModuleBfs bfs : bfsList) {
-                BlockPos start = bfs.seed;
-                bfs.queue.add(start);
-                bfs.dist.put(start, 0);
-                bfs.resultCount = 1;
-                mergedResult.put(start, 0);
-            }
-        }
-
-        /** Process up to maxNodes expansions across all module BFSes. Returns number processed. Sets done when all exhausted or total limit hit. */
-        int tick(ServerWorld world, int maxNodes, int totalLimit) {
-            if (mergedResult.size() >= totalLimit) {
-                done = true;
-                return 0;
-            }
-            int remaining = maxNodes;
-            for (SingleModuleBfs bfs : bfsList) {
-                if (remaining <= 0 || mergedResult.size() >= totalLimit) break;
-                if (bfs.queue.isEmpty() || bfs.resultCount >= bfs.limit) continue;
-                while (remaining > 0 && !bfs.queue.isEmpty() && bfs.resultCount < bfs.limit && mergedResult.size() < totalLimit) {
-                    BlockPos pos = bfs.queue.poll();
-                    int d = bfs.dist.get(pos);
-                    for (Direction dir : Direction.values()) {
-                        BlockPos next = pos.offset(dir).toImmutable();
-                        if (bfs.dist.containsKey(next)) continue;
-                        if (!world.isChunkLoaded(next)) continue;
-                        BlockState state = world.getBlockState(next);
-                        if (state.getBlock() != Blocks.NETHER_WART_BLOCK && state.getBlock() != Blocks.WARPED_WART_BLOCK)
-                            continue;
-                        int nextDist = d + 1;
-                        if (mergedResult.containsKey(next)) {
-                            mergedResult.merge(next, nextDist, Math::min);
-                            continue;
-                        }
-                        bfs.dist.put(next, nextDist);
-                        bfs.resultCount++;
-                        mergedResult.put(next, nextDist);
-                        bfs.queue.add(next);
-                        remaining--;
-                        if (mergedResult.size() >= totalLimit) break;
-                    }
-                }
-            }
-            boolean allDone = mergedResult.size() >= totalLimit || bfsList.stream().allMatch(bfs ->
-                bfs.queue.isEmpty() || bfs.resultCount >= bfs.limit);
-            if (allDone) done = true;
-            return maxNodes - remaining;
-        }
-
-        static final class SingleModuleBfs {
-            final BlockPos seed;
-            final Queue<BlockPos> queue = new ArrayDeque<>();
-            final Map<BlockPos, Integer> dist = new HashMap<>();
-            final int limit;
-            int resultCount = 0;
-
-            SingleModuleBfs(BlockPos seed, int limit) {
-                this.seed = seed.toImmutable();
-                this.limit = limit;
-            }
         }
     }
 
