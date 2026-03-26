@@ -253,7 +253,7 @@ public final class Pathfinder {
             BlockPos nextPos = new BlockPos(nx, ny, nz);
             BlockState bl = world.getBlockState(nextPos);
             double cst;
-            if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
+            if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(VoidClamBlocks.HEART_BLOCK)) {
                 cst = 0;
             } else if (bl.getBlock() instanceof BlockEntityProvider) {
                 cst = 2500;
@@ -411,12 +411,12 @@ public final class Pathfinder {
      */
     private static boolean isPathfindCellImpassable(ServerWorld world, BlockPos pos) {
         BlockState bl = world.getBlockState(pos);
-        if (bl.isOf(Blocks.NETHER_WART_BLOCK)) {
-            return false;
-        }
-        if (bl.getBlock() instanceof BlockEntityProvider) {
-            return true;
-        }
+            if (bl.isOf(Blocks.NETHER_WART_BLOCK) || bl.isOf(VoidClamBlocks.HEART_BLOCK)) {
+                return false;
+            }
+            if (bl.getBlock() instanceof BlockEntityProvider) {
+                return true;
+            }
         return getHardness(world, pos, bl) > 5;
     }
 
@@ -786,6 +786,10 @@ public final class Pathfinder {
                 }
                 BlockPos pos = new BlockPos(refNode.x, refNode.y, refNode.z);
                 BlockState mat = world.getBlockState(pos);
+                if (mat.isOf(VoidClamBlocks.HEART_BLOCK)) {
+                    modForFlag.busyFlagMainCycle = 0;
+                    return;
+                }
                 int cst;
                 if (mat.isOf(Blocks.NETHER_WART_BLOCK)) cst = 0;
                 else if (mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA)) cst = 1;
@@ -838,7 +842,7 @@ public final class Pathfinder {
                     stamina[0] -= cst;
                 }
 
-                boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK));
+                boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK) || mat.isOf(VoidClamBlocks.HEART_BLOCK));
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
                     pathStopped[0] = 1; // path stops; clam does not get energy; resume next attempt
                     pathStoppedAwaitingContainer[0] = 1;
@@ -880,7 +884,7 @@ public final class Pathfinder {
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
                     VoidClamMod.addEnergy(pathTno, 1); // energy only when light source is eaten
-                if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK))) {
+                if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK) || mat.isOf(VoidClamBlocks.HEART_BLOCK))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
                 }

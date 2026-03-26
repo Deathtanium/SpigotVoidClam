@@ -32,6 +32,8 @@ public class VoidClamModEntry implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        VoidClamDataComponents.register();
+        VoidClamBlocks.register();
         VoidClamConfig.loadFromDisk();
         ServerChunkEvents.CHUNK_GENERATE.register(NaturalSpawnHandler::onChunkGenerated);
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
@@ -44,6 +46,7 @@ public class VoidClamModEntry implements ModInitializer {
         VoidClamConfig.loadFromDisk();
         VoidClamMod.onAsyncPathfindingSessionStart();
         VoidClamMod.load(server);
+        VoidClamMod.migrateLoadedModulesToHeartBlocks(server);
     }
 
     private void onServerStopping(MinecraftServer server) {

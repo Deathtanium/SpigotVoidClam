@@ -154,7 +154,7 @@ public final class TendrilPulseManager {
             BlockPos center = new BlockPos(m.x, m.y, m.z);
             if (!world.isChunkLoaded(center)) continue;
             BlockState startState = world.getBlockState(center);
-            if (startState.getBlock() != Blocks.NETHER_WART_BLOCK)
+            if (startState.getBlock() != Blocks.NETHER_WART_BLOCK && !startState.isOf(VoidClamBlocks.HEART_BLOCK))
                 continue;
             bfsList.add(new BlockBfs.MergedOmniBfsJob.SingleSource(center.asLong(), MAX_OMNI_BFS_PER_MODULE));
         }

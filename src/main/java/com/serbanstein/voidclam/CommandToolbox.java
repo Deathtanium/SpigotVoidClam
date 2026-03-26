@@ -123,6 +123,7 @@ public final class CommandToolbox {
                     if (red || black) {
                         long delay = Math.abs(iy - y) * 20L;
                         VoidClamMod.scheduleDelayed(world, delay, () -> {
+                            if (ux == x && uy == y && uz == z) return;
                             world.setBlockState(new BlockPos(ux, uy, uz), Blocks.NETHER_WART_BLOCK.getDefaultState());
                             VoidClamSfx.playBlockSound(world, null, ux + 0.5, uy + 0.5, uz + 0.5,
                                 SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
@@ -131,6 +132,7 @@ public final class CommandToolbox {
                     if (black) {
                         long delay = Math.abs(iy - y) * 30L;
                         VoidClamMod.scheduleDelayed(world, delay, () -> {
+                            if (ux == x && uy == y && uz == z) return;
                             world.setBlockState(new BlockPos(ux, uy, uz), Blocks.OBSIDIAN.getDefaultState());
                             VoidClamSfx.playBlockSound(world, null, ux + 0.5, uy + 0.5, uz + 0.5,
                                 SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
@@ -235,33 +237,43 @@ public final class CommandToolbox {
             }
         }
 
-        for (int i = y + csize; i <= y + tsize - 1; i++)
-            world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
-        for (int i = y - csize; i >= y - tsize + 1; i--)
-            world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        for (int i = y + csize; i <= y + tsize - 1; i++) {
+            if (i != y)
+                world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        }
+        for (int i = y - csize; i >= y - tsize + 1; i--) {
+            if (i != y)
+                world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        }
 
         VoidClamMod.scheduleDelayed(world, timer * 20L, () -> buildShell(world, x, y, z, tsize, Blocks.OBSIDIAN));
 
         m.currentSize = tsize;
+        VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         VoidClamMod.save(world.getServer());
 
         int ts = tsize - 2;
         for (int ix = x - ts + 1; ix <= x; ix++) {
             int iz = z - ts + 1 + Math.abs(ix - x);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
         for (int ix = x - ts + 1; ix <= x; ix++) {
             int iz = z + ts - 1 - Math.abs(ix - x);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
         for (int ix = x + ts - 1; ix >= x; ix--) {
             int iz = z - ts + 1 + Math.abs(ix - x);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
         for (int ix = x + ts - 1; ix >= x; ix--) {
             int iz = z + ts - 1 - Math.abs(x - ix);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
+        VoidClamMod.syncModuleToHeartBlock(world, tno);
     }
 
     /** Start light/ore search for module. Scans box off-thread, pathfinds to closest target. */

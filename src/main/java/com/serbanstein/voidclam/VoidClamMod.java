@@ -12,9 +12,11 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
+import net.minecraft.item.ItemStack;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -50,7 +52,7 @@ public final class VoidClamMod {
     private static final Queue<KillRequest> pendingClamKills = new ConcurrentLinkedQueue<>();
     private static MinecraftServer pendingKillDrainServer;
 
-    private record KillRequest(int victimSlot, boolean saveAfter) {}
+    private record KillRequest(int victimSlot, boolean saveAfter, @Nullable VoidClamHeartItemData heartDropData, @Nullable BlockPos heartDropPos) {}
     /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
     private static ServerWorld growPendingWorld = null;
     /** If > 0, when grow runs do clamReSize(world, growCommandTno, growCommandTargetSize); else run full auto grow routine. */
@@ -213,9 +215,22 @@ public final class VoidClamMod {
      * requests queue behind an in-progress drain. Saves after the shift when {@code saveAfter}.
      */
     public static void clamKillBlocking(MinecraftServer server, int tno, boolean saveAfter) {
+        clamKillBlocking(server, tno, saveAfter, null, null);
+    }
+
+    /**
+     * Kill module; optionally drop a heart item at {@code heartDropPos} with {@code heartDropData} after async drain (e.g. /voidclam kill).
+     */
+    public static void clamKillBlocking(
+        MinecraftServer server,
+        int tno,
+        boolean saveAfter,
+        @Nullable VoidClamHeartItemData heartDropData,
+        @Nullable BlockPos heartDropPos
+    ) {
         if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
         synchronized (asyncKillCoordinatorLock) {
-            pendingClamKills.add(new KillRequest(tno, saveAfter));
+            pendingClamKills.add(new KillRequest(tno, saveAfter, heartDropData, heartDropPos));
             pendingKillDrainServer = server;
             tryStartNextClamKillDrainLocked();
         }
@@ -248,6 +263,8 @@ public final class VoidClamMod {
         }
         final int victimSlot = tno;
         final boolean saveAfterThis = next.saveAfter;
+        final VoidClamHeartItemData heartDropData = next.heartDropData;
+        final BlockPos heartDropPos = next.heartDropPos;
         Thread drain = new Thread(() -> {
             try {
                 CommandToolbox.shutdownPathfinderExecutorAfterKillDrain();
@@ -256,6 +273,14 @@ public final class VoidClamMod {
                     try {
                         remapPendingKillSlotsAfterShift(victimSlot);
                         finishClamKillAfterAsyncSettled(victimSlot);
+                        if (heartDropData != null && heartDropPos != null) {
+                            ServerWorld overworld = server.getOverworld();
+                            if (overworld != null && overworld.isChunkLoaded(heartDropPos.getX() >> 4, heartDropPos.getZ() >> 4)) {
+                                ItemStack drop = new ItemStack(VoidClamBlocks.HEART_BLOCK_ITEM);
+                                drop.set(VoidClamDataComponents.HEART_STACK, heartDropData);
+                                net.minecraft.block.Block.dropStack(overworld, heartDropPos, drop);
+                            }
+                        }
                         if (saveAfterThis) {
                             save(server);
                         }
@@ -286,9 +311,9 @@ public final class VoidClamMod {
                 continue;
             }
             if (s > victimSlot) {
-                pendingClamKills.add(new KillRequest(s - 1, k.saveAfter()));
+                pendingClamKills.add(new KillRequest(s - 1, k.saveAfter(), k.heartDropData(), k.heartDropPos()));
             } else {
-                pendingClamKills.add(k);
+                pendingClamKills.add(new KillRequest(s, k.saveAfter(), k.heartDropData(), k.heartDropPos()));
             }
         }
     }
@@ -321,6 +346,75 @@ public final class VoidClamMod {
 
     public static Module[] getModules() { return modules; }
     public static int getModuleNumber() { return moduleNumber; }
+
+    /** Place or replace the block at {@code pos} with a heart whose BE matches {@code m}. */
+    public static void placeHeartBlockForModule(ServerWorld world, BlockPos pos, Module m) {
+        world.setBlockState(pos, VoidClamBlocks.HEART_BLOCK.getDefaultState());
+        if (world.getBlockEntity(pos) instanceof VoidClamHeartBlockEntity heart) {
+            heart.syncFromModule(m);
+        }
+    }
+
+    private static int findModuleSlotByCenter(BlockPos pos) {
+        int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
+        for (int i = 1; i <= moduleNumber; i++) {
+            Module m = modules[i];
+            if (m != null && m.x == px && m.y == py && m.z == pz) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Player broke the heart block: unregister the clam and drop the same item stack (after async kill drain).
+     */
+    /** Heart block broken: unregister clam (loot table drops the item with {@code voidclam:heart_stack} from the BE). */
+    public static void onHeartBroken(ServerWorld world, BlockPos pos) {
+        MinecraftServer server = world.getServer();
+        int tno = findModuleSlotByCenter(pos);
+        if (tno < 1) {
+            return;
+        }
+        clamKillBlocking(server, tno, true, null, null);
+    }
+
+    /**
+     * Heart block placed (item or world gen): link CSV module or register a new clam from stack data.
+     */
+    public static void onHeartPlaced(ServerWorld world, BlockPos pos) {
+        if (world.getBlockEntity(pos) instanceof VoidClamHeartBlockEntity heart) {
+            int existing = findModuleSlotByCenter(pos);
+            if (existing >= 1 && modules[existing] != null) {
+                heart.syncFromModule(modules[existing]);
+                save(world.getServer());
+                return;
+            }
+            moduleNumber++;
+            if (moduleNumber >= MAX_MODULES) {
+                moduleNumber--;
+                world.removeBlock(pos, false);
+                return;
+            }
+            Module m = new Module();
+            heart.getModuleData().applyToModule(m);
+            m.x = pos.getX();
+            m.y = pos.getY();
+            m.z = pos.getZ();
+            modules[moduleNumber] = m;
+            CommandToolbox.buildStub(world, m.x, m.y, m.z);
+            heart.syncFromModule(m);
+            save(world.getServer());
+        }
+    }
+
+    static void syncModuleToHeartBlock(ServerWorld world, int tno) {
+        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
+        Module m = modules[tno];
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        BlockPos p = new BlockPos(m.x, m.y, m.z);
+        if (world.getBlockEntity(p) instanceof VoidClamHeartBlockEntity heart) {
+            heart.syncFromModule(m);
+        }
+    }
     public static boolean isLight(Block block) { return lights.contains(block); }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
@@ -418,6 +512,27 @@ public final class VoidClamMod {
         }
     }
 
+    /** After CSV load: if overworld center is legacy wart/obsidian, replace with heart carrying module data. */
+    public static void migrateLoadedModulesToHeartBlocks(MinecraftServer server) {
+        ServerWorld world = server.getOverworld();
+        if (world == null) return;
+        boolean any = false;
+        for (int i = 1; i <= moduleNumber; i++) {
+            Module m = modules[i];
+            if (m == null) continue;
+            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            BlockPos p = new BlockPos(m.x, m.y, m.z);
+            Block b = world.getBlockState(p).getBlock();
+            if (b == Blocks.NETHER_WART_BLOCK || b == Blocks.OBSIDIAN) {
+                placeHeartBlockForModule(world, p, m);
+                any = true;
+            }
+        }
+        if (any) {
+            save(server);
+        }
+    }
+
     /** Save modules; CSV format and {@code modules.siva} / {@code modules.siva.old} rotation. */
     public static void save(MinecraftServer server) {
         Path path = getModulesPath(server);
@@ -466,6 +581,7 @@ public final class VoidClamMod {
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
         modules[moduleNumber] = m;
+        placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
         save(world.getServer());
         return moduleNumber;
@@ -614,7 +730,7 @@ public final class VoidClamMod {
             if (m == null) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             Block block = world.getBlockState(new BlockPos(m.x, m.y, m.z)).getBlock();
-            if (block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN)
+            if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN)
                 clamKill(world.getServer(), i, false);
         }
     }
