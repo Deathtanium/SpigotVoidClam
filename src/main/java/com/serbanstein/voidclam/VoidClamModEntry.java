@@ -18,9 +18,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
 
-/**
- * Fabric mod entrypoint. Preserves original logic, locks, queues, and save format.
- */
+/** Fabric mod entrypoint: lifecycle, server tick hook, and commands. */
 public class VoidClamModEntry implements ModInitializer {
     private static final int TICK_REACH = 20;              // auto-reach (search for lights) every second
     private static final int TICK_TARGETS = 20;            // drain path queue every second

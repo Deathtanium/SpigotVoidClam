@@ -12,9 +12,7 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * VoidClam block building and reach (pathfind) logic. Preserves original behaviour and busy-flag locks.
- */
+/** Block building, shell/stub construction, resize/repair, and reach (pathfind trigger). */
 public final class CommandToolbox {
     /** Shared executor for pathfinding (reach + block-place) so it doesn't block main thread. */
     static final ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(2);

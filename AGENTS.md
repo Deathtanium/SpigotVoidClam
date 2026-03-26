@@ -4,7 +4,7 @@ This file orients tools and contributors who edit the repository without deep pr
 
 ## Project
 
-**VoidClam** is a **server-side-only Fabric mod** for **Minecraft 1.21.1**. It ports a Spigot plugin: SIVA-like organisms that spread, consume light sources, and convert blocks. Game logic, threading model, and save format are intentionally aligned with the original plugin (see `README.md`).
+**VoidClam** is a **server-side Fabric mod** for **Minecraft 1.21.x**. It implements SIVA-like organisms that spread, consume light sources, seek ores, and convert blocks.
 
 ## Stack and layout
 
@@ -13,7 +13,7 @@ This file orients tools and contributors who edit the repository without deep pr
 - **Mod ID / package**: `com.serbanstein.voidclam`.
 - **Authoritative sources**: `src/main/java/com/serbanstein/voidclam/` and `src/main/resources/`.
 - **Do not treat as source**: `jar_extracted/` is a decompiled or extracted copy for reference; **edit `src/` instead**.
-- **Mixins**: `voidclam.mixins.json` declares package `com.serbanstein.voidclam.mixin` and may list no mixins yet; new mixins belong under `src/main/java/.../mixin/` and must be registered in that JSON.
+- **Mixins**: `voidclam.mixins.json` declares package `com.serbanstein.voidclam.mixin`; the `mixins` array may be empty until mixins are added under `src/main/java/.../mixin/` and registered in that JSON.
 
 ## Commands agents should use
 
@@ -28,9 +28,13 @@ Requires a JDK **17+** on `PATH`.
 
 - **Entry**: `VoidClamModEntry` — Fabric lifecycle, tick hooks, Brigadier commands (`/voidclam`, OP level 2).
 - **Core state / logic**: `VoidClamMod`, `Module`, `Pathfinder`, `Cursor`, `Node`.
-- **Threading**: Pathfinding runs off-thread; results are queued and applied on the **server main thread**. Respect existing locks/flags (`busyFlagPlaceEvent`, `busyFlagMainCycle`, etc.) when changing concurrency.
-- **Scheduling**: `VoidClamModScheduler` replaces Bukkit-style delayed tasks (world time + delay).
-- **Persistence**: World save CSV `modules.siva` (and `modules.siva.old` rotation) at the world root — format and field order matter for compatibility.
+- **Threading**: Pathfinding runs off-thread; results are queued and applied on the **server main thread**. Respect `busyFlagMainCycle` (and any future use of `busyFlagPlaceEvent`) when changing concurrency.
+- **Scheduling**: `VoidClamModScheduler` — delayed runnables keyed off **world time** (`world.getTime()`).
+- **Persistence**: World save CSV `modules.siva` (and `modules.siva.old` rotation) at the save root — format and field order matter for compatibility.
+
+## Logic documentation (porting / behavior)
+
+See **`docs/logic/README.md`** — Obsidian-style graph of notes on tick order, locks, queues, pathfinding, grow/repair, and key functions.
 
 ## Editing principles
 
@@ -41,4 +45,5 @@ Requires a JDK **17+** on `PATH`.
 
 ## Further reading
 
-- `README.md` — player-facing commands, Spigot vs Fabric differences, and save path details.
+- `README.md` — commands, build, high-level summary.
+- `docs/logic/` — detailed behavior specification.
