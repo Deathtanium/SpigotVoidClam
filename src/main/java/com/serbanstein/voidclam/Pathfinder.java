@@ -40,13 +40,13 @@ public final class Pathfinder {
     /**
      * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncAStarJobs}.
      */
-    public static void enqueueSyncAStarJob(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
-        Module m = VoidClamMod.getModules()[tno];
+    public static void enqueueSyncAStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+        Module m = VoidClamMod.getModuleById(clamId);
         if (m != null) {
             m.ensureClamId();
         }
-        UUID cid = m != null ? m.clamId : null;
-        syncAStarJobs.add(new AStarJob(world, tno, cid, sx, sy, sz, gx, gy, gz));
+        if (clamId == null) return;
+        syncAStarJobs.add(new AStarJob(world, clamId, sx, sy, sz, gx, gy, gz));
     }
 
     /**
@@ -86,8 +86,7 @@ public final class Pathfinder {
 
     private static final class AStarJob {
         final ServerWorld worldRef;
-        final int tno;
-        @org.jetbrains.annotations.Nullable UUID clamId;
+        final UUID clamId;
         final int sx, sy, sz, gx, gy, gz;
         AStarPhase phase = AStarPhase.PREPASS;
         BlockBfs prepassBfs;
@@ -95,9 +94,8 @@ public final class Pathfinder {
         List<Node> closed;
         long astarIterations;
 
-        AStarJob(ServerWorld world, int tno, @org.jetbrains.annotations.Nullable UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+        AStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
             this.worldRef = world;
-            this.tno = tno;
             this.clamId = clamId;
             this.sx = sx;
             this.sy = sy;
@@ -113,37 +111,29 @@ public final class Pathfinder {
 
         /** @return prepass or A* expansions consumed */
         int step(ServerWorld world, int budget) {
-            Module[] modules = VoidClamMod.getModules();
-            Module modForFlag = modules[tno];
+            Module modForFlag = VoidClamMod.getModuleById(clamId);
             if (modForFlag == null) {
                 finishFail(null);
                 return 0;
             }
             modForFlag.ensureClamId();
-            if (clamId == null) {
-                clamId = modForFlag.clamId;
-            }
             if (world != worldRef) {
                 finishFail(modForFlag);
                 return 0;
             }
             if (phase == AStarPhase.PREPASS) {
-                return stepPrepass(world, modForFlag, modules, budget);
+                return stepPrepass(world, modForFlag, budget);
             }
             if (phase == AStarPhase.ASTAR) {
-                return stepAstar(world, modForFlag, modules, VoidClamMod.getModuleNumber(), budget);
+                return stepAstar(world, modForFlag, budget);
             }
             return 0;
         }
 
-        private int stepPrepass(ServerWorld world, Module modForFlag, Module[] modules, int budget) {
+        private int stepPrepass(ServerWorld world, Module modForFlag, int budget) {
             if (prepassBfs == null) {
                 if (sx == gx && sy == gy && sz == gz) {
                     beginAstarPhase();
-                    return 1;
-                }
-                if (tno > VoidClamMod.getModuleNumber() || modules[tno] == null) {
-                    finishFail(modForFlag);
                     return 1;
                 }
                 long goalLong = BlockPos.asLong(gx, gy, gz);
@@ -161,7 +151,7 @@ public final class Pathfinder {
                     BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
                     null,
                     null,
-                    asyncPathfindingAbortChecker(world, modForFlag.x, modForFlag.z, tno, clamId != null ? clamId : modForFlag.clamId),
+                    asyncPathfindingAbortChecker(world, modForFlag.x, modForFlag.z, clamId),
                     goalLong
                 );
             }
@@ -186,7 +176,7 @@ public final class Pathfinder {
         private void beginAstarPhase() {
             open = new ArrayList<>();
             closed = new ArrayList<>();
-            Node firstNode = new Node(sx, sy, sz, null, tno, clamId);
+            Node firstNode = new Node(sx, sy, sz, null, clamId);
             firstNode.g = 0;
             firstNode.h = manhattanH(sx, sy, sz, gx, gy, gz);
             firstNode.f = firstNode.g + firstNode.h;
@@ -195,11 +185,11 @@ public final class Pathfinder {
             phase = AStarPhase.ASTAR;
         }
 
-        private int stepAstar(ServerWorld world, Module modForFlag, Module[] modules, int moduleNumber, int budget) {
+        private int stepAstar(ServerWorld world, Module modForFlag, int budget) {
             int used = 0;
             while (used < budget) {
                 AStarExpandResult r = expandOneAStarIteration(
-                    world, tno, clamId, gx, gy, gz, modForFlag, modules, moduleNumber, open, closed, astarIterations);
+                    world, clamId, gx, gy, gz, modForFlag, open, closed, astarIterations);
                 astarIterations++;
                 if (r == AStarExpandResult.ABORT) {
                     finishFail(modForFlag);
@@ -239,18 +229,15 @@ public final class Pathfinder {
      */
     private static AStarExpandResult expandOneAStarIteration(
         ServerWorld world,
-        int tno,
-        @org.jetbrains.annotations.Nullable UUID pathClamId,
+        UUID pathClamId,
         int gx, int gy, int gz,
         Module modForFlag,
-        Module[] modules,
-        int moduleNumber,
         List<Node> open,
         List<Node> closed,
         long astarIterationsBeforeStep
     ) {
         UUID effectiveClamId = pathClamId != null ? pathClamId : modForFlag.clamId;
-        if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno, effectiveClamId)) {
+        if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
             return AStarExpandResult.ABORT;
         }
         if (open.isEmpty()) {
@@ -286,14 +273,13 @@ public final class Pathfinder {
                 continue;
             }
 
-            Module pathMod = modules[tno];
-            if (tno > moduleNumber || pathMod == null
-                || !isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
+            Module pathMod = modForFlag;
+            if (!isWithinPathfindingRange(nx, ny, nz, pathMod.x, pathMod.y, pathMod.z, pathMod.currentSize)) {
                 continue;
             }
 
             double tentativeG = nextCheapestNode.g + cst;
-            Node probe = new Node(nx, ny, nz, nextCheapestNode, tno, effectiveClamId);
+            Node probe = new Node(nx, ny, nz, nextCheapestNode, effectiveClamId);
             Node inOpen = nodeExists(open, probe);
             Node inClosed = nodeExists(closed, probe);
             if (inOpen != null && tentativeG >= inOpen.g) {
@@ -310,13 +296,13 @@ public final class Pathfinder {
                 closed.remove(inClosed);
             }
 
-            Node nextNode = new Node(nx, ny, nz, nextCheapestNode, tno, effectiveClamId);
+            Node nextNode = new Node(nx, ny, nz, nextCheapestNode, effectiveClamId);
             nextNode.g = tentativeG;
             nextNode.h = manhattanH(nx, ny, nz, gx, gy, gz);
             nextNode.f = nextNode.g + nextNode.h;
 
             if (nx == gx && ny == gy && nz == gz) {
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, tno, effectiveClamId)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
                     return AStarExpandResult.ABORT;
                 }
                 VoidClamMod.enqueueTarget(nextNode);
@@ -333,11 +319,10 @@ public final class Pathfinder {
         ServerWorld world,
         int clamCenterX,
         int clamCenterZ,
-        int pathfindingModuleSlot,
         @org.jetbrains.annotations.Nullable UUID pathfindingClamId
     ) {
         return (w, posLong, distanceFromStart) ->
-            VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot, pathfindingClamId);
+            VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId);
     }
 
     static final List<Cursor> xc = new ArrayList<>();
@@ -448,17 +433,14 @@ public final class Pathfinder {
      */
     private static boolean isGoalReachableByPrepass(
         ServerWorld world,
-        int tno,
         int sx, int sy, int sz,
         int gx, int gy, int gz,
-        Module mod,
-        Module[] modules,
-        int moduleNumber
+        Module mod
     ) {
         if (sx == gx && sy == gy && sz == gz) {
             return true;
         }
-        if (tno > moduleNumber || modules[tno] == null) {
+        if (mod == null) {
             return false;
         }
         long goalLong = BlockPos.asLong(gx, gy, gz);
@@ -476,7 +458,7 @@ public final class Pathfinder {
             BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
             null,
             null,
-            asyncPathfindingAbortChecker(world, mod.x, mod.z, tno, mod.clamId),
+            asyncPathfindingAbortChecker(world, mod.x, mod.z, mod.clamId),
             goalLong
         );
         bfs.runToCompletionOnCurrentThread();
@@ -488,25 +470,23 @@ public final class Pathfinder {
         return Math.abs(x - gx) + Math.abs(y - gy) + Math.abs(z - gz);
     }
 
-    public static boolean calculatePath(ServerWorld world, int tno, int sx, int sy, int sz, int gx, int gy, int gz) {
+    public static boolean calculatePath(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) return false;
-        Module[] modules = VoidClamMod.getModules();
-        Module modForFlag = modules[tno];
+        Module modForFlag = VoidClamMod.getModuleById(clamId);
         if (modForFlag == null) return false;
         modForFlag.ensureClamId();
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
-            enqueueSyncAStarJob(world, tno, sx, sy, sz, gx, gy, gz);
+            enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
             return true;
         }
-        int moduleNumber = VoidClamMod.getModuleNumber();
-        if (!isGoalReachableByPrepass(world, tno, sx, sy, sz, gx, gy, gz, modForFlag, modules, moduleNumber)) {
+        if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag)) {
             modForFlag.busyFlagMainCycle = 0;
             return false;
         }
         List<Node> open = new ArrayList<>();
         List<Node> closed = new ArrayList<>();
         UUID pathCid = modForFlag.clamId;
-        Node firstNode = new Node(sx, sy, sz, null, tno, pathCid);
+        Node firstNode = new Node(sx, sy, sz, null, pathCid);
         firstNode.g = 0;
         firstNode.h = manhattanH(sx, sy, sz, gx, gy, gz);
         firstNode.f = firstNode.g + firstNode.h;
@@ -515,7 +495,7 @@ public final class Pathfinder {
         long astarIterations = 0;
         while (!open.isEmpty()) {
             AStarExpandResult r = expandOneAStarIteration(
-                world, tno, pathCid, gx, gy, gz, modForFlag, modules, moduleNumber, open, closed, astarIterations);
+                world, pathCid, gx, gy, gz, modForFlag, open, closed, astarIterations);
             astarIterations++;
             if (r == AStarExpandResult.ABORT) {
                 modForFlag.busyFlagMainCycle = 0;
@@ -602,7 +582,6 @@ public final class Pathfinder {
         BlockBfs.ExecutionMode executionMode,
         Executor executor,
         Runnable onComplete,
-        int pathfindingModuleSlot,
         @org.jetbrains.annotations.Nullable UUID pathfindingClamId
     ) {
         BlockBfs.EdgePolicy containerPolicy = new BlockBfs.EdgePolicy() {
@@ -627,7 +606,7 @@ public final class Pathfinder {
             executionMode,
             executor,
             onComplete,
-            asyncPathfindingAbortChecker(world, cx, cz, pathfindingModuleSlot, pathfindingClamId),
+            asyncPathfindingAbortChecker(world, cx, cz, pathfindingClamId),
             BlockBfs.NO_EARLY_GOAL,
             (w, posLong, d) -> {
                 BlockState state = w.getBlockState(BlockPos.fromLong(posLong));
@@ -737,14 +716,13 @@ public final class Pathfinder {
     }
 
     public static void buildPath(ServerWorld world, Node gnode) {
-        Module[] modules = VoidClamMod.getModules();
-        Module mod = modules[gnode.tno];
+        if (gnode.clamId == null) return;
+        Module mod = VoidClamMod.getModuleById(gnode.clamId);
         if (mod == null) {
             return;
         }
         mod.ensureClamId();
-        final java.util.UUID pathClamId = gnode.clamId != null ? gnode.clamId : mod.clamId;
-        final int pathTno = gnode.tno;
+        final java.util.UUID pathClamId = gnode.clamId;
         final int pathOriginX = mod.x;
         final int pathOriginY = mod.y;
         final int pathOriginZ = mod.z;
@@ -780,11 +758,11 @@ public final class Pathfinder {
             if (!VoidClamMod.moduleMatchesClamAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
                 return;
             }
-            VoidClamMod.removeLightsBlackList(pathTno, goalPos);
-            VoidClamMod.removeOresBlackList(pathTno, goalPos);
+            VoidClamMod.removeLightsBlackList(pathClamId, goalPos);
+            VoidClamMod.removeOresBlackList(pathClamId, goalPos);
         });
 
-        int[] stamina = new int[]{modules[pathTno].currentSize};
+        int[] stamina = new int[]{modForFlag.currentSize};
         int[] blocked = new int[1];
         int[] pathStopped = new int[1]; // set when block-to-break: path stops, no energy, resume next attempt
         int[] pathStoppedAwaitingContainer = new int[1]; // 1 while off-thread container BFS + apply not finished; keeps busy, suppresses stale path steps
@@ -792,7 +770,7 @@ public final class Pathfinder {
         while (firstNode.parent != null && blocked[0] == 0) {
             final Node refNode = firstNode;
             final long runAt = timer;
-            final int cSize = modules[pathTno].currentSize;
+            final int cSize = modForFlag.currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
                 if (!VoidClamMod.moduleMatchesClamAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
                     return;
@@ -828,16 +806,15 @@ public final class Pathfinder {
                             world,
                             mx,
                             mz,
-                            pathTno,
                             pathClamId,
                             () -> modForFlag.busyFlagMainCycle = 0,
                             () -> {
                                 List<Long> containers = new ArrayList<>();
                                 runContainerBfsOnWorld(
                                     world, mx, my, mz, cSize, clamCenterLong, containers,
-                                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathTno, pathClamId);
+                                    BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathClamId);
                                 world.getServer().execute(() -> {
-                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathTno, pathClamId)) {
+                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
                                         modForFlag.busyFlagMainCycle = 0;
                                         return;
                                     }
@@ -856,10 +833,10 @@ public final class Pathfinder {
                 if (stamina[0] - cst < 0) {
                     blocked[0] = 1;
                     if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA))) {
-                        VoidClamMod.addLightsBlackList(pathTno, goalPos);
-                        VoidClamMod.addOresBlackList(pathTno, goalPos);
+                        VoidClamMod.addLightsBlackList(pathClamId, goalPos);
+                        VoidClamMod.addOresBlackList(pathClamId, goalPos);
                     }
-                    VoidClamMod.addEnergy(pathTno, -1);
+                    VoidClamMod.addEnergy(pathClamId, -1);
                 } else {
                     stamina[0] -= cst;
                 }
@@ -876,7 +853,6 @@ public final class Pathfinder {
                         world,
                         mx,
                         mz,
-                        pathTno,
                         pathClamId,
                         () -> {
                             pathStoppedAwaitingContainer[0] = 0;
@@ -886,9 +862,9 @@ public final class Pathfinder {
                             List<Long> containers = new ArrayList<>();
                             runContainerBfsOnWorld(
                                 world, mx, my, mz, cSize, clamCenterLong, containers,
-                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathTno, pathClamId);
+                                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED, null, null, pathClamId);
                             world.getServer().execute(() -> {
-                                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathTno, pathClamId)) {
+                                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
                                     pathStoppedAwaitingContainer[0] = 0;
                                     modForFlag.busyFlagMainCycle = 0;
                                     return;
@@ -906,7 +882,7 @@ public final class Pathfinder {
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
-                    VoidClamMod.addEnergy(pathTno, 1); // energy only when light source is eaten
+                    VoidClamMod.addEnergy(pathClamId, 1); // energy only when light source is eaten
                 if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK) || mat.isOf(VoidClamBlocks.HEART_BLOCK))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));

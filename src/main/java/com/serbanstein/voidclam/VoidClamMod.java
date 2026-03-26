@@ -22,17 +22,17 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Central state and helpers: module array, path-result queue, grow-pending coordination,
- * CSV save format ({@code modules.siva} in world save root).
+ * Central state: modules keyed by {@link Module#clamId}, path-result queue, grow-pending coordination,
+ * CSV save format ({@code modules.siva} in world save root) for migration/backup.
  */
 public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
 
-    private static Module[] modules = new Module[MAX_MODULES];
-    private static int moduleNumber = 0;
+    private static final Map<UUID, Module> modulesById = new ConcurrentHashMap<>();
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
     /**
@@ -43,25 +43,20 @@ public final class VoidClamMod {
     private static volatile boolean asyncPathfindingShutdownRequested;
     /** While true, {@link CommandToolbox#submitPathfinding} rejects immediately (does not queue). Used during coordinated clam kill. */
     private static volatile boolean asyncPathfindingKillBarrierInEffect;
-    /**
-     * During kill barrier: module index (1..moduleNumber) whose async pathfinding is aborted; workers for other indices continue until
-     * the executor drains. 0 = none.
-     */
-    private static volatile int asyncPathfindingKillVictimSlot;
-    /** Matches {@link Module#clamId} for the victim during kill barrier; aborts path work by identity not array index. */
+    /** During kill barrier: async pathfinding for this clam id aborts. */
     private static volatile @Nullable UUID asyncPathfindingKillVictimClamId;
     private static final Object asyncKillCoordinatorLock = new Object();
     private static final Queue<KillRequest> pendingClamKills = new ConcurrentLinkedQueue<>();
     private static MinecraftServer pendingKillDrainServer;
 
-    private record KillRequest(int victimSlot, boolean saveAfter, @Nullable VoidClamHeartItemData heartDropData, @Nullable BlockPos heartDropPos) {}
+    private record KillRequest(UUID victimId, boolean saveAfter, @Nullable VoidClamHeartItemData heartDropData, @Nullable BlockPos heartDropPos) {}
     /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
     private static ServerWorld growPendingWorld = null;
-    /** If > 0, when grow runs do clamReSize(world, growCommandTno, growCommandTargetSize); else run full auto grow routine. */
-    private static int growCommandTno = 0;
+    /** When non-null, single-clam grow/repair pending for this id. */
+    private static @Nullable UUID growCommandClamId = null;
     private static int growCommandTargetSize = 0;
-    private static final boolean[] savedSeekLights = new boolean[MAX_MODULES];
-    private static final boolean[] savedSeekOres = new boolean[MAX_MODULES];
+    private static final Map<UUID, Boolean> growSavedSeekLights = new HashMap<>();
+    private static final Map<UUID, Boolean> growSavedSeekOres = new HashMap<>();
     private static final int DEFENSE_MIN_SIZE = 11;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
@@ -113,37 +108,21 @@ public final class VoidClamMod {
     }
 
     /**
-     * Off-thread pathfinding should stop when the server is shutting down, the clam center chunk is unloaded, or this module
-     * slot is the coordinated-kill victim. Pass {@code pathfindingModuleSlot} = {@code tno} when known so kill targets the right
-     * clam; use {@code 0} only when matching by center X/Z against the victim slot.
+     * Off-thread pathfinding should stop when the server is shutting down, the clam center chunk is unloaded, or this clam's UUID
+     * is the coordinated-kill victim.
      *
-     * @param pathfindingModuleSlot module index {@code tno} for this work (1..N), or {@code 0} when only center coordinates are known
-     * @param pathfindingClamId stable id for this path job; when non-null, kill barrier matches this instead of slot
+     * @param pathfindingClamId stable id for this path job; kill barrier matches this UUID
      */
     public static boolean shouldAbortAsyncPathfindingWork(
         ServerWorld world,
         int clamCenterX,
         int clamCenterZ,
-        int pathfindingModuleSlot,
         @Nullable UUID pathfindingClamId
     ) {
         if (asyncPathfindingShutdownRequested) return true;
         UUID victimId = asyncPathfindingKillVictimClamId;
         if (victimId != null && pathfindingClamId != null && victimId.equals(pathfindingClamId)) {
             return true;
-        }
-        int victim = asyncPathfindingKillVictimSlot;
-        if (victim > 0 && pathfindingClamId == null) {
-            if (pathfindingModuleSlot == victim) {
-                return true;
-            }
-            if (pathfindingModuleSlot == 0
-                && victim <= moduleNumber
-                && modules[victim] != null
-                && modules[victim].x == clamCenterX
-                && modules[victim].z == clamCenterZ) {
-                return true;
-            }
         }
         return !world.isChunkLoaded(clamCenterX >> 4, clamCenterZ >> 4);
     }
@@ -156,52 +135,23 @@ public final class VoidClamMod {
      * Remove/adjust queued path targets and grow-pending indices, then shift the module array.
      * Call only from the server thread after async pathfinding has drained.
      */
-    private static void finishClamKillAfterAsyncSettled(int victimSlot) {
-        if (victimSlot < 1 || victimSlot > moduleNumber) return;
-        purgeAndAdjustTargetsQueueForKill(victimSlot);
-        if (growPendingWorld != null) {
-            if (growCommandTno == victimSlot) {
-                growCommandTno = 0;
-                growCommandTargetSize = 0;
-            } else if (growCommandTno > victimSlot) {
-                growCommandTno--;
-            }
+    private static void finishClamKillAfterAsyncSettled(UUID victimId) {
+        if (victimId == null) return;
+        purgeTargetsForVictimClamId(victimId);
+        if (growPendingWorld != null && victimId.equals(growCommandClamId)) {
+            growCommandClamId = null;
+            growCommandTargetSize = 0;
         }
-        for (int i = victimSlot; i < moduleNumber; i++) {
-            savedSeekLights[i] = savedSeekLights[i + 1];
-            savedSeekOres[i] = savedSeekOres[i + 1];
-        }
-        clamKillShiftArrayOnly(victimSlot);
-        remapTargetsQueueTnoFromClamIds();
+        growSavedSeekLights.remove(victimId);
+        growSavedSeekOres.remove(victimId);
+        modulesById.remove(victimId);
     }
 
-    private static void remapTargetsQueueTnoFromClamIds() {
-        List<Node> batch = new ArrayList<>();
-        Node n;
-        while ((n = targets.poll()) != null) {
-            batch.add(n);
-        }
-        for (Node node : batch) {
-            if (node.clamId != null) {
-                int s = getSlotByClamId(node.clamId);
-                if (s < 1) continue;
-                node.tno = s;
-            }
-            targets.offer(node);
-        }
-    }
-
-    /** Drop queued path results for this slot only (no index adjustment). Call when starting a kill to narrow the enqueue race. */
-    private static void purgeTargetsForVictimSlotOnly(int victimSlot) {
-        UUID victimClamId = victimSlot >= 1 && victimSlot <= moduleNumber && modules[victimSlot] != null
-            ? modules[victimSlot].clamId : null;
+    private static void purgeTargetsForVictimClamId(UUID victimClamId) {
         List<Node> kept = new ArrayList<>();
         Node n;
         while ((n = targets.poll()) != null) {
-            if (victimClamId != null && n.clamId != null && victimClamId.equals(n.clamId)) {
-                continue;
-            }
-            if (n.clamId == null && n.tno == victimSlot) {
+            if (victimClamId.equals(n.clamId)) {
                 continue;
             }
             kept.add(n);
@@ -209,40 +159,6 @@ public final class VoidClamMod {
         for (Node k : kept) {
             targets.offer(k);
         }
-    }
-
-    private static void purgeAndAdjustTargetsQueueForKill(int victimSlot) {
-        UUID victimClamId = victimSlot >= 1 && victimSlot <= moduleNumber && modules[victimSlot] != null
-            ? modules[victimSlot].clamId : null;
-        List<Node> kept = new ArrayList<>();
-        Node n;
-        while ((n = targets.poll()) != null) {
-            if (victimClamId != null && n.clamId != null && victimClamId.equals(n.clamId)) {
-                continue;
-            }
-            if (n.clamId == null && n.tno == victimSlot) {
-                continue;
-            }
-            if (n.clamId == null && n.tno > victimSlot) {
-                n.tno--;
-            }
-            kept.add(n);
-        }
-        for (Node k : kept) {
-            targets.offer(k);
-        }
-    }
-
-    /** Array shift only; used after async barrier. */
-    private static void clamKillShiftArrayOnly(int tno) {
-        if (tno < 1 || tno > moduleNumber) return;
-        for (int i = tno; i < moduleNumber; i++) {
-            Module swap = modules[i];
-            modules[i] = modules[i + 1];
-            modules[i + 1] = swap;
-        }
-        modules[moduleNumber] = null;
-        moduleNumber--;
     }
 
     /**
@@ -250,23 +166,23 @@ public final class VoidClamMod {
      * then on the server thread adjust targets and the module array and clear the barrier. Kills are serialized; additional
      * requests queue behind an in-progress drain. Saves after the shift when {@code saveAfter}.
      */
-    public static void clamKillBlocking(MinecraftServer server, int tno, boolean saveAfter) {
-        clamKillBlocking(server, tno, saveAfter, null, null);
+    public static void clamKillBlocking(MinecraftServer server, UUID victimId, boolean saveAfter) {
+        clamKillBlocking(server, victimId, saveAfter, null, null);
     }
 
     /**
-     * Kill module; optionally drop a heart item at {@code heartDropPos} with {@code heartDropData} after async drain (e.g. /voidclam kill).
+     * Kill clam by id; optionally drop heart item after async drain.
      */
     public static void clamKillBlocking(
         MinecraftServer server,
-        int tno,
+        UUID victimId,
         boolean saveAfter,
         @Nullable VoidClamHeartItemData heartDropData,
         @Nullable BlockPos heartDropPos
     ) {
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
+        if (victimId == null || !modulesById.containsKey(victimId)) return;
         synchronized (asyncKillCoordinatorLock) {
-            pendingClamKills.add(new KillRequest(tno, saveAfter, heartDropData, heartDropPos));
+            pendingClamKills.add(new KillRequest(victimId, saveAfter, heartDropData, heartDropPos));
             pendingKillDrainServer = server;
             tryStartNextClamKillDrainLocked();
         }
@@ -280,26 +196,24 @@ public final class VoidClamMod {
         if (next == null) {
             return;
         }
-        int tno = next.victimSlot;
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) {
+        UUID victimId = next.victimId();
+        Module victim = modulesById.get(victimId);
+        if (victim == null) {
             tryStartNextClamKillDrainLocked();
             return;
         }
-        Module victim = modules[tno];
         victim.busyFlagMainCycle = 0;
-        purgeTargetsForVictimSlotOnly(tno);
-        asyncPathfindingKillVictimSlot = tno;
-        asyncPathfindingKillVictimClamId = victim.clamId;
+        purgeTargetsForVictimClamId(victimId);
+        asyncPathfindingKillVictimClamId = victimId;
         asyncPathfindingKillBarrierInEffect = true;
         MinecraftServer server = pendingKillDrainServer;
         if (server == null) {
-            asyncPathfindingKillVictimSlot = 0;
             asyncPathfindingKillVictimClamId = null;
             asyncPathfindingKillBarrierInEffect = false;
             tryStartNextClamKillDrainLocked();
             return;
         }
-        final int victimSlot = tno;
+        final UUID victimIdFinal = victimId;
         final boolean saveAfterThis = next.saveAfter;
         final VoidClamHeartItemData heartDropData = next.heartDropData;
         final BlockPos heartDropPos = next.heartDropPos;
@@ -309,8 +223,7 @@ public final class VoidClamMod {
             } finally {
                 server.execute(() -> {
                     try {
-                        remapPendingKillSlotsAfterShift(victimSlot);
-                        finishClamKillAfterAsyncSettled(victimSlot);
+                        finishClamKillAfterAsyncSettled(victimIdFinal);
                         if (heartDropData != null && heartDropPos != null) {
                             ServerWorld overworld = server.getOverworld();
                             if (overworld != null && overworld.isChunkLoaded(heartDropPos.getX() >> 4, heartDropPos.getZ() >> 4)) {
@@ -323,7 +236,6 @@ public final class VoidClamMod {
                             save(server);
                         }
                     } finally {
-                        asyncPathfindingKillVictimSlot = 0;
                         asyncPathfindingKillVictimClamId = null;
                         asyncPathfindingKillBarrierInEffect = false;
                         synchronized (asyncKillCoordinatorLock) {
@@ -337,31 +249,10 @@ public final class VoidClamMod {
         drain.start();
     }
 
-    /** After removing {@code victimSlot}, decrement indices in the pending-kill queue still waiting behind this drain. */
-    private static void remapPendingKillSlotsAfterShift(int victimSlot) {
-        List<KillRequest> batch = new ArrayList<>();
-        KillRequest r;
-        while ((r = pendingClamKills.poll()) != null) {
-            batch.add(r);
-        }
-        for (KillRequest k : batch) {
-            int s = k.victimSlot();
-            if (s == victimSlot) {
-                continue;
-            }
-            if (s > victimSlot) {
-                pendingClamKills.add(new KillRequest(s - 1, k.saveAfter(), k.heartDropData(), k.heartDropPos()));
-            } else {
-                pendingClamKills.add(new KillRequest(s, k.saveAfter(), k.heartDropData(), k.heartDropPos()));
-            }
-        }
-    }
-
     /** New server session: allow pathfinding tasks again (mod entry, before load). */
     public static void onAsyncPathfindingSessionStart() {
         asyncPathfindingShutdownRequested = false;
         asyncPathfindingKillBarrierInEffect = false;
-        asyncPathfindingKillVictimSlot = 0;
         asyncPathfindingKillVictimClamId = null;
         pendingClamKills.clear();
         pendingKillDrainServer = null;
@@ -371,22 +262,60 @@ public final class VoidClamMod {
     public static void onAsyncPathfindingSessionStop() {
         asyncPathfindingShutdownRequested = true;
         asyncPathfindingKillBarrierInEffect = false;
-        asyncPathfindingKillVictimSlot = 0;
         asyncPathfindingKillVictimClamId = null;
         pendingClamKills.clear();
         pendingKillDrainServer = null;
         CommandToolbox.shutdownPathfinderExecutorForSessionEnd();
         Pathfinder.clearSyncPathJobsForSessionEnd();
         NaturalSpawnHandler.clearForSessionEnd();
-        for (int i = 1; i <= moduleNumber; i++) {
-            if (modules[i] != null) {
-                modules[i].busyFlagMainCycle = 0;
+        for (Module m : modulesById.values()) {
+            if (m != null) {
+                m.busyFlagMainCycle = 0;
             }
         }
     }
 
-    public static Module[] getModules() { return modules; }
-    public static int getModuleNumber() { return moduleNumber; }
+    public static Collection<Module> getAllModules() {
+        return modulesById.values();
+    }
+
+    public static int getModuleCount() {
+        return modulesById.size();
+    }
+
+    /** @deprecated use {@link #getModuleById} */
+    @Deprecated
+    public static Module[] getModules() {
+        Collection<Module> c = modulesById.values();
+        Module[] arr = c.toArray(new Module[0]);
+        Arrays.sort(arr, Comparator.comparing(m -> m.clamId.toString()));
+        return arr;
+    }
+
+    /** @deprecated use {@link #getModuleCount} */
+    @Deprecated
+    public static int getModuleNumber() {
+        return getModuleCount();
+    }
+
+    public static @Nullable Module getModuleById(@Nullable UUID id) {
+        return id == null ? null : modulesById.get(id);
+    }
+
+    public static @Nullable Module findModuleAt(BlockPos pos) {
+        int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
+        for (Module m : modulesById.values()) {
+            if (m != null && m.x == px && m.y == py && m.z == pz) return m;
+        }
+        return null;
+    }
+
+    private static boolean registerModule(Module m) {
+        m.ensureClamId();
+        if (modulesById.size() >= MAX_MODULES) return false;
+        modulesById.put(m.clamId, m);
+        return true;
+    }
 
     /** Place or replace the block at {@code pos} with a heart whose BE matches {@code m}. */
     public static void placeHeartBlockForModule(ServerWorld world, BlockPos pos, Module m) {
@@ -396,44 +325,20 @@ public final class VoidClamMod {
         }
     }
 
-    /** CSV slot for module whose center matches {@code pos}, or -1. */
-    public static int findModuleSlotByCenter(BlockPos pos) {
-        int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
-            if (m != null && m.x == px && m.y == py && m.z == pz) return i;
-        }
-        return -1;
-    }
-
-    /**
-     * Player broke the heart block: unregister the clam and drop the same item stack (after async kill drain).
-     */
-    /** Heart block broken: unregister clam (loot table drops the item with {@code voidclam:heart_stack} from the BE). */
+    /** Heart block broken: unregister clam (loot drops via table). */
     public static void onHeartBroken(ServerWorld world, BlockPos pos) {
-        MinecraftServer server = world.getServer();
-        int tno = findModuleSlotByCenter(pos);
-        if (tno < 1) {
-            return;
-        }
-        clamKillBlocking(server, tno, true, null, null);
+        Module m = findModuleAt(pos);
+        if (m == null) return;
+        clamKillBlocking(world.getServer(), m.clamId, true, null, null);
     }
 
-    /**
-     * Heart block placed (item or world gen): link CSV module or register a new clam from stack data.
-     */
+    /** Heart placed: re-link existing module at coords or register new clam. */
     public static void onHeartPlaced(ServerWorld world, BlockPos pos) {
         if (world.getBlockEntity(pos) instanceof VoidClamHeartBlockEntity heart) {
-            int existing = findModuleSlotByCenter(pos);
-            if (existing >= 1 && modules[existing] != null) {
-                heart.syncFromModule(modules[existing]);
+            Module existing = findModuleAt(pos);
+            if (existing != null) {
+                heart.syncFromModule(existing);
                 save(world.getServer());
-                return;
-            }
-            moduleNumber++;
-            if (moduleNumber >= MAX_MODULES) {
-                moduleNumber--;
-                world.removeBlock(pos, false);
                 return;
             }
             Module m = new Module();
@@ -442,59 +347,53 @@ public final class VoidClamMod {
             m.x = pos.getX();
             m.y = pos.getY();
             m.z = pos.getZ();
-            modules[moduleNumber] = m;
+            if (!registerModule(m)) {
+                world.removeBlock(pos, false);
+                return;
+            }
             CommandToolbox.buildStub(world, m.x, m.y, m.z);
             heart.syncFromModule(m);
             save(world.getServer());
         }
     }
 
-    static void syncModuleToHeartBlock(ServerWorld world, int tno) {
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
-        Module m = modules[tno];
-        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+    static void syncModuleToHeartBlock(ServerWorld world, UUID clamId) {
+        Module m = getModuleById(clamId);
+        if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         BlockPos p = new BlockPos(m.x, m.y, m.z);
         if (world.getBlockEntity(p) instanceof VoidClamHeartBlockEntity heart) {
             heart.syncFromModule(m);
         }
     }
+
     public static boolean isLight(Block block) { return lights.contains(block); }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
 
-    /** True if module tno exists and its center chunk is loaded (so clam work is safe). */
-    public static boolean isModuleInLoadedChunk(ServerWorld world, int tno) {
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return false;
-        Module m = modules[tno];
-        return world.isChunkLoaded(m.x >> 4, m.z >> 4);
+    public static boolean isModuleInLoadedChunk(ServerWorld world, @Nullable UUID clamId) {
+        Module m = getModuleById(clamId);
+        return m != null && world.isChunkLoaded(m.x >> 4, m.z >> 4);
     }
 
-    /** False if the slot is empty or no longer holds a module at the given center (e.g. after a kill shifted indices). */
+    /** @deprecated use {@link #moduleMatchesClamAt(UUID, int, int, int)} */
+    @Deprecated
     public static boolean moduleAtSlotMatchesPosition(int tno, int x, int y, int z) {
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return false;
-        Module m = modules[tno];
-        return m.x == x && m.y == y && m.z == z;
+        return false;
     }
 
-    /** Resolve CSV slot by stable id, or -1. */
+    /** @deprecated use {@link #getModuleById} */
+    @Deprecated
     public static int getSlotByClamId(@Nullable UUID clamId) {
-        if (clamId == null) return -1;
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
-            if (m != null && clamId.equals(m.clamId)) return i;
-        }
         return -1;
     }
 
     public static @Nullable Module getModuleByClamId(@Nullable UUID clamId) {
-        int s = getSlotByClamId(clamId);
-        return s >= 1 ? modules[s] : null;
+        return getModuleById(clamId);
     }
 
-    /** True if a module with this id still exists at the recorded center. */
     public static boolean moduleMatchesClamAt(@Nullable UUID clamId, int x, int y, int z) {
         if (clamId == null) return false;
-        Module m = getModuleByClamId(clamId);
+        Module m = getModuleById(clamId);
         return m != null && m.x == x && m.y == y && m.z == z;
     }
 
@@ -502,34 +401,33 @@ public final class VoidClamMod {
         targets.offer(node);
     }
 
-    /** True if no pathfinding results are waiting to be built (targets queue empty). */
     public static boolean isTargetsQueueEmpty() {
         return targets.isEmpty();
     }
 
-    public static void removeLightsBlackList(int tno, BlockPos pos) {
-        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
-            modules[tno].lightsBlackList.remove(pos);
+    public static void removeLightsBlackList(UUID clamId, BlockPos pos) {
+        Module m = getModuleById(clamId);
+        if (m != null) m.lightsBlackList.remove(pos);
     }
 
-    public static void addLightsBlackList(int tno, BlockPos pos) {
-        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
-            modules[tno].lightsBlackList.add(pos.toImmutable());
+    public static void addLightsBlackList(UUID clamId, BlockPos pos) {
+        Module m = getModuleById(clamId);
+        if (m != null) m.lightsBlackList.add(pos.toImmutable());
     }
 
-    public static void removeOresBlackList(int tno, BlockPos pos) {
-        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
-            modules[tno].oresBlackList.remove(pos);
+    public static void removeOresBlackList(UUID clamId, BlockPos pos) {
+        Module m = getModuleById(clamId);
+        if (m != null) m.oresBlackList.remove(pos);
     }
 
-    public static void addOresBlackList(int tno, BlockPos pos) {
-        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
-            modules[tno].oresBlackList.add(pos.toImmutable());
+    public static void addOresBlackList(UUID clamId, BlockPos pos) {
+        Module m = getModuleById(clamId);
+        if (m != null) m.oresBlackList.add(pos.toImmutable());
     }
 
-    public static void addEnergy(int tno, int delta) {
-        if (tno >= 1 && tno <= moduleNumber && modules[tno] != null)
-            modules[tno].energy = Math.max(0, modules[tno].energy + delta);
+    public static void addEnergy(UUID clamId, int delta) {
+        Module m = getModuleById(clamId);
+        if (m != null) m.energy = Math.max(0, m.energy + delta);
     }
 
     /** Schedule runnable on main thread after delayTicks (call from main thread). */
@@ -544,11 +442,10 @@ public final class VoidClamMod {
             Pathfinder.buildPath(world, n);
     }
 
-    /** Load modules from world save folder (CSV {@code modules.siva}). */
+    /** Load modules from CSV {@code modules.siva} into {@link #modulesById}. */
     public static void load(MinecraftServer server) {
         Path savePath = getModulesPath(server);
-        modules = new Module[MAX_MODULES];
-        moduleNumber = 0;
+        modulesById.clear();
         if (!Files.exists(savePath)) return;
         try (Scanner s = new Scanner(Files.newInputStream(savePath))) {
             while (s.hasNextLine()) {
@@ -556,8 +453,7 @@ public final class VoidClamMod {
                 if (line.isEmpty()) continue;
                 String[] parts = line.split(",", -1);
                 if (parts.length < 8) continue;
-                moduleNumber++;
-                if (moduleNumber >= MAX_MODULES) break;
+                if (modulesById.size() >= MAX_MODULES) break;
                 Module m = new Module();
                 m.type = Integer.parseInt(parts[0]);
                 m.x = Integer.parseInt(parts[1]);
@@ -578,20 +474,19 @@ public final class VoidClamMod {
                     }
                 }
                 m.ensureClamId();
-                modules[moduleNumber] = m;
+                modulesById.put(m.clamId, m);
             }
         } catch (IOException e) {
             // no-op
         }
     }
 
-    /** After CSV load: if overworld center is legacy wart/obsidian, replace with heart carrying module data. */
+    /** After CSV load: overworld centers still wart/obsidian get a heart block. */
     public static void migrateLoadedModulesToHeartBlocks(MinecraftServer server) {
         ServerWorld world = server.getOverworld();
         if (world == null) return;
         boolean any = false;
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
+        for (Module m : modulesById.values()) {
             if (m == null) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             BlockPos p = new BlockPos(m.x, m.y, m.z);
@@ -606,7 +501,7 @@ public final class VoidClamMod {
         }
     }
 
-    /** Save modules; CSV format and {@code modules.siva} / {@code modules.siva.old} rotation. */
+    /** Save all modules to CSV (sorted by UUID for stable diffs). */
     public static void save(MinecraftServer server) {
         Path path = getModulesPath(server);
         Path oldPath = path.getParent().resolve("modules.siva.old");
@@ -614,16 +509,16 @@ public final class VoidClamMod {
             Files.deleteIfExists(oldPath);
             if (Files.exists(path))
                 Files.move(path, oldPath);
+            List<Module> list = new ArrayList<>(modulesById.values());
+            list.sort(Comparator.comparing(mm -> mm.clamId.toString()));
             try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(path))) {
-                for (int i = 1; i <= moduleNumber; i++) {
-                    Module m = modules[i];
-                    if (m != null) {
-                        m.ensureClamId();
-                        out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
-                            + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
-                            + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself
-                            + "," + m.clamId);
-                    }
+                for (Module m : list) {
+                    if (m == null) continue;
+                    m.ensureClamId();
+                    out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
+                        + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
+                        + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself
+                        + "," + m.clamId);
                 }
             }
         } catch (IOException e) {
@@ -635,13 +530,8 @@ public final class VoidClamMod {
         return server.getSavePath(net.minecraft.util.WorldSavePath.ROOT).resolve("modules.siva");
     }
 
-    /** Create a new stub module at (x,y,z). Increments moduleNumber and saves. */
-    public static int makeStub(ServerWorld world, int x, int y, int z) {
-        moduleNumber++;
-        if (moduleNumber >= MAX_MODULES) {
-            moduleNumber--;
-            return -1;
-        }
+    /** Create a new stub at (x,y,z). Returns clam UUID string for commands, or null on failure. */
+    public static @Nullable UUID makeStub(ServerWorld world, int x, int y, int z) {
         Module m = new Module();
         m.clamId = UUID.randomUUID();
         m.type = 1;
@@ -656,68 +546,57 @@ public final class VoidClamMod {
         m.seekLights = cfg.clam_light_flag_default;
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
-        modules[moduleNumber] = m;
+        if (!registerModule(m)) {
+            return null;
+        }
         placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
         save(world.getServer());
-        return moduleNumber;
+        return m.clamId;
     }
 
-    /**
-     * Remove module at index after async pathfinding has drained and indices are safe. {@code saveAfter} should be true for
-     * explicit player kills; false for automatic core checks (batch saves are unnecessary).
-     */
-    public static void clamKill(MinecraftServer server, int tno, boolean saveAfter) {
-        clamKillBlocking(server, tno, saveAfter);
+    public static void clamKill(MinecraftServer server, UUID clamId, boolean saveAfter) {
+        clamKillBlocking(server, clamId, saveAfter);
     }
 
-    /**
-     * Request a safe repair for one module (e.g. from /voidclam repair). Same flow as grow but target size = current size.
-     */
-    public static void requestRepairCommand(ServerWorld world, int tno) {
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
-        requestGrowCommand(world, tno, modules[tno].currentSize);
+    public static void requestRepairCommand(ServerWorld world, UUID clamId) {
+        Module m = getModuleById(clamId);
+        if (m == null) return;
+        requestGrowCommand(world, clamId, m.currentSize);
     }
 
-    /**
-     * Request a safe grow for one module (e.g. from /voidclam grow). Uses same flow as auto grow:
-     * seeks off → wait for paths to finish → run clamReSize(world, tno, targetSize) → restore seeks.
-     * If a grow is already pending for this world, this request becomes the action run when ready.
-     */
-    public static void requestGrowCommand(ServerWorld world, int tno, int targetSize) {
-        if (tno < 1 || tno > moduleNumber || modules[tno] == null) return;
+    public static void requestGrowCommand(ServerWorld world, UUID clamId, int targetSize) {
+        if (getModuleById(clamId) == null) return;
         if (growPendingWorld == null) {
-            for (int i = 1; i <= moduleNumber; i++) {
-                Module m = modules[i];
-                if (m != null) {
-                    savedSeekLights[i] = m.seekLights;
-                    savedSeekOres[i] = m.seekOres;
-                    m.seekLights = false;
-                    m.seekOres = false;
-                }
+            growSavedSeekLights.clear();
+            growSavedSeekOres.clear();
+            for (Module m : modulesById.values()) {
+                if (m == null) continue;
+                growSavedSeekLights.put(m.clamId, m.seekLights);
+                growSavedSeekOres.put(m.clamId, m.seekOres);
+                m.seekLights = false;
+                m.seekOres = false;
             }
             growPendingWorld = world;
         }
         if (growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) {
-            growCommandTno = tno;
+            growCommandClamId = clamId;
             growCommandTargetSize = targetSize;
         }
     }
 
-    /** Called every tick. If a grow/repair is pending for this world and pathfinding is idle, runs it and restores seeks. */
     public static void tickGrowPendingCheck(ServerWorld world) {
         if (growPendingWorld == null) return;
         if (asyncPathfindingKillBarrierInEffect) return;
         if (!growPendingWorld.getRegistryKey().equals(world.getRegistryKey())) return;
-        Module[] modules = getModules();
-        int cmdTno = growCommandTno;
+        UUID cmdId = growCommandClamId;
         boolean idle;
-        if (cmdTno > 0) {
-            idle = (modules[cmdTno] == null || modules[cmdTno].busyFlagMainCycle == 0);
+        if (cmdId != null) {
+            Module m = getModuleById(cmdId);
+            idle = (m == null || m.busyFlagMainCycle == 0);
         } else {
             idle = true;
-            for (int i = 1; i <= moduleNumber; i++) {
-                Module m = modules[i];
+            for (Module m : modulesById.values()) {
                 if (m != null && m.busyFlagMainCycle != 0) {
                     idle = false;
                     break;
@@ -727,45 +606,46 @@ public final class VoidClamMod {
         if (!idle || !isTargetsQueueEmpty() || VoidClamModScheduler.hasPendingTasks(world)) return;
         int cmdSize = growCommandTargetSize;
         growPendingWorld = null;
-        growCommandTno = 0;
+        growCommandClamId = null;
         growCommandTargetSize = 0;
-        if (cmdTno > 0) {
-            CommandToolbox.clamReSize(world, cmdTno, cmdSize);
+        if (cmdId != null) {
+            CommandToolbox.clamReSize(world, cmdId, cmdSize);
         } else {
-            runGrowRoutine(world, modules);
+            runGrowRoutine(world);
         }
-        for (int i = 1; i <= moduleNumber; i++) {
-            if (modules[i] != null) {
-                modules[i].seekLights = savedSeekLights[i];
-                modules[i].seekOres = savedSeekOres[i];
-            }
+        for (Module m : modulesById.values()) {
+            if (m == null) continue;
+            Boolean sl = growSavedSeekLights.get(m.clamId);
+            Boolean so = growSavedSeekOres.get(m.clamId);
+            if (sl != null) m.seekLights = sl;
+            if (so != null) m.seekOres = so;
         }
+        growSavedSeekLights.clear();
+        growSavedSeekOres.clear();
     }
 
-    /** Auto-repair/grow: every 5 min. Starts the safe flow (seeks off → wait for paths → run grow); completion is checked every tick in tickGrowPendingCheck. */
     public static void tickAutoRepairAndGrow(ServerWorld world) {
         if (growPendingWorld != null) return;
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
-            if (m != null) {
-                savedSeekLights[i] = m.seekLights;
-                savedSeekOres[i] = m.seekOres;
-                m.seekLights = false;
-                m.seekOres = false;
-            }
+        growSavedSeekLights.clear();
+        growSavedSeekOres.clear();
+        for (Module m : modulesById.values()) {
+            if (m == null) continue;
+            growSavedSeekLights.put(m.clamId, m.seekLights);
+            growSavedSeekOres.put(m.clamId, m.seekOres);
+            m.seekLights = false;
+            m.seekOres = false;
         }
         growPendingWorld = world;
-        growCommandTno = 0;
+        growCommandClamId = null;
         growCommandTargetSize = 0;
     }
 
-    private static void runGrowRoutine(ServerWorld world, Module[] modules) {
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
+    private static void runGrowRoutine(ServerWorld world) {
+        for (Module m : modulesById.values()) {
             if (m == null) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
-            CommandToolbox.clamReSize(world, i, m.currentSize); // repair
+            CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
             m.lightsBlackList.clear();
             m.oresBlackList.clear();
             VoidClamConfig cfg = VoidClamConfig.get();
@@ -778,7 +658,7 @@ public final class VoidClamMod {
                         BlockState state = world.getBlockState(new BlockPos(ix, iy, iz));
                         Block b = state.getBlock();
                         if (b != Blocks.AIR && b != Blocks.WATER && b != Blocks.LAVA && b != Blocks.OBSIDIAN
-                            && b != Blocks.NETHER_WART_BLOCK) {
+                            && b != Blocks.NETHER_WART_BLOCK && b != VoidClamBlocks.HEART_BLOCK) {
                             float br = b.getBlastResistance();
                             if (br < 0) hasRoom = 0;
                             else cst += br;
@@ -791,36 +671,36 @@ public final class VoidClamMod {
                 int nextSize = Math.min(m.currentSize + 2, cfg.clam_size_max);
                 if (nextSize <= m.currentSize) continue;
                 m.energy = 0;
-                CommandToolbox.clamReSize(world, i, nextSize);
+                CommandToolbox.clamReSize(world, m.clamId, nextSize);
                 m.currentSize = nextSize;
             }
         }
         save(world.getServer());
     }
 
-    /** Kill modules whose core block is not nether wart or obsidian. Iterate backwards so kill shift doesn't skip. Skip unloaded chunks. */
     public static void tickCoreCheck(ServerWorld world) {
-        Module[] modules = getModules();
-        for (int i = moduleNumber; i >= 1; i--) {
-            Module m = modules[i];
+        List<UUID> toKill = new ArrayList<>();
+        for (Module m : modulesById.values()) {
             if (m == null) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             Block block = world.getBlockState(new BlockPos(m.x, m.y, m.z)).getBlock();
-            if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN)
-                clamKill(world.getServer(), i, false);
+            if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
+                toKill.add(m.clamId);
+            }
+        }
+        for (UUID id : toKill) {
+            clamKill(world.getServer(), id, false);
         }
     }
 
-    /** Core check for the module at this heart position (from heart BE tick). */
     public static void tickCoreCheckAtHeart(ServerWorld world, BlockPos heartPos, @Nullable UUID clamId) {
-        int slot = getSlotByClamId(clamId);
-        if (slot < 1 || modules[slot] == null) return;
-        Module m = modules[slot];
-        if (m.x != heartPos.getX() || m.y != heartPos.getY() || m.z != heartPos.getZ()) return;
+        if (clamId == null) return;
+        Module m = getModuleById(clamId);
+        if (m == null || m.x != heartPos.getX() || m.y != heartPos.getY() || m.z != heartPos.getZ()) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         Block block = world.getBlockState(heartPos).getBlock();
         if (block != VoidClamBlocks.HEART_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
-            clamKill(world.getServer(), slot, false);
+            clamKill(world.getServer(), clamId, false);
         }
     }
 
@@ -851,9 +731,8 @@ public final class VoidClamMod {
 
     /** Legacy: defense for all modules (prefer {@link #tickDefenseForModule} from heart ticks). */
     public static void tickDefense(ServerWorld world) {
-        Module[] modules = getModules();
-        for (int i = 1; i <= moduleNumber; i++) {
-            tickDefenseForModule(world, modules[i]);
+        for (Module m : modulesById.values()) {
+            tickDefenseForModule(world, m);
         }
     }
 
@@ -867,9 +746,8 @@ public final class VoidClamMod {
 
     /** Legacy: heartbeat for all loaded modules. */
     public static void tickHeartbeat(ServerWorld world) {
-        Module[] modules = getModules();
-        for (int i = 1; i <= moduleNumber; i++) {
-            tickHeartbeatForModule(world, modules[i]);
+        for (Module m : modulesById.values()) {
+            tickHeartbeatForModule(world, m);
         }
     }
 

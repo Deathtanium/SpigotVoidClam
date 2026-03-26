@@ -38,31 +38,23 @@ public class VoidClamHeartBlockEntity extends BlockEntity {
             } catch (IllegalArgumentException ignored) {
             }
         }
-        int slotByPos = VoidClamMod.findModuleSlotByCenter(pos);
-        if (clamId == null && slotByPos >= 1) {
-            Module mod = VoidClamMod.getModules()[slotByPos];
-            if (mod != null) {
-                mod.ensureClamId();
-                be.syncFromModule(mod);
-                clamId = mod.clamId;
-            }
+        Module atPos = VoidClamMod.findModuleAt(pos);
+        if (clamId == null && atPos != null) {
+            atPos.ensureClamId();
+            be.syncFromModule(atPos);
+            clamId = atPos.clamId;
         }
         Module modForTick = clamId != null ? VoidClamMod.getModuleByClamId(clamId) : null;
-        if (modForTick == null && slotByPos >= 1) {
-            modForTick = VoidClamMod.getModules()[slotByPos];
-            if (modForTick != null) {
-                modForTick.ensureClamId();
-                be.syncFromModule(modForTick);
-                clamId = modForTick.clamId;
-            }
+        if (modForTick == null && atPos != null) {
+            modForTick = atPos;
+            modForTick.ensureClamId();
+            be.syncFromModule(modForTick);
+            clamId = modForTick.clamId;
         }
         if (clamId == null || modForTick == null) return;
 
         if ((t + phase) % REACH_INTERVAL == 0) {
-            int slot = VoidClamMod.getSlotByClamId(clamId);
-            if (slot >= 1) {
-                CommandToolbox.clamReach(serverWorld, slot);
-            }
+            CommandToolbox.clamReach(serverWorld, clamId);
             VoidClamMod.tickCoreCheckAtHeart(serverWorld, pos, clamId);
         }
         if ((t + phase + 11) % HEARTBEAT_INTERVAL == 0) {

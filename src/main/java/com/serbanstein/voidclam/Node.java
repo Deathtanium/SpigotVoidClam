@@ -12,19 +12,16 @@ public class Node {
     public double f;
     public double g;
     public double h;
-    /** Module index this path belongs to (for blacklists/energy during build). */
-    public int tno;
-    /** Stable clam identity (matches {@link Module#clamId}); used for async kill abort. */
+    /** Stable clam identity (matches {@link Module#clamId}); path build and kill barrier use this only. */
     public final UUID clamId;
     public Node parent;
 
-    public Node(int x, int y, int z, Node parent, int tno, UUID clamId) {
+    public Node(int x, int y, int z, Node parent, UUID clamId) {
         this.x = x;
         this.y = y;
         this.z = z;
         this.f = this.g = this.h = 0.0;
         this.parent = parent;
-        this.tno = tno;
         this.clamId = clamId;
     }
 }

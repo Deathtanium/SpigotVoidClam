@@ -145,11 +145,8 @@ public final class TendrilPulseManager {
     public static void runOmnidirectionalPulse(ServerWorld world) {
         if (!VoidClamConfig.get().vfx_enabled) return;
         if (omniPulseJob != null) return;
-        Module[] modules = VoidClamMod.getModules();
-        int moduleNumber = VoidClamMod.getModuleNumber();
         List<BlockBfs.MergedOmniBfsJob.SingleSource> bfsList = new ArrayList<>();
-        for (int i = 1; i <= moduleNumber; i++) {
-            Module m = modules[i];
+        for (Module m : VoidClamMod.getAllModules()) {
             if (m == null) continue;
             BlockPos center = new BlockPos(m.x, m.y, m.z);
             if (!world.isChunkLoaded(center)) continue;
