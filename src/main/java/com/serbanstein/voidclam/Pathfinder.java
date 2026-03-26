@@ -227,7 +227,7 @@ public final class Pathfinder {
         return b;
     }
 
-    // --- Container logic: off-thread BFS within same AABB as calculatePath (see PATHFINDING_RANGE_*_HALF) ---
+    // --- Container logic: off-thread BFS on live world (same rules as former snapshot), within pathfinding AABB ---
     private static final byte TYPE_OTHER = 0;
     private static final byte TYPE_NETHER_WART = 1;
     private static final byte TYPE_WARPED_WART = 2;
@@ -240,43 +240,19 @@ public final class Pathfinder {
         return block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST || block == Blocks.BARREL;
     }
 
-    /**
-     * Build snapshot on main thread: BFS from module center (clam core), limited to the same axis-aligned box as {@link #calculatePath}.
-     *
-     * @param cSize {@link Module#currentSize} at scheduling time (bounds scale with this).
-     */
-    private static Map<Long, Byte> buildContainerSnapshot(ServerWorld world, BlockPos start, int cSize) {
-        int cx = start.getX(), cy = start.getY(), cz = start.getZ();
-        Map<Long, Byte> map = new HashMap<>();
-        Set<Long> seen = new HashSet<>();
-        Queue<Long> queue = new ArrayDeque<>();
-        long startLong = start.asLong();
-        queue.add(startLong);
-        seen.add(startLong);
-        while (!queue.isEmpty()) {
-            long cur = queue.poll();
-            BlockPos pos = BlockPos.fromLong(cur);
-            BlockState state = world.getBlockState(pos);
-            byte type;
-            if (state.isOf(Blocks.NETHER_WART_BLOCK)) type = TYPE_NETHER_WART;
-            else if (state.isOf(Blocks.WARPED_WART_BLOCK)) type = TYPE_WARPED_WART;
-            else if (isContainerBlock(state.getBlock())) type = TYPE_CONTAINER;
-            else type = TYPE_OTHER;
-            map.put(cur, type);
-            // From BFS root (clam center) we can step to neighbors even if that block isn't wart; else only step from wart
-            if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
-            for (int i = 0; i < 6; i++) {
-                BlockPos nextPos = pos.add(DX[i], DY[i], DZ[i]);
-                if (!isWithinPathfindingRange(nextPos.getX(), nextPos.getY(), nextPos.getZ(), cx, cy, cz, cSize)) continue;
-                long next = nextPos.asLong();
-                if (seen.add(next)) queue.add(next);
-            }
-        }
-        return map;
+    private static byte classifyForContainerBfs(BlockState state) {
+        if (state.isOf(Blocks.NETHER_WART_BLOCK)) return TYPE_NETHER_WART;
+        if (state.isOf(Blocks.WARPED_WART_BLOCK)) return TYPE_WARPED_WART;
+        if (isContainerBlock(state.getBlock())) return TYPE_CONTAINER;
+        return TYPE_OTHER;
     }
 
-    /** Runs off-thread: BFS on snapshot from start, returns container positions in BFS order. */
-    private static List<Long> runContainerBfsOnSnapshot(Map<Long, Byte> snapshot, long startLong) {
+    /**
+     * BFS from {@code startLong} (clam center) over the live world. Call only from {@link CommandToolbox#pathfinderExecutor}.
+     * Same traversal rules as the old main-thread snapshot: expand from root once; otherwise only through nether/warped wart.
+     * Bounded by the same AABB as {@link #calculatePath}.
+     */
+    private static List<Long> runContainerBfsOnWorld(ServerWorld world, int cx, int cy, int cz, int cSize, long startLong) {
         List<Long> containers = new ArrayList<>();
         Set<Long> seen = new HashSet<>();
         Queue<Long> queue = new ArrayDeque<>();
@@ -284,15 +260,17 @@ public final class Pathfinder {
         seen.add(startLong);
         while (!queue.isEmpty()) {
             long cur = queue.poll();
-            Byte type = snapshot.get(cur);
-            if (type == null) continue;
-            if (type == TYPE_CONTAINER) containers.add(cur);
-            // From BFS root (clam center) we can step to neighbors; else only step from wart
-            if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
             BlockPos pos = BlockPos.fromLong(cur);
+            if (!isWithinPathfindingRange(pos.getX(), pos.getY(), pos.getZ(), cx, cy, cz, cSize)) continue;
+            BlockState state = world.getBlockState(pos);
+            byte type = classifyForContainerBfs(state);
+            if (type == TYPE_CONTAINER) containers.add(cur);
+            if (type != TYPE_NETHER_WART && type != TYPE_WARPED_WART && cur != startLong) continue;
             for (int i = 0; i < 6; i++) {
-                long next = pos.add(DX[i], DY[i], DZ[i]).asLong();
-                if (snapshot.containsKey(next) && seen.add(next)) queue.add(next);
+                BlockPos nextPos = pos.add(DX[i], DY[i], DZ[i]);
+                if (!isWithinPathfindingRange(nextPos.getX(), nextPos.getY(), nextPos.getZ(), cx, cy, cz, cSize)) continue;
+                long next = nextPos.asLong();
+                if (seen.add(next)) queue.add(next);
             }
         }
         return containers;
@@ -435,12 +413,16 @@ public final class Pathfinder {
         int[] stamina = new int[]{modules[gnode.tno].currentSize};
         int[] blocked = new int[1];
         int[] pathStopped = new int[1]; // set when block-to-break: path stops, no energy, resume next attempt
+        int[] pathStoppedAwaitingContainer = new int[1]; // 1 while off-thread container BFS + apply not finished; keeps busy, suppresses stale path steps
 
         while (firstNode.parent != null && blocked[0] == 0) {
             final Node refNode = firstNode;
             final long runAt = timer;
             final int cSize = modules[gnode.tno].currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
+                if (pathStopped[0] != 0 && pathStoppedAwaitingContainer[0] != 0) {
+                    return;
+                }
                 if (blocked[0] != 0 || pathStopped[0] != 0) {
                     modForFlag.busyFlagMainCycle = 0;
                     return;
@@ -458,17 +440,19 @@ public final class Pathfinder {
                     List<ItemStack> drops = getFortune3Drops(mat.getBlock());
                     if (!drops.isEmpty()) {
                         BlockPos breakPos = pos.toImmutable();
-                        BlockPos clamCenter = new BlockPos(mod.x, mod.y, mod.z);
-                        Map<Long, Byte> snapshot = buildContainerSnapshot(world, clamCenter, cSize);
-                        long clamCenterLong = clamCenter.asLong();
+                        long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
+                        int mx = mod.x, my = mod.y, mz = mod.z;
                         CommandToolbox.submitPathfinding(() -> {
-                            List<Long> containers = runContainerBfsOnSnapshot(snapshot, clamCenterLong);
-                            world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, drops));
+                            List<Long> containers = runContainerBfsOnWorld(world, mx, my, mz, cSize, clamCenterLong);
+                            world.getServer().execute(() -> {
+                                applyContainerResult(world, containers, breakPos, drops);
+                                modForFlag.busyFlagMainCycle = 0;
+                            });
                         });
                     } else {
                         replaceWithWartAndPulse(world, pos);
+                        modForFlag.busyFlagMainCycle = 0;
                     }
-                    modForFlag.busyFlagMainCycle = 0;
                     return;
                 }
 
@@ -486,16 +470,19 @@ public final class Pathfinder {
                 boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || mat.isOf(Blocks.NETHER_WART_BLOCK));
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
                     pathStopped[0] = 1; // path stops; clam does not get energy; resume next attempt
+                    pathStoppedAwaitingContainer[0] = 1;
                     ItemStack toStore = new ItemStack(mat.getBlock().asItem(), 1);
-                    BlockPos clamCenter = new BlockPos(mod.x, mod.y, mod.z);
-                    Map<Long, Byte> snapshot = buildContainerSnapshot(world, clamCenter, cSize);
                     BlockPos breakPos = pos.toImmutable();
-                    long clamCenterLong = clamCenter.asLong();
+                    long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
+                    int mx = mod.x, my = mod.y, mz = mod.z;
                     CommandToolbox.submitPathfinding(() -> {
-                        List<Long> containers = runContainerBfsOnSnapshot(snapshot, clamCenterLong);
-                        world.getServer().execute(() -> applyContainerResult(world, containers, breakPos, toStore));
+                        List<Long> containers = runContainerBfsOnWorld(world, mx, my, mz, cSize, clamCenterLong);
+                        world.getServer().execute(() -> {
+                            applyContainerResult(world, containers, breakPos, toStore);
+                            pathStoppedAwaitingContainer[0] = 0;
+                            modForFlag.busyFlagMainCycle = 0;
+                        });
                     });
-                    modForFlag.busyFlagMainCycle = 0;
                     return;
                 }
 

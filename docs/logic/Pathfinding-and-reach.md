@@ -46,9 +46,11 @@ Runs on **main thread** from `tickTargets`.
 
 **Scheduling:** Walks from goal toward start; each step schedules a `VoidClamMod.scheduleDelayed` at `timer`, `timer-2`, … so pulses fire in order along the path.
 
-## Container snapshot (`buildContainerSnapshot` / `runContainerBfsOnSnapshot`)
+## Container routing (off-thread BFS + main-thread apply)
 
-**Intended behavior:** Storage routing is anchored to the **module center** (clam core coordinates), not the block being broken. The main thread builds a **BFS map** from that center, classifying nether wart, warped wart, chest / trapped chest / barrel, and everything else. Exploration is limited to the **same axis-aligned box as `calculatePath`**: ±4×`currentSize` on X from center, ±5×`currentSize` on Y and Z (see `PATHFINDING_RANGE_*_HALF` in `Pathfinder`). The worker runs **the same BFS from the same root** on that map and returns containers in **BFS order from the clam center**. The main thread then tries `tryInsertInto` in that order via `world.getServer().execute`.
+**Intended behavior:** Storage routing is anchored to the **module center** (clam core coordinates), not the block being broken. There is **no in-memory snapshot**: `Pathfinder.runContainerBfsOnWorld` runs on **`CommandToolbox.pathfinderExecutor`**, reading the **live `ServerWorld`** with the same rules as before (expand once from the center cell; continue only through nether / warped wart; same AABB as `calculatePath`: ±4×`currentSize` on X, ±5×`currentSize` on Y and Z). It returns container positions in **BFS order from the clam center**. The main thread applies via `world.getServer().execute` → `tryInsertInto` / barrel / wart.
+
+**Pause / lock:** When a step needs container routing, **`busyFlagMainCycle` stays non-zero** until the executor finishes BFS **and** the main thread has run `applyContainerResult`. That blocks **`clamReach`** (and thus new targets) for that module. For **path-stopped** breaks (non-goal block with an item), earlier scheduled path steps along the same path would otherwise still run and clear the busy flag early; those steps **no-op** while waiting for the container apply (`pathStoppedAwaitingContainer`).
 
 So “nearer” means **fewer graph steps from the clam center through wart (and the root cell’s neighbors)**, not Euclidean distance from the break position. A chest sitting on wart closer to the center than another chest should appear **earlier** in the list unless it is never reached (see below).
 
