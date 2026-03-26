@@ -60,7 +60,7 @@ public final class NaturalSpawnHandler {
                     int cx = m.getX();
                     int cy = m.getY();
                     int cz = m.getZ();
-                    if (VoidClamMod.makeStub(world, cx, cy, cz) < 1) {
+                    if (VoidClamMod.makeStub(world, cx, cy, cz) == null) {
                         world.setBlockState(m, st);
                     }
                 }

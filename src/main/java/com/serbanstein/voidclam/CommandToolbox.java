@@ -8,7 +8,10 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -46,13 +49,13 @@ public final class CommandToolbox {
      * is in effect. Otherwise skips the task body if shutdown, kill victim, or unloaded center chunk applies; when skipped, runs
      * {@code onAbortedBeforeRun} if non-null.
      *
-     * @param pathfindingModuleSlot module index {@code tno} for this work, or 0 if unknown (position-only fallback for kill matching)
+     * @param pathfindingClamId kill barrier and unload checks use this id
      */
     public static void submitPathfinding(
         ServerWorld world,
         int clamCenterX,
         int clamCenterZ,
-        int pathfindingModuleSlot,
+        @Nullable UUID pathfindingClamId,
         Runnable onAbortedBeforeRun,
         Runnable task
     ) {
@@ -63,7 +66,7 @@ public final class CommandToolbox {
             return;
         }
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
-            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -73,7 +76,7 @@ public final class CommandToolbox {
             return;
         }
         pathfinderExecutor.execute(() -> {
-            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingModuleSlot)) {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -123,6 +126,7 @@ public final class CommandToolbox {
                     if (red || black) {
                         long delay = Math.abs(iy - y) * 20L;
                         VoidClamMod.scheduleDelayed(world, delay, () -> {
+                            if (ux == x && uy == y && uz == z) return;
                             world.setBlockState(new BlockPos(ux, uy, uz), Blocks.NETHER_WART_BLOCK.getDefaultState());
                             VoidClamSfx.playBlockSound(world, null, ux + 0.5, uy + 0.5, uz + 0.5,
                                 SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
@@ -131,6 +135,7 @@ public final class CommandToolbox {
                     if (black) {
                         long delay = Math.abs(iy - y) * 30L;
                         VoidClamMod.scheduleDelayed(world, delay, () -> {
+                            if (ux == x && uy == y && uz == z) return;
                             world.setBlockState(new BlockPos(ux, uy, uz), Blocks.OBSIDIAN.getDefaultState());
                             VoidClamSfx.playBlockSound(world, null, ux + 0.5, uy + 0.5, uz + 0.5,
                                 SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
@@ -205,10 +210,9 @@ public final class CommandToolbox {
         }
     }
 
-    public static void clamReSize(ServerWorld world, int tno, int tsize) {
-        Module[] modules = VoidClamMod.getModules();
-        if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
-        Module m = modules[tno];
+    public static void clamReSize(ServerWorld world, UUID clamId, int tsize) {
+        Module m = VoidClamMod.getModuleById(clamId);
+        if (m == null) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         net.minecraft.block.Block mat = Blocks.NETHER_WART_BLOCK;
         int csize = m.currentSize;
@@ -235,49 +239,58 @@ public final class CommandToolbox {
             }
         }
 
-        for (int i = y + csize; i <= y + tsize - 1; i++)
-            world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
-        for (int i = y - csize; i >= y - tsize + 1; i--)
-            world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        for (int i = y + csize; i <= y + tsize - 1; i++) {
+            if (i != y)
+                world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        }
+        for (int i = y - csize; i >= y - tsize + 1; i--) {
+            if (i != y)
+                world.setBlockState(new BlockPos(x, i, z), mat.getDefaultState());
+        }
 
         VoidClamMod.scheduleDelayed(world, timer * 20L, () -> buildShell(world, x, y, z, tsize, Blocks.OBSIDIAN));
 
         m.currentSize = tsize;
-        VoidClamMod.save(world.getServer());
+        VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
+        VoidClamMod.maybeSaveLegacyModulesSiva(world.getServer());
 
         int ts = tsize - 2;
         for (int ix = x - ts + 1; ix <= x; ix++) {
             int iz = z - ts + 1 + Math.abs(ix - x);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
         for (int ix = x - ts + 1; ix <= x; ix++) {
             int iz = z + ts - 1 - Math.abs(ix - x);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
         for (int ix = x + ts - 1; ix >= x; ix--) {
             int iz = z - ts + 1 + Math.abs(ix - x);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
         for (int ix = x + ts - 1; ix >= x; ix--) {
             int iz = z + ts - 1 - Math.abs(x - ix);
-            world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
+            if (ix != x || iz != z)
+                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
         }
+        VoidClamMod.syncModuleToHeartBlock(world, clamId);
     }
 
     /** Start light/ore search for module. Scans box off-thread, pathfinds to closest target. */
-    public static void clamReach(ServerWorld world, int tno) {
-        Module[] modules = VoidClamMod.getModules();
-        if (tno < 1 || tno > VoidClamMod.getModuleNumber() || modules[tno] == null) return;
-        Module m = modules[tno];
+    public static void clamReach(ServerWorld world, UUID clamId) {
+        Module m = VoidClamMod.getModuleById(clamId);
+        if (m == null) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
-        int slot = tno;
-        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot)) return;
+        m.ensureClamId();
+        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) return;
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
-        submitPathfinding(world, m.x, m.z, slot, () -> m.busyFlagMainCycle = 0, () -> {
+        submitPathfinding(world, m.x, m.z, m.clamId, () -> m.busyFlagMainCycle = 0, () -> {
             try {
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, slot)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) {
                     m.busyFlagMainCycle = 0;
                     return;
                 }
@@ -294,7 +307,7 @@ public final class CommandToolbox {
                     for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
                         for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
                             for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
+                                if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
                                     break outerScan;
                                 }
                                 BlockPos pos = new BlockPos(ix, iy, iz);
@@ -311,7 +324,7 @@ public final class CommandToolbox {
                             }
                         }
                     }
-                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
                         m.busyFlagMainCycle = 0;
                         return;
                     }
@@ -326,7 +339,7 @@ public final class CommandToolbox {
                     m.oresBlackList.add(closest.toImmutable());
                 }
 
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, slot)) {
+                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
                     if (closest != null) {
                         if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
                             m.lightsBlackList.remove(closest.toImmutable());
@@ -338,7 +351,7 @@ public final class CommandToolbox {
                     return;
                 }
                 if (closest != null) {
-                    Pathfinder.calculatePath(world, tno, x, y, z, closest.getX(), closest.getY(), closest.getZ());
+                    Pathfinder.calculatePath(world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ());
                 } else {
                     m.busyFlagMainCycle = 0;
                 }

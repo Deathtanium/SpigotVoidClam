@@ -11,7 +11,8 @@ This folder describes **game and simulation behavior** in terms any port can reu
 | [[Tick-order-and-intervals]] | Per-tick order, repeating intervals, which world drives what |
 | [[Threading-queues-locks]] | Executor, `targets` queue, scheduler, `busyFlagMainCycle` |
 | [[Pathfinding-and-reach]] | A*, light vs ore tie-break, `buildPath`, stamina, blacklists |
-| [[Grow-repair-and-energy]] | Safe grow/repair, auto routine, energy rules |
+| [[Grow-repair-and-energy]] | Safe grow/repair, per-heart auto routine, energy rules |
+| [[Hivemind-future]] | Future inter-clam coordination (duplicates, WorldEdit) |
 | [[Presentation-and-effects]] | Tendril pulses, defense, heartbeat (behavioral summary) |
 | [[Key-classes]] | File → responsibility cheat sheet |
 
