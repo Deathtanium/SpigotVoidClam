@@ -252,7 +252,7 @@ public final class CommandToolbox {
 
         m.currentSize = tsize;
         VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
-        VoidClamMod.save(world.getServer());
+        VoidClamMod.maybeSaveLegacyModulesSiva(world.getServer());
 
         int ts = tsize - 2;
         for (int ix = x - ts + 1; ix <= x; ix++) {

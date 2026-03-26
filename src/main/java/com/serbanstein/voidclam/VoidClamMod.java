@@ -27,8 +27,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Central state: modules keyed by {@link Module#clamId}, path-result queue, grow-pending coordination,
- * CSV save format ({@code modules.siva} in world save root) for migration/backup.
+ * Central state: modules keyed by {@link Module#clamId}, path-result queue, grow-pending coordination.
+ * Persistent game state lives on heart block entities; {@code modules.siva} is an optional legacy mirror
+ * (loaded if present; written only when the file exists or via {@link #save} / import).
  */
 public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
@@ -234,7 +235,7 @@ public final class VoidClamMod {
                             }
                         }
                         if (saveAfterThis) {
-                            save(server);
+                            maybeSaveLegacyModulesSiva(server);
                         }
                     } finally {
                         asyncPathfindingKillVictimClamId = null;
@@ -318,6 +319,41 @@ public final class VoidClamMod {
         return true;
     }
 
+    /**
+     * Ensure {@link #modulesById} has a {@link Module} for this heart when the chunk loads or after restart without CSV.
+     * If the same {@code clamId} already exists at this position, keeps the runtime module (in-memory may be newer than BE).
+     * Otherwise registers or replaces from block entity data.
+     */
+    public static void ensureRuntimeModuleForHeart(ServerWorld world, BlockPos pos, VoidClamHeartBlockEntity heart) {
+        Module fromBe = new Module();
+        heart.getModuleData().applyToModule(fromBe);
+        fromBe.x = pos.getX();
+        fromBe.y = pos.getY();
+        fromBe.z = pos.getZ();
+        fromBe.ensureClamId();
+        UUID id = fromBe.clamId;
+
+        Module sameId = modulesById.get(id);
+        if (sameId != null
+            && sameId.x == fromBe.x && sameId.y == fromBe.y && sameId.z == fromBe.z) {
+            return;
+        }
+
+        Module atPos = findModuleAt(pos);
+        if (atPos != null && !atPos.clamId.equals(id)) {
+            modulesById.remove(atPos.clamId);
+        }
+        if (sameId != null
+            && (sameId.x != fromBe.x || sameId.y != fromBe.y || sameId.z != fromBe.z)) {
+            modulesById.remove(id);
+        }
+
+        if (!registerModule(fromBe)) {
+            return;
+        }
+        maybeSaveLegacyModulesSiva(world.getServer());
+    }
+
     /** Place or replace the block at {@code pos} with a heart whose BE matches {@code m}. */
     public static void placeHeartBlockForModule(ServerWorld world, BlockPos pos, Module m) {
         world.setBlockState(pos, VoidClamBlocks.HEART_BLOCK.getDefaultState());
@@ -339,7 +375,7 @@ public final class VoidClamMod {
             Module existing = findModuleAt(pos);
             if (existing != null) {
                 heart.syncFromModule(existing);
-                save(world.getServer());
+                maybeSaveLegacyModulesSiva(world.getServer());
                 return;
             }
             Module m = new Module();
@@ -354,7 +390,7 @@ public final class VoidClamMod {
             }
             CommandToolbox.buildStub(world, m.x, m.y, m.z);
             heart.syncFromModule(m);
-            save(world.getServer());
+            maybeSaveLegacyModulesSiva(world.getServer());
         }
     }
 
@@ -476,11 +512,14 @@ public final class VoidClamMod {
         }
     }
 
-    /** Load modules from CSV {@code modules.siva} into {@link #modulesById}. */
-    public static void load(MinecraftServer server) {
+    /**
+     * If {@code modules.siva} exists in the save root, replace {@link #modulesById} from it (legacy primary store).
+     * If the file is absent, the registry stays empty until hearts load from chunk data.
+     */
+    public static void loadOptionalLegacyModulesSiva(MinecraftServer server) {
         Path savePath = getModulesPath(server);
-        modulesById.clear();
         if (!Files.exists(savePath)) return;
+        modulesById.clear();
         try (Scanner s = new Scanner(Files.newInputStream(savePath))) {
             while (s.hasNextLine()) {
                 if (modulesById.size() >= MAX_MODULES) break;
@@ -492,6 +531,12 @@ public final class VoidClamMod {
         } catch (IOException e) {
             // no-op
         }
+    }
+
+    /** Write {@code modules.siva} only when that file already exists (optional legacy mirror). */
+    public static void maybeSaveLegacyModulesSiva(MinecraftServer server) {
+        if (!Files.exists(getModulesPath(server))) return;
+        save(server);
     }
 
     /**
@@ -576,11 +621,11 @@ public final class VoidClamMod {
             }
         }
         if (any) {
-            save(server);
+            maybeSaveLegacyModulesSiva(server);
         }
     }
 
-    /** Save all modules to CSV (sorted by UUID for stable diffs). */
+    /** Save all modules to {@code modules.siva} (creates or overwrites). Use for {@code /voidclam save} or after legacy import. */
     public static void save(MinecraftServer server) {
         Path path = getModulesPath(server);
         Path oldPath = path.getParent().resolve("modules.siva.old");
@@ -630,7 +675,7 @@ public final class VoidClamMod {
         }
         placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
-        save(world.getServer());
+        maybeSaveLegacyModulesSiva(world.getServer());
         return m.clamId;
     }
 
@@ -754,7 +799,7 @@ public final class VoidClamMod {
                 m.currentSize = nextSize;
             }
         }
-        save(world.getServer());
+        maybeSaveLegacyModulesSiva(world.getServer());
     }
 
     public static void tickCoreCheck(ServerWorld world) {

@@ -18,6 +18,8 @@ public class VoidClamHeartBlockEntity extends BlockEntity {
     private static final int DEFENSE_INTERVAL = 5 * 20;
 
     private VoidClamHeartItemData moduleData;
+    /** Server-only: link BE data into {@link VoidClamMod} once per load (CSV no longer required at startup). */
+    private transient boolean runtimeModuleLinked;
 
     public VoidClamHeartBlockEntity(BlockPos pos, BlockState state) {
         super(VoidClamBlocks.HEART_BLOCK_ENTITY_TYPE, pos, state);
@@ -27,6 +29,10 @@ public class VoidClamHeartBlockEntity extends BlockEntity {
 
     public static void tick(World world, BlockPos pos, BlockState state, VoidClamHeartBlockEntity be) {
         if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return;
+        if (!be.runtimeModuleLinked) {
+            be.runtimeModuleLinked = true;
+            VoidClamMod.ensureRuntimeModuleForHeart(serverWorld, pos, be);
+        }
         long t = serverWorld.getTime();
         int phase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, REACH_INTERVAL);
 

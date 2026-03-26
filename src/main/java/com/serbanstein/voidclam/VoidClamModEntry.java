@@ -47,13 +47,13 @@ public class VoidClamModEntry implements ModInitializer {
     private void onServerStarted(MinecraftServer server) {
         VoidClamConfig.loadFromDisk();
         VoidClamMod.onAsyncPathfindingSessionStart();
-        VoidClamMod.load(server);
+        VoidClamMod.loadOptionalLegacyModulesSiva(server);
         VoidClamMod.migrateLoadedModulesToHeartBlocks(server);
     }
 
     private void onServerStopping(MinecraftServer server) {
         VoidClamMod.onAsyncPathfindingSessionStop();
-        VoidClamMod.save(server);
+        VoidClamMod.maybeSaveLegacyModulesSiva(server);
     }
 
     private void onServerTick(MinecraftServer server) {
