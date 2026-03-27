@@ -59,6 +59,12 @@ public final class VoidClamConfig {
     /** Max parallel async pathfinding threads. 0 = estimate from available processors (minimum 2). */
     public int astar_async_global_max_threads = 0;
     /**
+     * When {@link #astar_mode} is async: if {@code true}, build a per-job {@link PathfindChunkCache} on the server
+     * thread ({@link PathfindChunkCache#buildColumnSnapshot}) so the worker skips repeated world chunk lookups.
+     * If {@code false}, every pathfinding read uses live {@code ServerWorld#getBlockState} only.
+     */
+    public boolean astar_async_chunk_column_cache = true;
+    /**
      * Prepass BFS cell visits + A* expansions allowed for one sync-batched job before it aborts and releases the clam.
      * Stops “infinite” searches when the budget per tick is tiny or there is no path. 0 = default {@code 400_000}.
      */

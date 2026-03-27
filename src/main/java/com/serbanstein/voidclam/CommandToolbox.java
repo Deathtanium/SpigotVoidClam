@@ -375,9 +375,11 @@ public final class CommandToolbox {
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
-        final PathfindChunkCache pathColumnCache = VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.ASYNC
-            ? PathfindChunkCache.buildColumnSnapshot(world, m)
-            : null;
+        VoidClamConfig cfgReach = VoidClamConfig.get();
+        final PathfindChunkCache pathColumnCache =
+            cfgReach.astarModeEnum() == VoidClamConfig.AstarMode.ASYNC && cfgReach.astar_async_chunk_column_cache
+                ? PathfindChunkCache.buildColumnSnapshot(world, m)
+                : null;
 
         submitPathfinding(world, m.x, m.z, m.clamId, () -> VoidClamMod.releasePathfindingMainCycle(m), () -> {
             try {
