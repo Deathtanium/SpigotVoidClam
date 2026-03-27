@@ -10,19 +10,28 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Snapshot of {@link WorldChunk} columns overlapping the pathfinding AABB for one module, built once per
- * {@link Pathfinder.AStarJob#step} / async {@link Pathfinder#calculatePath} prepass so A* avoids repeated
- * {@link ServerWorld#getChunk} work. Positions in unloaded columns fall back to the live world.
+ * Column snapshot for pathfinding: one {@link WorldChunk} reference per chunk column in the pathfinding AABB.
+ * <p>
+ * <strong>Threading:</strong> {@link #buildColumnSnapshot} must run on the server thread (it calls
+ * {@link ServerWorld#getChunk}). The resulting instance may then be used from a pathfinder worker to read
+ * {@link #getBlockState} without repeated chunk-map lookups. If the world changes before the path is applied,
+ * {@link Pathfinder#buildPath} re-reads the live world for each step (small footprint).
  */
 public final class PathfindChunkCache {
     private final ServerWorld world;
     private final Map<Long, WorldChunk> columns;
 
-    public PathfindChunkCache(ServerWorld world, Module mod) {
+    private PathfindChunkCache(ServerWorld world, Map<Long, WorldChunk> columns) {
         this.world = world;
+        this.columns = columns;
+    }
+
+    /**
+     * Server thread only: resolves every loaded column in the module's pathfinding AABB once.
+     */
+    public static PathfindChunkCache buildColumnSnapshot(ServerWorld world, Module mod) {
         int c = mod.currentSize;
         int cx = mod.x;
-        int cy = mod.y;
         int cz = mod.z;
         int minBx = cx - Pathfinder.PATHFINDING_RANGE_XZ_HALF * c;
         int maxBx = cx + Pathfinder.PATHFINDING_RANGE_XZ_HALF * c;
@@ -45,7 +54,12 @@ public final class PathfindChunkCache {
                 }
             }
         }
-        this.columns = m;
+        return new PathfindChunkCache(world, m);
+    }
+
+    /** No column snapshot; every {@link #getBlockState} uses {@link ServerWorld#getBlockState}. */
+    public static PathfindChunkCache liveWorldOnly(ServerWorld world) {
+        return new PathfindChunkCache(world, Map.of());
     }
 
     private static long columnKey(int chunkX, int chunkZ) {

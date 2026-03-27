@@ -132,7 +132,7 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("debug <target> — flags, grow/async globals, sync A*, executor + scheduler stats"), false);
                         s.sendFeedback(() -> Text.literal("save — write modules.siva (creates file) | ingestlegacy — import modules.siva into hearts"), false);
                         s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping | testfile"), false);
-                        s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode — each sync_batched or async"), false);
+                        s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode; astar_async_chunk_column_cache (async A* only)"), false);
                         return 1;
                     }))
                 .then(CommandManager.literal("make")

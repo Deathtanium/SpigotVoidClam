@@ -196,7 +196,7 @@ public final class Pathfinder {
                 finishFail(modForFlag);
                 return 0;
             }
-            activePathChunkCache = new PathfindChunkCache(world, modForFlag);
+            activePathChunkCache = PathfindChunkCache.buildColumnSnapshot(world, modForFlag);
             if (phase == AStarPhase.PREPASS) {
                 return stepPrepass(world, modForFlag, budget);
             }
@@ -614,8 +614,20 @@ public final class Pathfinder {
      * {@link VoidClamConfig.AstarMode#SYNC_BATCHED}: enqueues a server-tick job whose prepass and A* steps share the main thread.
      * {@link VoidClamConfig.AstarMode#ASYNC}: pathfinder worker runs prepass BFS then the A* loop on that same thread; unreachable
      * prepass clears {@code busyFlagMainCycle} and returns before building the open list. {@code bfs_mode} does not change prepass.
+     * <p>
+     * Async: pass a snapshot from {@link PathfindChunkCache#buildColumnSnapshot} (server thread) or {@code null} for live world reads only.
      */
     public static boolean calculatePath(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+        return calculatePath(world, clamId, sx, sy, sz, gx, gy, gz, null);
+    }
+
+    public static boolean calculatePath(
+        ServerWorld world,
+        UUID clamId,
+        int sx, int sy, int sz,
+        int gx, int gy, int gz,
+        @org.jetbrains.annotations.Nullable PathfindChunkCache prebuiltColumnSnapshot
+    ) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) {
             Module early = VoidClamMod.getModuleById(clamId);
             if (early != null) {
@@ -639,7 +651,9 @@ public final class Pathfinder {
             enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
             return true;
         }
-        PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag);
+        PathfindChunkCache asyncPathCache = prebuiltColumnSnapshot != null
+            ? prebuiltColumnSnapshot
+            : PathfindChunkCache.liveWorldOnly(world);
         if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag, asyncPathCache)) {
             VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
