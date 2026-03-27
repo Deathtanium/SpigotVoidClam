@@ -10,16 +10,24 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Snapshot of {@link WorldChunk} columns overlapping the pathfinding AABB for one module, built once per
- * {@link Pathfinder.AStarJob#step} / async {@link Pathfinder#calculatePath} prepass so A* avoids repeated
- * {@link ServerWorld#getChunk} work. Positions in unloaded columns fall back to the live world.
+ * Optional snapshot of {@link WorldChunk} columns overlapping the pathfinding AABB for one module.
+ * <p>
+ * {@linkplain Pathfinder#calculatePath Async A*} runs on {@link com.serbanstein.voidclam.CommandToolbox#pathfindingExecutor()}
+ * worker threads; {@link WorldChunk} block-state reads are not safe there while the server thread mutates chunks.
+ * For async jobs, pass {@code snapshotColumns == false} so {@link #getBlockState} uses {@link ServerWorld#getBlockState}
+ * only (same as pre-cache behavior). Sync-batched {@link Pathfinder.AStarJob} steps on the server thread and may use
+ * {@code snapshotColumns == true} to avoid repeated {@link ServerWorld#getChunk} work.
  */
 public final class PathfindChunkCache {
     private final ServerWorld world;
     private final Map<Long, WorldChunk> columns;
 
-    public PathfindChunkCache(ServerWorld world, Module mod) {
+    public PathfindChunkCache(ServerWorld world, Module mod, boolean snapshotColumns) {
         this.world = world;
+        if (!snapshotColumns) {
+            this.columns = Map.of();
+            return;
+        }
         int c = mod.currentSize;
         int cx = mod.x;
         int cy = mod.y;

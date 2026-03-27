@@ -196,7 +196,7 @@ public final class Pathfinder {
                 finishFail(modForFlag);
                 return 0;
             }
-            activePathChunkCache = new PathfindChunkCache(world, modForFlag);
+            activePathChunkCache = new PathfindChunkCache(world, modForFlag, true);
             if (phase == AStarPhase.PREPASS) {
                 return stepPrepass(world, modForFlag, budget);
             }
@@ -639,7 +639,7 @@ public final class Pathfinder {
             enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
             return true;
         }
-        PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag);
+        PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag, false);
         if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag, asyncPathCache)) {
             VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
