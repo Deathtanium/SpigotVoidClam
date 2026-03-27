@@ -9,6 +9,7 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Objects;
 
 /**
  * Server config at {@code config/voidclam.json}. Created with defaults if missing.
@@ -61,8 +62,26 @@ public final class VoidClamConfig {
     /**
      * Prepass BFS cell visits + A* expansions allowed for one sync-batched job before it aborts and releases the clam.
      * Stops “infinite” searches when the budget per tick is tiny or there is no path. 0 = default {@code 400_000}.
+     * {@code -1} = no cap (debug only; can hang or OOM on huge searches). Values &lt; {@code -1} are cleared to null.
+     * Use {@link Long} so Gson reliably reads {@code -1} from JSON (a primitive {@code int} field can misbehave with some configs).
      */
-    public int astar_sync_max_total_expansions_per_job = 0;
+    public Long astar_sync_max_total_expansions_per_job;
+
+    /**
+     * When {@code true}, A* / prepass use a per-job {@link PathfindChunkCache} snapshot.
+     * When {@code false}, every cell uses live {@link ServerWorld#getBlockState} (debug / legacy).
+     * {@code null} after load = default {@code true} (Gson omits key otherwise {@code boolean} would read as false).
+     */
+    public Boolean pathfind_chunk_cache;
+
+    /**
+     * When {@code true} (default), {@link Module#lightsCache} is filled via {@link VoidClamMod#tickLightCacheRebuildStep}
+     * and block-change deltas; {@link CommandToolbox#clamReach} reads the cache.
+     * When {@code false}, cache maintenance is skipped and clamReach rescans the full light seek box off-thread each run
+     * (legacy behavior before the mixin-backed cache).
+     * {@code null} after load = default {@code true}.
+     */
+    public Boolean light_block_cache;
 
     public int clam_size_max = 15;
     /**
@@ -121,7 +140,9 @@ public final class VoidClamConfig {
         if (sfx_volume_multiplier < 0) sfx_volume_multiplier = 0;
         if (astar_sync_global_max_steps_per_tick < 0) astar_sync_global_max_steps_per_tick = 0;
         if (astar_async_global_max_threads < 0) astar_async_global_max_threads = 0;
-        if (astar_sync_max_total_expansions_per_job < 0) astar_sync_max_total_expansions_per_job = 0;
+        if (astar_sync_max_total_expansions_per_job != null && astar_sync_max_total_expansions_per_job < -1L) {
+            astar_sync_max_total_expansions_per_job = null;
+        }
         if (bfs_mode != null && bfs_mode.equalsIgnoreCase("async")) {
             bfs_mode = "async";
         } else {
@@ -174,14 +195,41 @@ public final class VoidClamConfig {
         return Math.max(ASTAR_SYNC_MIN_STEPS_PER_TICK, Math.max(1, base / 4));
     }
 
-    /** Max prepass visits + A* expansions for one {@link Pathfinder} sync job; then {@link VoidClamMod#releasePathfindingMainCycle}. */
-    public int effectiveSyncMaxTotalExpansionsPerJob() {
-        int v = astar_sync_max_total_expansions_per_job;
-        if (v <= 0) {
-            v = 400_000;
+    /**
+     * Max prepass visits + A* expansions for one {@link Pathfinder} job; then {@link VoidClamMod#releasePathfindingMainCycle}.
+     * {@code -1} in config yields {@link Long#MAX_VALUE} (uncapped, debug).
+     */
+    public long effectiveSyncMaxTotalExpansionsPerJob() {
+        Long box = astar_sync_max_total_expansions_per_job;
+        if (Objects.equals(box, -1L)) {
+            return Long.MAX_VALUE;
         }
-        return Math.min(5_000_000, Math.max(5_000, v));
+        long raw = box == null ? 0L : box;
+        if (raw <= 0L) {
+            raw = 400_000L;
+        }
+        return Math.min(5_000_000L, Math.max(5_000L, raw));
     }
+
+    /**
+     * {@code true} when enabled or key absent in JSON; only {@code false} when {@link #pathfind_chunk_cache} is explicitly false.
+     */
+    public boolean pathfindChunkCacheEnabled() {
+        return !Boolean.FALSE.equals(pathfind_chunk_cache);
+    }
+
+    /** {@code true} when enabled or key absent; only {@code false} when {@link #light_block_cache} is explicitly false. */
+    public boolean lightBlockCacheEnabled() {
+        return !Boolean.FALSE.equals(light_block_cache);
+    }
+
+    /**
+     * When {@code true}, {@link Pathfinder} logs {@code [voidclam/Pathfinder][trace]} INFO lines to the server log (console)
+     * for BFS prepass progress (sync-batched slices and async full runs), A* iterations (open/closed sizes, running vs done),
+     * and detected {@link Node#parent} cycles during path apply.
+     * Default off.
+     */
+    public boolean pathfinding_trace = false;
 
     public int effectiveAsyncThreadPoolSize() {
         return effectiveAsyncThreadPoolSize(astar_async_global_max_threads);

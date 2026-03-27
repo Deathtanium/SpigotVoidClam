@@ -5,9 +5,11 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.entity.data.TrackedData;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.world.World;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -26,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Manages pulsing tendril display entities: spawns a red nether wart BlockDisplay
@@ -148,6 +152,8 @@ public final class TendrilPulseManager {
 
     /** Incremental omni-pulse BFS job: runs over multiple ticks so main thread doesn't block. */
     private static volatile BlockBfs.MergedOmniBfsJob omniPulseJob = null;
+    /** Dimension of the active sync omni job (or async run in progress). */
+    private static volatile @Nullable RegistryKey<World> omniPulseJobDimension = null;
     /** When {@link VoidClamConfig.BfsMode#ASYNC}: full omni graph runs on {@link CommandToolbox#pathfindingExecutor()}. */
     private static volatile boolean omniAsyncRunning = false;
 
@@ -166,6 +172,7 @@ public final class TendrilPulseManager {
         List<BlockBfs.MergedOmniBfsJob.SingleSource> bfsList = new ArrayList<>();
         for (Module m : VoidClamMod.getAllModules()) {
             if (m == null || m.status != 1) continue;
+            if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             BlockPos center = new BlockPos(m.x, m.y, m.z);
             if (!world.isChunkLoaded(center)) continue;
             BlockState startState = world.getBlockState(center);
@@ -177,6 +184,7 @@ public final class TendrilPulseManager {
         if (VoidClamConfig.get().bfsModeEnum() == VoidClamConfig.BfsMode.ASYNC) {
             MinecraftServer server = world.getServer();
             omniAsyncRunning = true;
+            omniPulseJobDimension = world.getRegistryKey();
             CommandToolbox.pathfindingExecutor().execute(() -> {
                 CommandToolbox.pathfinderWorkerTaskBegin("omniPulse MergedOmniBfsJob sources=" + bfsList.size());
                 try {
@@ -187,10 +195,14 @@ public final class TendrilPulseManager {
                     Map<BlockPos, Integer> result = job.getMergedResult();
                     server.execute(() -> {
                         omniAsyncRunning = false;
+                        omniPulseJobDimension = null;
                         scheduleOmniPulsesFromMergedResult(world, result);
                     });
                 } catch (Throwable t) {
-                    server.execute(() -> omniAsyncRunning = false);
+                    server.execute(() -> {
+                        omniAsyncRunning = false;
+                        omniPulseJobDimension = null;
+                    });
                     throw t;
                 } finally {
                     CommandToolbox.pathfinderWorkerTaskEnd();
@@ -199,6 +211,7 @@ public final class TendrilPulseManager {
             return;
         }
         omniPulseJob = new BlockBfs.MergedOmniBfsJob(world, bfsList);
+        omniPulseJobDimension = world.getRegistryKey();
     }
 
     private static void scheduleOmniPulsesFromMergedResult(ServerWorld world, Map<BlockPos, Integer> result) {
@@ -222,12 +235,15 @@ public final class TendrilPulseManager {
      */
     public static void tickOmniPulseJob(ServerWorld world) {
         BlockBfs.MergedOmniBfsJob job = omniPulseJob;
-        if (job == null) return;
+        if (job == null || omniPulseJobDimension == null || !world.getRegistryKey().equals(omniPulseJobDimension)) {
+            return;
+        }
         int batch = omniBfsExpansionsPerServerTick();
         job.step(batch, MAX_OMNI_TOTAL_BLOCKS);
         if (!job.isDone()) return;
         Map<BlockPos, Integer> result = job.getMergedResult();
         omniPulseJob = null;
+        omniPulseJobDimension = null;
         scheduleOmniPulsesFromMergedResult(world, result);
     }
 

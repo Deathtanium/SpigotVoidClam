@@ -1,6 +1,9 @@
 package com.serbanstein.voidclam;
 
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -11,8 +14,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * One VoidClam module (SIVA node). Types: 0 stub, 1 teen, 2 broadcast, 3 arming, 4 complex, -1 lightning rod.
  */
 public class Module {
-    /** Stable identity for pathfinding/kill matching; survives CSV slot shifts when persisted. */
+    /** Stable identity for pathfinding/kill matching. */
     public UUID clamId;
+    /**
+     * Dimension of the searing heart (blast furnace) at ({@link #x},{@link #y},{@link #z}).
+     * {@code null} means {@link World#OVERWORLD} for legacy stacks/saves without NBT.
+     */
+    public @Nullable RegistryKey<World> worldKey;
+
+    /** Registry key used for ticking and pathfinding; never null. */
+    public RegistryKey<World> dimensionWorldKey() {
+        return worldKey != null ? worldKey : World.OVERWORLD;
+    }
     public int type;
     public int x;
     public int y;

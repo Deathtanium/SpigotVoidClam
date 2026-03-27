@@ -6,6 +6,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.loot.context.LootContextParameters;
 import net.minecraft.loot.context.LootWorldContext;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import org.spongepowered.asm.mixin.Mixin;
@@ -42,7 +43,8 @@ public abstract class AbstractFurnaceBlockMixin {
             }
         }
         if (pos == null) return;
-        if (VoidClamMod.findModuleAt(pos) != null) {
+        ServerWorld lootWorld = builder.getWorld();
+        if (lootWorld != null && VoidClamMod.findModuleAt(lootWorld, pos) != null) {
             cir.setReturnValue(Collections.emptyList());
         }
     }

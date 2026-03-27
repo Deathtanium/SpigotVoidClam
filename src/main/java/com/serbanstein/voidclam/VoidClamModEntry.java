@@ -30,6 +30,7 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 
 /** Fabric mod entrypoint: lifecycle, server tick hook, and commands. */
@@ -56,7 +57,7 @@ public class VoidClamModEntry implements ModInitializer {
             if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return ActionResult.PASS;
             BlockPos pos = hitResult.getBlockPos();
             if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return ActionResult.PASS;
-            if (VoidClamMod.findModuleAt(pos) == null) return ActionResult.PASS;
+            if (VoidClamMod.findModuleAt(serverWorld, pos) == null) return ActionResult.PASS;
             VoidClamMod.applySearingHeartBlockLabel(serverWorld, pos);
             return ActionResult.PASS;
         });
@@ -71,42 +72,47 @@ public class VoidClamModEntry implements ModInitializer {
     private void onServerStarted(MinecraftServer server) {
         VoidClamConfig.loadFromDisk();
         VoidClamMod.onAsyncPathfindingSessionStart();
-        VoidClamMod.loadOptionalLegacyModulesSiva(server);
         VoidClamMod.migrateLoadedModulesToHeartBlocks(server);
-        ServerWorld overworld = server.getOverworld();
-        if (overworld != null) {
-            VoidClamMod.seedAutoGrowScheduleForAllModules(overworld);
+        for (ServerWorld w : server.getWorlds()) {
+            VoidClamMod.seedAutoGrowScheduleForAllModules(w);
         }
     }
 
     private void onServerStopping(MinecraftServer server) {
         VoidClamMod.onAsyncPathfindingSessionStop();
-        VoidClamMod.maybeSaveLegacyModulesSiva(server);
     }
 
     private void onServerTick(MinecraftServer server) {
-        ServerWorld world = server.getOverworld();
-        if (world == null) return;
-        VoidClamMod.drainPendingLightCacheDeltas(world);
-        long tick = world.getTime();
-
+        VoidClamMod.drainPendingLightCacheDeltas();
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             Pathfinder.tickSyncAStarJobs(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
         }
-        VoidClamMod.tickLoadedClamCores(world);
-        VoidClamMod.tickTargets(world);
-        VoidClamModScheduler.tick(world);
         for (ServerWorld w : server.getWorlds()) {
+            VoidClamMod.tickLoadedClamCores(w);
             VoidClamMod.tickGrowPendingCheck(w);
             TendrilPulseManager.tick(w);
+            VoidClamModScheduler.tick(w);
+            TendrilPulseManager.tickOmniPulseJob(w);
         }
-        TendrilPulseManager.tickOmniPulseJob(world);
+        VoidClamMod.tickTargets(server);
 
-        if (tick % TICK_OMNI_PULSE == 0)
-            TendrilPulseManager.runOmnidirectionalPulse(world);
+        ServerWorld clockWorld = server.getOverworld();
+        if (clockWorld == null) {
+            Iterator<ServerWorld> worlds = server.getWorlds().iterator();
+            if (worlds.hasNext()) {
+                clockWorld = worlds.next();
+            }
+        }
+        long tick = clockWorld != null ? clockWorld.getTime() : 0L;
+        if (tick % TICK_OMNI_PULSE == 0) {
+            for (ServerWorld w : server.getWorlds()) {
+                TendrilPulseManager.runOmnidirectionalPulse(w);
+            }
+        }
         if (tick % TICK_CLEANUP == 0) {
-            for (ServerWorld w : server.getWorlds())
+            for (ServerWorld w : server.getWorlds()) {
                 TendrilPulseManager.cleanupStrayDisplays(w);
+            }
         }
     }
 
@@ -130,9 +136,8 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect get <target>"), false);
                         s.sendFeedback(() -> Text.literal("info [target] — list all (console) or nearest (player)"), false);
                         s.sendFeedback(() -> Text.literal("debug <target> — flags, grow/async globals, sync A*, executor + scheduler stats"), false);
-                        s.sendFeedback(() -> Text.literal("save — write modules.siva (creates file) | ingestlegacy — import modules.siva into hearts"), false);
-                        s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping | testfile"), false);
-                        s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode — each sync_batched or async"), false);
+                        s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping — state lives in searing heart blocks"), false);
+                        s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode; pathfind_chunk_cache (bool, default true — false = live getBlockState per cell)"), false);
                         return 1;
                     }))
                 .then(CommandManager.literal("make")
@@ -224,7 +229,6 @@ public class VoidClamModEntry implements ModInitializer {
                                             Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                             boolean val = BoolArgumentType.getBool(ctx, "value");
                                             m.seekOres = val;
-                                            VoidClamMod.save(ctx.getSource().getServer());
                                             ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek ores = " + val));
                                             return 1;
                                         } catch (CommandSyntaxException e) {
@@ -253,7 +257,6 @@ public class VoidClamModEntry implements ModInitializer {
                                             Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                             boolean val = BoolArgumentType.getBool(ctx, "value");
                                             m.protectItself = val;
-                                            VoidClamMod.save(ctx.getSource().getServer());
                                             ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " protect itself = " + val));
                                             return 1;
                                         } catch (CommandSyntaxException e) {
@@ -282,7 +285,6 @@ public class VoidClamModEntry implements ModInitializer {
                                             Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                             boolean val = BoolArgumentType.getBool(ctx, "value");
                                             m.seekLights = val;
-                                            VoidClamMod.save(ctx.getSource().getServer());
                                             ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek lights = " + val));
                                             return 1;
                                         } catch (CommandSyntaxException e) {
@@ -307,10 +309,11 @@ public class VoidClamModEntry implements ModInitializer {
                         .executes(ctx -> {
                             try {
                                 Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                ServerWorld world = ctx.getSource().getWorld();
+                                MinecraftServer server = ctx.getSource().getServer();
+                                ServerWorld modWorld = VoidClamMod.getWorldForModule(server, m);
                                 ServerCommandSource src = ctx.getSource();
                                 src.sendFeedback(() -> Text.literal("--- voidclam debug " + m.clamId + " ---"), false);
-                                for (String line : VoidClamMod.debugModuleFlagLines(m, world)) {
+                                for (String line : VoidClamMod.debugModuleFlagLines(server, m)) {
                                     final String l = line;
                                     src.sendFeedback(() -> Text.literal(l), false);
                                 }
@@ -326,9 +329,11 @@ public class VoidClamModEntry implements ModInitializer {
                                     final String l = line;
                                     src.sendFeedback(() -> Text.literal(l), false);
                                 }
-                                for (String line : VoidClamModScheduler.debugSchedulerLinesForWorld(world)) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
+                                if (modWorld != null) {
+                                    for (String line : VoidClamModScheduler.debugSchedulerLinesForWorld(modWorld)) {
+                                        final String l = line;
+                                        src.sendFeedback(() -> Text.literal(l), false);
+                                    }
                                 }
                                 return 1;
                             } catch (CommandSyntaxException e) {
@@ -399,18 +404,6 @@ public class VoidClamModEntry implements ModInitializer {
                                 return 0;
                             }
                         })))
-                .then(CommandManager.literal("save")
-                    .executes(ctx -> {
-                        VoidClamMod.save(ctx.getSource().getServer());
-                        ctx.getSource().sendMessage(Text.literal("Saved"));
-                        return 1;
-                    }))
-                .then(CommandManager.literal("ingestlegacy")
-                    .executes(ctx -> {
-                        String msg = VoidClamMod.importLegacyModulesSiva(ctx.getSource().getServer());
-                        ctx.getSource().sendFeedback(() -> Text.literal(msg), true);
-                        return 1;
-                    }))
                 .then(CommandManager.literal("cleanup")
                     .executes(ctx -> {
                         int count = 0;
@@ -480,19 +473,6 @@ public class VoidClamModEntry implements ModInitializer {
                             .withUnderline(true)
                             .withHoverEvent(new HoverEvent.ShowText(Text.literal("Click to copy UUID"))));
                         ctx.getSource().sendMessage(Text.literal("Nearest voidclam UUID: ").append(copiable));
-                        return 1;
-                    }))
-                .then(CommandManager.literal("testfile")
-                    .executes(ctx -> {
-                        try {
-                            var path = ctx.getSource().getServer().getSavePath(net.minecraft.util.WorldSavePath.ROOT).resolve("modules.siva");
-                            if (java.nio.file.Files.exists(path)) {
-                                java.nio.file.Files.lines(path).forEach(line ->
-                                    ctx.getSource().sendMessage(Text.literal(line)));
-                            }
-                        } catch (Exception e) {
-                            ctx.getSource().sendError(Text.literal(e.getMessage()));
-                        }
                         return 1;
                     }))
         );

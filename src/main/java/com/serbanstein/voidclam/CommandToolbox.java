@@ -338,7 +338,6 @@ public final class CommandToolbox {
 
         m.currentSize = tsize;
         VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
-        VoidClamMod.maybeSaveLegacyModulesSiva(world.getServer());
         VoidClamMod.startLightCacheRebuild(m);
 
         int ts = tsize - 2;
@@ -368,6 +367,7 @@ public final class CommandToolbox {
     public static void clamReach(ServerWorld world, UUID clamId) {
         Module m = VoidClamMod.getModuleById(clamId);
         if (m == null || m.status != 1) return;
+        if (!world.getRegistryKey().equals(m.dimensionWorldKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         m.ensureClamId();
         if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) return;
@@ -385,7 +385,7 @@ public final class CommandToolbox {
                     VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
-                int x = m.x, y = m.y, z = m.z, cSize = m.currentSize;
+                int x = m.x, y = m.y, z = m.z, cSize = Math.max(1, m.currentSize);
                 BlockPos modPos = new BlockPos(x, y, z);
                 BlockPos closestLight = null;
                 double closestLightDist = Double.MAX_VALUE;
@@ -394,18 +394,49 @@ public final class CommandToolbox {
 
                 if (m.seekLights || m.seekOres) {
                     if (m.seekLights) {
-                        for (long packed : m.lightsCache) {
-                            if (m.lightsBlackList.contains(packed)) {
-                                continue;
+                        if (VoidClamConfig.get().lightBlockCacheEnabled()) {
+                            for (long packed : m.lightsCache) {
+                                if (m.lightsBlackList.contains(packed)) {
+                                    continue;
+                                }
+                                BlockPos pos = BlockPos.fromLong(packed);
+                                if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+                                net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                                if (!VoidClamMod.isLight(block)) continue;
+                                double dist = modPos.getSquaredDistance(pos);
+                                if (dist < closestLightDist) {
+                                    closestLightDist = dist;
+                                    closestLight = pos.toImmutable();
+                                }
                             }
-                            BlockPos pos = BlockPos.fromLong(packed);
-                            if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
-                            net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
-                            if (!VoidClamMod.isLight(block)) continue;
-                            double dist = modPos.getSquaredDistance(pos);
-                            if (dist < closestLightDist) {
-                                closestLightDist = dist;
-                                closestLight = pos.toImmutable();
+                        } else {
+                            int e = VoidClamMod.lightSeekHalfExtent(m.currentSize);
+                            int scanStep = 0;
+                            outerLights:
+                            for (int iy = y - e; iy <= y + e; iy++) {
+                                for (int ix = x - e; ix <= x + e; ix++) {
+                                    for (int iz = z - e; iz <= z + e; iz++) {
+                                        if ((scanStep++ & 0xFFF) == 0
+                                            && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+                                            break outerLights;
+                                        }
+                                        if (!world.isChunkLoaded(ix >> 4, iz >> 4)) {
+                                            continue;
+                                        }
+                                        BlockPos pos = new BlockPos(ix, iy, iz);
+                                        long packed = pos.asLong();
+                                        if (m.lightsBlackList.contains(packed)) {
+                                            continue;
+                                        }
+                                        net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                                        if (!VoidClamMod.isLight(block)) continue;
+                                        double dist = modPos.getSquaredDistance(pos);
+                                        if (dist < closestLightDist) {
+                                            closestLightDist = dist;
+                                            closestLight = pos.toImmutable();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -417,6 +448,9 @@ public final class CommandToolbox {
                                 for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
                                     if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
                                         break outerScan;
+                                    }
+                                    if (!world.isChunkLoaded(ix >> 4, iz >> 4)) {
+                                        continue;
                                     }
                                     BlockPos pos = new BlockPos(ix, iy, iz);
                                     net.minecraft.block.Block block = world.getBlockState(pos).getBlock();

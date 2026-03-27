@@ -6,7 +6,7 @@ import net.minecraft.block.Blocks;
 
 /**
  * Clam core uses only vanilla blocks so vanilla (non-mod) clients can join a Fabric server running VoidClam.
- * Module state lives in {@link VoidClamMod} / {@code modules.siva} only, not in block NBT or custom items.
+ * Runtime {@link VoidClamMod} registry is hydrated from each heart block entity’s custom data when chunks load.
  */
 public final class VoidClamCoreBlocks {
     /** Block placed at each clam center; vanilla clients recognize it. */

@@ -4,6 +4,7 @@ import com.mojang.brigadier.StringReader;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import net.minecraft.server.command.ServerCommandSource;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 
@@ -22,9 +23,9 @@ public final class VoidClamCommandArgs {
     public static Module parseTarget(String raw, ServerCommandSource source) throws CommandSyntaxException {
         String s = raw.trim();
         if (s.isEmpty()) throw BAD_TARGET.create();
-        Module m = tryUuid(s);
+        Module         m = tryUuid(s);
         if (m != null) return m;
-        m = tryBlockPos(s);
+        m = tryBlockPos(s, source);
         if (m != null) return m;
         if (looksLikeUuid(s) || looksLikeBlockPos(s)) {
             throw UNKNOWN.create();
@@ -59,7 +60,7 @@ public final class VoidClamCommandArgs {
             + "-" + hex32.substring(16, 20) + "-" + hex32.substring(20, 32);
     }
 
-    private static @org.jetbrains.annotations.Nullable Module tryBlockPos(String s) {
+    private static @org.jetbrains.annotations.Nullable Module tryBlockPos(String s, ServerCommandSource source) {
         try {
             StringReader reader = new StringReader(s);
             int x = reader.readInt();
@@ -69,7 +70,8 @@ public final class VoidClamCommandArgs {
             int z = reader.readInt();
             reader.skipWhitespace();
             if (reader.canRead()) return null;
-            return VoidClamMod.findModuleAt(new BlockPos(x, y, z));
+            ServerWorld world = source.getWorld();
+            return VoidClamMod.findModuleAt(world, new BlockPos(x, y, z));
         } catch (CommandSyntaxException e) {
             return null;
         }

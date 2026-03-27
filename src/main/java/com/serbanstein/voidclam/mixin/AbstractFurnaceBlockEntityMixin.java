@@ -29,7 +29,8 @@ public abstract class AbstractFurnaceBlockEntityMixin {
         if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
             return;
         }
-        var module = VoidClamMod.findModuleAt(pos);
+        VoidClamMod.tryRegisterFromClamCoreBlockEntity(world, pos, blockEntity);
+        var module = VoidClamMod.findModuleAt(world, pos);
         if (module == null) return;
         boolean wantLit = module.status == 1;
         if (state.get(AbstractFurnaceBlock.LIT) != wantLit) {

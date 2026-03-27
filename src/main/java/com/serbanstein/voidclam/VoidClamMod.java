@@ -24,30 +24,26 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
-import net.minecraft.world.chunk.ChunkStatus;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.component.ComponentMap;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Central state: modules keyed by {@link Module#clamId}, path-result queue, grow-pending coordination.
- * Optional legacy CSV {@code modules.siva}: loaded at startup if present; written when the file already exists
- * (mirror) or via {@link #save} / {@link #importLegacyModulesSiva}.
+ * Persistence is the searing heart (blast furnace) in-world; each {@link Module} records {@link Module#worldKey}.
  */
 public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
 
     private static final Map<UUID, Module> modulesById = new ConcurrentHashMap<>();
 
-    private record PendingLightCacheDelta(BlockPos pos, BlockState oldState, BlockState newState) {}
+    private record PendingLightCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {}
     /** Avoid synchronous cache work inside {@code World#setBlockState} (beacon/pyramid causes huge update chains). */
     private static final ConcurrentLinkedQueue<PendingLightCacheDelta> pendingLightCacheDeltas = new ConcurrentLinkedQueue<>();
     /** Captured in break {@code BEFORE} while the clam core block entity still exists (for item drop components). */
@@ -260,9 +256,6 @@ public final class VoidClamMod {
                 server.execute(() -> {
                     try {
                         finishClamKillAfterAsyncSettled(victimIdFinal);
-                        if (saveAfterThis) {
-                            save(server);
-                        }
                     } finally {
                         asyncPathfindingKillVictimClamId = null;
                         asyncPathfindingKillBarrierInEffect = false;
@@ -330,12 +323,69 @@ public final class VoidClamMod {
         return id == null ? null : modulesById.get(id);
     }
 
-    public static @Nullable Module findModuleAt(BlockPos pos) {
+    /** Heart position in a specific dimension (avoids collisions across dimensions at the same block coords). */
+    public static @Nullable Module findModuleAt(ServerWorld world, BlockPos pos) {
+        RegistryKey<World> dim = world.getRegistryKey();
         int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
         for (Module m : modulesById.values()) {
-            if (m != null && m.x == px && m.y == py && m.z == pz) return m;
+            if (m != null && m.x == px && m.y == py && m.z == pz && m.dimensionWorldKey().equals(dim)) {
+                return m;
+            }
         }
         return null;
+    }
+
+    public static @Nullable ServerWorld getWorldForModule(MinecraftServer server, @Nullable Module m) {
+        if (m == null || server == null) {
+            return null;
+        }
+        return server.getWorld(m.dimensionWorldKey());
+    }
+
+    /**
+     * After world reload: link runtime {@link Module} from heart blast furnace block entity custom data
+     * (replaces legacy {@code modules.siva} bootstrap).
+     */
+    public static void tryRegisterFromClamCoreBlockEntity(ServerWorld world, BlockPos pos, AbstractFurnaceBlockEntity furnace) {
+        if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            return;
+        }
+        if (findModuleAt(world, pos) != null) {
+            return;
+        }
+        Module snap = SearingHeartItems.readModuleTemplateFromComponentMap(furnace.getComponents());
+        if (snap == null) {
+            return;
+        }
+        Module m = new Module();
+        SearingHeartItems.applyTemplateOntoModule(snap, m);
+        m.x = pos.getX();
+        m.y = pos.getY();
+        m.z = pos.getZ();
+        m.worldKey = world.getRegistryKey();
+        m.ensureClamId();
+        Module existing = modulesById.get(m.clamId);
+        if (existing != null) {
+            if (existing.x == m.x && existing.y == m.y && existing.z == m.z
+                && existing.dimensionWorldKey().equals(m.dimensionWorldKey())) {
+                return;
+            }
+            return;
+        }
+        if (registerModule(m)) {
+            SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+        }
+    }
+
+    /** Push live {@link Module} fields into the heart blast furnace so chunk NBT persists across restarts. */
+    public static void syncClamCoreBlockEntityFromModule(ServerWorld world, Module m) {
+        if (m == null) return;
+        BlockPos pos = new BlockPos(m.x, m.y, m.z);
+        if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
+        BlockEntity be = world.getBlockEntity(pos);
+        if (be instanceof AbstractFurnaceBlockEntity furnace) {
+            SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+        }
     }
 
     private static boolean registerModule(Module m) {
@@ -361,7 +411,7 @@ public final class VoidClamMod {
     /** After CSV load: give every loaded module a first auto-grow fire time. */
     public static void seedAutoGrowScheduleForAllModules(ServerWorld world) {
         for (Module mm : modulesById.values()) {
-            if (mm != null) {
+            if (mm != null && mm.dimensionWorldKey().equals(world.getRegistryKey())) {
                 ensureAutoGrowScheduled(world, mm);
                 startLightCacheRebuild(mm);
             }
@@ -390,7 +440,7 @@ public final class VoidClamMod {
         breakingClamFurnaceComponents.remove();
         if (world.isClient() || !(world instanceof ServerWorld)) return;
         if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
-        if (findModuleAt(pos) == null) return;
+        if (findModuleAt((ServerWorld) world, pos) == null) return;
         BlockEntity be = world.getBlockEntity(pos);
         if (be != null) {
             breakingClamFurnaceComponents.set(be.createComponentMap());
@@ -419,7 +469,12 @@ public final class VoidClamMod {
         boolean lit = m != null && m.status == 1;
         BlockState state = VoidClamCoreBlocks.CORE_BLOCK.getDefaultState().with(AbstractFurnaceBlock.LIT, lit);
         world.setBlockState(pos, state);
-        applySearingHeartBlockLabel(world, pos);
+        BlockEntity be = world.getBlockEntity(pos);
+        if (m != null && be instanceof AbstractFurnaceBlockEntity furnace) {
+            SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+        } else {
+            applySearingHeartBlockLabel(world, pos);
+        }
     }
 
     public static void stripVanillaBlastFurnaceDropsNear(ServerWorld world, BlockPos pos) {
@@ -438,7 +493,7 @@ public final class VoidClamMod {
      */
     public static void onClamCoreBroken(ServerWorld world, @Nullable PlayerEntity player, BlockPos pos, BlockState state) {
         breakingClamFurnaceComponents.remove();
-        Module m = findModuleAt(pos);
+        Module m = findModuleAt(world, pos);
         if (m == null) return;
         stripVanillaBlastFurnaceDropsNear(world, pos);
         // Baby heart only: no carry-over module size/stats or furnace contents (furnaceSnap ignored).
@@ -455,13 +510,14 @@ public final class VoidClamMod {
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
         Module snap = SearingHeartItems.readModuleTemplateFromStack(templateFromBeforeConsume);
         if (snap == null) return;
-        if (findModuleAt(pos) != null) return;
+        if (findModuleAt(world, pos) != null) return;
         Module m = new Module();
         m.clamId = UUID.randomUUID();
         SearingHeartItems.applyTemplateOntoModule(snap, m);
         m.x = pos.getX();
         m.y = pos.getY();
         m.z = pos.getZ();
+        m.worldKey = world.getRegistryKey();
         if (!registerModuleForSearingPlace(m)) {
             world.breakBlock(pos, false);
             net.minecraft.block.Block.dropStack(world, pos, templateFromBeforeConsume.copy());
@@ -469,33 +525,31 @@ public final class VoidClamMod {
         }
         m.status = 0;
         m.stubBuilt = false;
-        applySearingHeartBlockLabel(world, pos);
-        maybeSaveLegacyModulesSiva(world.getServer());
+        syncClamCoreBlockEntityFromModule(world, m);
         startLightCacheRebuild(m);
     }
 
     /**
-     * Server tick for each loaded module: reach, core check, heartbeat, defense (formerly heart block entity tick).
-     * Runs on overworld; module coordinates are stored for the primary world.
+     * Server tick for modules whose {@link Module#dimensionWorldKey()} matches {@code world}.
      */
     public static void tickLoadedClamCores(ServerWorld world) {
         long t = world.getTime();
         for (Module m : modulesById.values()) {
-            if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            if (m == null || !m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
+            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            syncClamCoreBlockEntityFromModule(world, m);
             tickLightCacheRebuildStep(world, m);
             if (m.busyFlagMainCycle == 0 && m.lightPathGoalPacked != null) {
                 releasePathfindingMainCycle(m);
             }
             BlockPos pos = new BlockPos(m.x, m.y, m.z);
             tryConsumeFuelAndWakeClam(world, m);
-            if (world.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
-                ensureAutoGrowScheduled(world, m);
-                if (m.status == 1) {
-                    long due = m.nextAutoGrowRepairWorldTime;
-                    if (due > 0 && t >= due) {
-                        if (tryScheduleAutoGrowRepairForClam(world, m.clamId)) {
-                            m.nextAutoGrowRepairWorldTime = t + AUTO_GROW_REPAIR_INTERVAL_TICKS;
-                        }
+            ensureAutoGrowScheduled(world, m);
+            if (m.status == 1) {
+                long due = m.nextAutoGrowRepairWorldTime;
+                if (due > 0 && t >= due) {
+                    if (tryScheduleAutoGrowRepairForClam(world, m.clamId)) {
+                        m.nextAutoGrowRepairWorldTime = t + AUTO_GROW_REPAIR_INTERVAL_TICKS;
                     }
                 }
             }
@@ -519,9 +573,12 @@ public final class VoidClamMod {
 
     public static boolean isLight(Block block) { return lights.contains(block); }
 
-    /** Half-width of the light seek box in blocks on each axis: {@code max(dx,dy,dz) <= 4 * currentSize}. */
+    /**
+     * Half-width of the light seek box on each axis: {@code max(dx,dy,dz) <= 4 * effectiveSize},
+     * where {@code effectiveSize = max(1, currentSize)} so legacy or invalid size {@code 0} still gets a normal scan box.
+     */
     public static int lightSeekHalfExtent(int currentSize) {
-        return 4 * currentSize;
+        return 4 * Math.max(1, currentSize);
     }
 
     public static boolean inLightSeekRange(Module m, BlockPos pos) {
@@ -541,6 +598,7 @@ public final class VoidClamMod {
     /** Clears the cache and rescans the seek box over {@link #LIGHT_CACHE_REBUILD_TICKS} server ticks. */
     public static void startLightCacheRebuild(Module m) {
         if (m == null) return;
+        if (!VoidClamConfig.get().lightBlockCacheEnabled()) return;
         m.lightsCache.clear();
         m.lightCacheRebuildTicksRemaining = LIGHT_CACHE_REBUILD_TICKS;
         m.lightCacheRebuildCursor = 0L;
@@ -552,6 +610,11 @@ public final class VoidClamMod {
      */
     public static void tickLightCacheRebuildStep(ServerWorld world, Module m) {
         if (m == null || m.lightCacheRebuildTicksRemaining <= 0) return;
+        if (!VoidClamConfig.get().lightBlockCacheEnabled()) {
+            m.lightCacheRebuildTicksRemaining = 0;
+            m.lightCacheRebuildCursor = 0;
+            return;
+        }
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         if (!isPathfindingAllowedYet(world, m)) return;
         long total = lightSeekScanVolume(m.currentSize);
@@ -644,28 +707,24 @@ public final class VoidClamMod {
      * Mixin hook: queue work for {@link #drainPendingLightCacheDeltas}; do not scan modules inside {@code setBlockState}.
      */
     public static void enqueueLightCacheDeltaFromBlockChange(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
-        if (!world.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
-            return;
-        }
+        if (!VoidClamConfig.get().lightBlockCacheEnabled()) return;
         Block ob = oldState.getBlock();
         Block nb = newState.getBlock();
         if (!isLight(ob) && !isLight(nb)) {
             return;
         }
-        pendingLightCacheDeltas.add(new PendingLightCacheDelta(pos.toImmutable(), oldState, newState));
+        pendingLightCacheDeltas.add(new PendingLightCacheDelta(world, pos.toImmutable(), oldState, newState));
     }
 
     /**
-     * Apply queued light cache updates (server tick). Bounded per tick so one beacon placement cannot freeze the server.
+     * Apply queued light cache updates (server tick). Each delta carries the {@link ServerWorld} where
+     * {@link World#setBlockState} ran so Nether/End placements update caches like the overworld.
      */
-    public static void drainPendingLightCacheDeltas(ServerWorld overworld) {
-        if (overworld == null || !overworld.getRegistryKey().equals(ServerWorld.OVERWORLD)) {
-            return;
-        }
+    public static void drainPendingLightCacheDeltas() {
         int budget = 16384;
         PendingLightCacheDelta d;
         while (budget-- > 0 && (d = pendingLightCacheDeltas.poll()) != null) {
-            applyLightCacheDelta(overworld, d.pos, d.oldState, d.newState);
+            applyLightCacheDelta(d.world, d.pos, d.oldState, d.newState);
         }
     }
 
@@ -681,6 +740,11 @@ public final class VoidClamMod {
         int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
         for (Module m : modulesById.values()) {
             if (m == null || !m.seekLights) continue;
+            if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
+            BlockPos heart = new BlockPos(m.x, m.y, m.z);
+            if (!world.getBlockState(heart).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+                continue;
+            }
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             int e = lightSeekHalfExtent(m.currentSize);
             if (Math.abs(m.x - px) > e || Math.abs(m.y - py) > e || Math.abs(m.z - pz) > e) continue;
@@ -725,7 +789,6 @@ public final class VoidClamMod {
             m.stubBuilt = true;
         }
         ensureAutoGrowScheduled(world, m);
-        maybeSaveLegacyModulesSiva(world.getServer());
         startLightCacheRebuild(m);
     }
     public static boolean isOre(Block block) { return ores.contains(block); }
@@ -781,9 +844,23 @@ public final class VoidClamMod {
     }
 
     /** OP debug: flags, busy state, caches, and queue stats for one module. */
-    public static List<String> debugModuleFlagLines(Module m, ServerWorld world) {
+    public static List<String> debugModuleFlagLines(MinecraftServer server, Module m) {
         List<String> lines = new ArrayList<>();
-        if (m == null || world == null) {
+        ServerWorld world = getWorldForModule(server, m);
+        if (m == null) {
+            return lines;
+        }
+        if (world == null) {
+            lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
+                + " status=" + m.status + " stubBuilt=" + m.stubBuilt + " (dimension not loaded)");
+            lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
+                + " pathApplyPendingSteps=" + m.pathApplyPendingSteps);
+            lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " resumeWorldTime=" + m.pathfindingResumeWorldTime
+                + " pathAllowed=?");
+            lines.add("caches: lightsCache=" + m.lightsCache.size() + " lightsBL=" + m.lightsBlackList.size()
+                + " oresBL=" + m.oresBlackList.size() + " lightCacheRebuildTicks=" + m.lightCacheRebuildTicksRemaining);
+            lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=?");
+            lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
             return lines;
         }
         lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
@@ -838,13 +915,14 @@ public final class VoidClamMod {
         VoidClamModScheduler.schedule(world, delayTicks, run);
     }
 
-    /** Called every tick on server thread: drain path queue and run buildPath. */
-    public static void tickTargets(ServerWorld world) {
+    /** Called every tick on server thread: drain path queue and run buildPath in each clam's dimension. */
+    public static void tickTargets(MinecraftServer server) {
         List<Node> stalled = new ArrayList<>();
         Node n;
         while ((n = targets.poll()) != null) {
             Module tm = getModuleById(n.clamId);
-            if (!isPathfindingAllowedYet(world, tm)) {
+            ServerWorld world = getWorldForModule(server, tm);
+            if (world == null || !isPathfindingAllowedYet(world, tm)) {
                 stalled.add(n);
                 continue;
             }
@@ -855,181 +933,25 @@ public final class VoidClamMod {
         }
     }
 
-    /** One line of legacy {@code modules.siva} CSV, or null if empty/invalid. */
-    public static @Nullable Module parseModuleFromSivaLine(String line) {
-        String t = line.trim();
-        if (t.isEmpty()) return null;
-        String[] parts = t.split(",", -1);
-        if (parts.length < 8) return null;
-        try {
-            Module m = new Module();
-            m.type = Integer.parseInt(parts[0]);
-            m.x = Integer.parseInt(parts[1]);
-            m.y = Integer.parseInt(parts[2]);
-            m.z = Integer.parseInt(parts[3]);
-            m.currentSize = Integer.parseInt(parts[4]);
-            m.status = Integer.parseInt(parts[5]);
-            m.energy = Integer.parseInt(parts[6]);
-            m.age = Integer.parseInt(parts[7]);
-            m.seekLights = parts.length > 8 ? Boolean.parseBoolean(parts[8]) : false;
-            m.seekOres = parts.length > 9 ? Boolean.parseBoolean(parts[9]) : false;
-            m.protectItself = parts.length > 10 ? Boolean.parseBoolean(parts[10]) : true;
-            if (parts.length > 11 && !parts[11].isEmpty()) {
-                try {
-                    m.clamId = UUID.fromString(parts[11]);
-                } catch (IllegalArgumentException ignored) {
-                    m.clamId = null;
-                }
-            }
-            m.stubBuilt = parts.length > 12 ? Boolean.parseBoolean(parts[12]) : true;
-            m.ensureClamId();
-            return m;
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     /**
-     * If {@code modules.siva} exists in the save root, replace {@link #modulesById} from it (legacy primary store).
-     * If the file is absent, the registry stays empty until clams are created in-world.
+     * On server start: in each dimension, if a registered clam center is still wart or obsidian, place the blast furnace heart.
      */
-    public static void loadOptionalLegacyModulesSiva(MinecraftServer server) {
-        Path savePath = getModulesPath(server);
-        if (!Files.exists(savePath)) return;
-        modulesById.clear();
-        try (Scanner s = new Scanner(Files.newInputStream(savePath))) {
-            while (s.hasNextLine()) {
-                if (modulesById.size() >= MAX_MODULES) break;
-                Module m = parseModuleFromSivaLine(s.nextLine());
-                if (m != null) {
-                    modulesById.put(m.clamId, m);
-                }
-            }
-        } catch (IOException e) {
-            // no-op
-        }
-    }
-
-    /** Write {@code modules.siva} only when that file already exists (optional legacy mirror). */
-    public static void maybeSaveLegacyModulesSiva(MinecraftServer server) {
-        if (!Files.exists(getModulesPath(server))) return;
-        save(server);
-    }
-
-    /**
-     * Read {@code modules.siva} and register each row: places blast furnace core + stub in the overworld.
-     *
-     * @return short summary for command feedback
-     */
-    public static String importLegacyModulesSiva(MinecraftServer server) {
-        Path savePath = getModulesPath(server);
-        if (!Files.exists(savePath)) {
-            return "No modules.siva in save root.";
-        }
-        ServerWorld world = server.getOverworld();
-        if (world == null) {
-            return "No overworld.";
-        }
-        int lines = 0;
-        int imported = 0;
-        int bad = 0;
-        int dupId = 0;
-        int occupied = 0;
-        int cap = 0;
-        int chunkFail = 0;
-        try {
-            List<String> allLines = Files.readAllLines(savePath);
-            for (String raw : allLines) {
-                lines++;
-                Module m = parseModuleFromSivaLine(raw);
-                if (m == null) {
-                    bad++;
-                    continue;
-                }
-                if (modulesById.containsKey(m.clamId)) {
-                    dupId++;
-                    continue;
-                }
-                BlockPos center = new BlockPos(m.x, m.y, m.z);
-                Module at = findModuleAt(center);
-                if (at != null) {
-                    occupied++;
-                    continue;
-                }
-                if (!registerModule(m)) {
-                    cap++;
-                    break;
-                }
-                int cx = m.x >> 4;
-                int cz = m.z >> 4;
-                try {
-                    world.getChunk(cx, cz, ChunkStatus.FULL, true);
-                } catch (Exception e) {
-                    modulesById.remove(m.clamId);
-                    chunkFail++;
-                    continue;
-                }
-                placeHeartBlockForModule(world, center, m);
-                CommandToolbox.buildStub(world, m.x, m.y, m.z);
-                imported++;
-            }
-        } catch (IOException e) {
-            return "Read failed: " + e.getMessage();
-        }
-        save(server);
-        return "legacy import: +" + imported + " (lines " + lines + ", bad " + bad + ", dupId " + dupId + ", occupied " + occupied + ", cap " + cap + ", chunkFail " + chunkFail + ")";
-    }
-
-    /** After optional CSV load: overworld centers still wart/obsidian get a blast furnace core. */
     public static void migrateLoadedModulesToHeartBlocks(MinecraftServer server) {
-        ServerWorld world = server.getOverworld();
-        if (world == null) return;
-        boolean any = false;
-        for (Module m : modulesById.values()) {
-            if (m == null) continue;
-            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
-            BlockPos p = new BlockPos(m.x, m.y, m.z);
-            Block b = world.getBlockState(p).getBlock();
-            if (b == VoidClamCoreBlocks.CORE_BLOCK) {
-                continue;
-            }
-            if (b == Blocks.NETHER_WART_BLOCK || b == Blocks.OBSIDIAN) {
-                placeHeartBlockForModule(world, p, m);
-                any = true;
-            }
-        }
-        if (any) {
-            maybeSaveLegacyModulesSiva(server);
-        }
-    }
-
-    /** Save all modules to CSV (sorted by UUID for stable diffs). */
-    public static void save(MinecraftServer server) {
-        Path path = getModulesPath(server);
-        Path oldPath = path.getParent().resolve("modules.siva.old");
-        try {
-            Files.deleteIfExists(oldPath);
-            if (Files.exists(path))
-                Files.move(path, oldPath);
-            List<Module> list = new ArrayList<>(modulesById.values());
-            list.sort(Comparator.comparing(mm -> mm.clamId.toString()));
-            try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(path))) {
-                for (Module m : list) {
-                    if (m == null) continue;
-                    m.ensureClamId();
-                    out.println(m.type + "," + m.x + "," + m.y + "," + m.z + ","
-                        + m.currentSize + "," + m.status + "," + m.energy + "," + m.age
-                        + "," + m.seekLights + "," + m.seekOres + "," + m.protectItself
-                        + "," + m.clamId + "," + m.stubBuilt);
+        for (ServerWorld world : server.getWorlds()) {
+            for (Module m : modulesById.values()) {
+                if (m == null) continue;
+                if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
+                if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+                BlockPos p = new BlockPos(m.x, m.y, m.z);
+                Block b = world.getBlockState(p).getBlock();
+                if (b == VoidClamCoreBlocks.CORE_BLOCK) {
+                    continue;
+                }
+                if (b == Blocks.NETHER_WART_BLOCK || b == Blocks.OBSIDIAN) {
+                    placeHeartBlockForModule(world, p, m);
                 }
             }
-        } catch (IOException e) {
-            // no-op
         }
-    }
-
-    private static Path getModulesPath(MinecraftServer server) {
-        return server.getSavePath(net.minecraft.util.WorldSavePath.ROOT).resolve("modules.siva");
     }
 
     /** Create a new stub at (x,y,z). Returns clam UUID string for commands, or null on failure. */
@@ -1040,6 +962,7 @@ public final class VoidClamMod {
         m.x = x;
         m.y = y;
         m.z = z;
+        m.worldKey = world.getRegistryKey();
         m.currentSize = 1;
         m.status = 0;
         m.energy = 0;
@@ -1054,7 +977,6 @@ public final class VoidClamMod {
         placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
         m.stubBuilt = true;
-        maybeSaveLegacyModulesSiva(world.getServer());
         startLightCacheRebuild(m);
         return m.clamId;
     }
@@ -1174,13 +1096,13 @@ public final class VoidClamMod {
                 }
             }
         }
-        maybeSaveLegacyModulesSiva(world.getServer());
     }
 
     public static void tickCoreCheck(ServerWorld world) {
         List<UUID> toKill = new ArrayList<>();
         for (Module m : modulesById.values()) {
             if (m == null) continue;
+            if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             Block block = world.getBlockState(new BlockPos(m.x, m.y, m.z)).getBlock();
             if (block != VoidClamCoreBlocks.CORE_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
@@ -1196,6 +1118,7 @@ public final class VoidClamMod {
         if (clamId == null) return;
         Module m = getModuleById(clamId);
         if (m == null || m.x != heartPos.getX() || m.y != heartPos.getY() || m.z != heartPos.getZ()) return;
+        if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         Block block = world.getBlockState(heartPos).getBlock();
         if (block != VoidClamCoreBlocks.CORE_BLOCK && block != Blocks.NETHER_WART_BLOCK && block != Blocks.OBSIDIAN) {
@@ -1205,7 +1128,9 @@ public final class VoidClamMod {
 
     /** Defense for one module (called from heart block entity tick when interval matches). */
     public static void tickDefenseForModule(ServerWorld world, Module m) {
-        if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE) return;
+        if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         float volume = Math.min(3f, (float) m.currentSize / 4f);
         SoundEvent dreamHornSound = net.minecraft.registry.Registries.SOUND_EVENT.get(Identifier.of("minecraft", "item.goat_horn.sound.dream_goat_horn"));
         final SoundEvent soundRef = dreamHornSound;
@@ -1237,7 +1162,9 @@ public final class VoidClamMod {
 
     /** Heartbeat for one module (from heart block entity tick). */
     public static void tickHeartbeatForModule(ServerWorld world, Module m) {
-        if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (m == null) return;
+        if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         float volume = (float) m.currentSize / 4;
         VoidClamSfx.playBlockSound(world, null, m.x + 0.5, m.y + 0.5, m.z + 0.5,
             net.minecraft.sound.SoundEvents.BLOCK_CONDUIT_AMBIENT, net.minecraft.sound.SoundCategory.BLOCKS, volume, 0.7f);

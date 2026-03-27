@@ -29,7 +29,6 @@ public final class NaturalSpawnHandler {
             scanChunkForSpawners(world, chunk);
             return;
         }
-        if (!world.getRegistryKey().equals(ServerWorld.OVERWORLD)) return;
         long key = chunkKey(world, cp.x, cp.z);
         if (spawnedChunks.putIfAbsent(key, Boolean.TRUE) != null) return;
         Random rand = Random.create(cp.x * 31L ^ cp.z);
