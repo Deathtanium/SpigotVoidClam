@@ -375,6 +375,10 @@ public final class CommandToolbox {
         if (m.busyFlagMainCycle != 0) return;
         m.busyFlagMainCycle = 1;
 
+        final PathfindChunkCache pathColumnCache = VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.ASYNC
+            ? PathfindChunkCache.buildColumnSnapshot(world, m)
+            : null;
+
         submitPathfinding(world, m.x, m.z, m.clamId, () -> VoidClamMod.releasePathfindingMainCycle(m), () -> {
             try {
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) {
@@ -458,7 +462,10 @@ public final class CommandToolbox {
                     } else {
                         m.lightPathGoalPacked = null;
                     }
-                    Pathfinder.calculatePath(world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ());
+                    Pathfinder.calculatePath(
+                        world, m.clamId, x, y, z,
+                        closest.getX(), closest.getY(), closest.getZ(),
+                        pathColumnCache);
                 } else {
                     VoidClamMod.releasePathfindingMainCycle(m);
                 }
