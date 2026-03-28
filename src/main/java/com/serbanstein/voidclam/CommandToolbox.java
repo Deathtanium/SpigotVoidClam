@@ -350,8 +350,8 @@ public final class CommandToolbox {
         int csize = m.currentSize;
         int x = m.x, y = m.y, z = m.z;
 
-        // Repair cycle (same-size resize): preserve existing obsidian shell and patch missing shell cells with wart
-        // as far as available material allows.
+        // Repair cycle (same-size resize): preserve existing obsidian shell; missing cells get staggered wart, then
+        // obsidian only where material was spent; remaining missing cells get wart only (no obsidian).
         if (tsize <= csize) {
             int size = Math.max(1, csize);
             int yMin = -size / 2 + 1;
@@ -360,6 +360,7 @@ public final class CommandToolbox {
             int initialMaterial = m.material;
             int obsidianPresent = 0;
             int shellMissing = 0;
+            List<BlockPos> missingShell = new ArrayList<>();
             int timer = 0;
             // Rebuild flesh without touching the outer shell: stop at size-1 so existing obsidian shell stays intact.
             for (int i = 1; i <= Math.max(1, size - 1); i++) {
@@ -371,6 +372,7 @@ public final class CommandToolbox {
                 });
                 timer++;
             }
+            int fleshStaggerSteps = timer;
             for (int dy = yMin; dy <= yMax; dy++) {
                 for (int dx = -horiz; dx <= horiz; dx++) {
                     for (int dz = -horiz; dz <= horiz; dz++) {
@@ -382,20 +384,59 @@ public final class CommandToolbox {
                             continue;
                         }
                         shellMissing++;
-                        if (m.material > 0) {
-                            world.setBlockState(p, Blocks.NETHER_WART_BLOCK.getDefaultState());
-                            m.material--;
-                            VoidClamSfx.playBlockSound(world, p, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
-                        }
+                        missingShell.add(p.toImmutable());
                     }
+                }
+            }
+            int nMissing = missingShell.size();
+            int fillable = Math.min(Math.max(0, m.material), nMissing);
+            long firstShellPatchDelay = (long) fleshStaggerSteps * 10L;
+            for (int s = 0; s < nMissing; s++) {
+                final BlockPos p = missingShell.get(s).toImmutable();
+                long patchDelay = firstShellPatchDelay + (long) s * 10L;
+                if (s < fillable) {
+                    VoidClamMod.scheduleResizeShellDelayed(world, patchDelay, () -> {
+                        if (world.getBlockState(p).isOf(Blocks.OBSIDIAN)) {
+                            return;
+                        }
+                        if (m.material <= 0) {
+                            return;
+                        }
+                        world.setBlockState(p, Blocks.NETHER_WART_BLOCK.getDefaultState());
+                        m.material--;
+                        VoidClamSfx.playBlockSound(world, p, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+                        VoidClamMod.scheduleResizeShellDelayed(world, 10L, () -> {
+                            if (world.getBlockState(p).isOf(Blocks.NETHER_WART_BLOCK)) {
+                                world.setBlockState(p, Blocks.OBSIDIAN.getDefaultState());
+                                VoidClamSfx.playBlockSound(world, p, SoundEvents.BLOCK_STONE_PLACE, SoundCategory.BLOCKS, 0.85f, 0.9f);
+                            }
+                        });
+                    });
+                } else {
+                    VoidClamMod.scheduleResizeShellDelayed(world, patchDelay, () -> {
+                        if (world.getBlockState(p).isOf(Blocks.OBSIDIAN)) {
+                            return;
+                        }
+                        world.setBlockState(p, Blocks.NETHER_WART_BLOCK.getDefaultState());
+                        VoidClamSfx.playBlockSound(world, p, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+                    });
                 }
             }
             int shellObserved = obsidianPresent + shellMissing;
             // Keep an explicit shell inventory snapshot while repairing.
             m.prioritizeRepairOreSeek = m.seekLights && shellObserved > 0 && shellMissing > initialMaterial;
-            // Do not run buildShell(obsidian) here: it would repaint the whole shell for free and undo material-gated wart patches.
-            long lastWartStaggerTick = world.getTime() + (long) Math.max(0, timer - 1) * 10L;
-            m.pathfindingResumeWorldTime = lastWartStaggerTick + VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
+            long postTicks = VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
+            long resumeAnimOffset;
+            if (nMissing == 0) {
+                resumeAnimOffset = (long) Math.max(0, fleshStaggerSteps - 1) * 10L;
+            } else {
+                long lastShellWartTick = firstShellPatchDelay + (long) (nMissing - 1) * 10L;
+                long lastPaidObsidianTick = fillable > 0
+                    ? firstShellPatchDelay + (long) (fillable - 1) * 10L + 10L
+                    : Long.MIN_VALUE;
+                resumeAnimOffset = Math.max(lastShellWartTick, lastPaidObsidianTick);
+            }
+            m.pathfindingResumeWorldTime = world.getTime() + resumeAnimOffset + postTicks;
             m.currentSize = csize;
             VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
             VoidClamMod.startSeekCachesRebuild(m);
