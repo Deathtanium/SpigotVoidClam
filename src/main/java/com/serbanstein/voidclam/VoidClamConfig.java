@@ -105,6 +105,10 @@ public final class VoidClamConfig {
     public int clam_repair_grow_cycle_interval_seconds = 5 * 60;
     /** How often awake clams attempt target selection/pathfinding in seconds (phase-staggered per clam). */
     public int clam_seek_attempt_interval_seconds = 1;
+    /** Player defense check cadence in seconds; keep at or above goat-horn sound length to avoid overlap. */
+    public int clam_defense_detection_interval_seconds = 8;
+    /** Ore-hunger trigger for material replenishment pathing. When material is below this, ore seeking can run. */
+    public int clam_material_seek_threshold = 5;
 
     public boolean vfx_enabled = true;
     public double sfx_volume_multiplier = 1.0;
@@ -156,6 +160,8 @@ public final class VoidClamConfig {
         if (clam_grow_energymultiplier < 1) clam_grow_energymultiplier = 1;
         if (clam_repair_grow_cycle_interval_seconds < 1) clam_repair_grow_cycle_interval_seconds = 1;
         if (clam_seek_attempt_interval_seconds < 1) clam_seek_attempt_interval_seconds = 1;
+        if (clam_defense_detection_interval_seconds < 1) clam_defense_detection_interval_seconds = 1;
+        if (clam_material_seek_threshold < 0) clam_material_seek_threshold = 0;
         if (sfx_volume_multiplier < 0) sfx_volume_multiplier = 0;
         if (astar_sync_global_max_steps_per_tick < 0) astar_sync_global_max_steps_per_tick = 0;
         if (astar_async_global_max_threads < 0) astar_async_global_max_threads = 0;
@@ -400,6 +406,10 @@ public final class VoidClamConfig {
 
     public int seekAttemptIntervalTicks() {
         return Math.max(20, clam_seek_attempt_interval_seconds * 20);
+    }
+
+    public int defenseDetectionIntervalTicks() {
+        return Math.max(20, clam_defense_detection_interval_seconds * 20);
     }
 
     /**

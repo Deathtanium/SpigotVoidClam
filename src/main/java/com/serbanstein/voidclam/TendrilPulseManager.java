@@ -13,6 +13,7 @@ import net.minecraft.world.World;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.LightType;
 import org.joml.Vector3f;
 
@@ -330,6 +331,73 @@ public final class TendrilPulseManager {
     }
 
     private static final double PLAYER_RANGE_SQ = 32.0 * 32.0;
+    private static final double MAX_PLAYER_FOV_DEGREES = 130.0;
+    private static final double COS_HALF_MAX_PLAYER_FOV = Math.cos(Math.toRadians(MAX_PLAYER_FOV_DEGREES / 2.0));
+
+    private static boolean isVisualObstacle(BlockState state, ServerWorld world, BlockPos pos) {
+        if (state.isAir()) return false;
+        if (!state.getFluidState().isEmpty()) return false;
+        if (state.getCollisionShape(world, pos).isEmpty()) return false;
+        if (!state.isOpaqueFullCube()) return false;
+        return true;
+    }
+
+    private static boolean isWithinFov(ServerPlayerEntity player, BlockPos targetPos) {
+        Vec3d eye = player.getEyePos();
+        Vec3d toTarget = Vec3d.ofCenter(targetPos).subtract(eye);
+        double lenSq = toTarget.lengthSquared();
+        if (lenSq <= 1.0e-10) return true;
+        Vec3d look = player.getRotationVec(1.0f);
+        double lookLenSq = look.lengthSquared();
+        if (lookLenSq <= 1.0e-10) return true;
+        double dot = look.normalize().dotProduct(toTarget.normalize());
+        return dot >= COS_HALF_MAX_PLAYER_FOV;
+    }
+
+    private static boolean hasClearLineOfSight(ServerWorld world, ServerPlayerEntity player, BlockPos targetPos) {
+        Vec3d eye = player.getEyePos();
+        Vec3d target = Vec3d.ofCenter(targetPos);
+        Vec3d delta = target.subtract(eye);
+        double length = delta.length();
+        if (length <= 1.0e-6) return true;
+        int steps = Math.max(1, (int) Math.ceil(length * 4.0));
+        int consecutiveObstacles = 0;
+        for (int i = 1; i < steps; i++) {
+            double t = (double) i / (double) steps;
+            Vec3d p = eye.add(delta.multiply(t));
+            BlockPos bp = BlockPos.ofFloored(p);
+            if (bp.equals(targetPos)) {
+                continue;
+            }
+            if (!world.isChunkLoaded(bp.getX() >> 4, bp.getZ() >> 4)) {
+                return false;
+            }
+            if (isVisualObstacle(world.getBlockState(bp), world, bp)) {
+                consecutiveObstacles++;
+                if (consecutiveObstacles >= 2) {
+                    return false;
+                }
+            } else {
+                consecutiveObstacles = 0;
+            }
+        }
+        return true;
+    }
+
+    private static boolean anyPlayerCanSeePulse(ServerWorld world, BlockPos pos) {
+        for (ServerPlayerEntity player : world.getPlayers()) {
+            if (pos.getSquaredDistance(player.getBlockPos()) > PLAYER_RANGE_SQ) {
+                continue;
+            }
+            if (!isWithinFov(player, pos)) {
+                continue;
+            }
+            if (hasClearLineOfSight(world, player, pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * Starts a pulsing tendril at the given position. Caller must sample brightness with
@@ -345,14 +413,7 @@ public final class TendrilPulseManager {
             onComplete.run();
             return;
         }
-        boolean playerInRange = false;
-        for (ServerPlayerEntity player : world.getPlayers()) {
-            if (pos.getSquaredDistance(player.getBlockPos()) <= PLAYER_RANGE_SQ) {
-                playerInRange = true;
-                break;
-            }
-        }
-        if (!playerInRange) {
+        if (!anyPlayerCanSeePulse(world, pos)) {
             onComplete.run();
             return;
         }

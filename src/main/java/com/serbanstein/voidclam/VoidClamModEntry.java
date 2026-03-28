@@ -142,7 +142,7 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("chunkactivitydebug <target> — unload pause/expiry status for cache+blacklist lifecycle"), false);
                         s.sendFeedback(() -> Text.literal("dumpnbt <target> — write searing heart block-entity NBT to run/voidclam-nbt-dumps/<UUID>.nbt"), false);
                         s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping — state lives in searing heart blocks"), false);
-                        s.sendFeedback(() -> Text.literal("Config: seek_target_cache; clam_repair_grow_cycle_interval_seconds; clam_seek_attempt_interval_seconds; astar_mode, bfs_mode; pathfind_chunk_cache; pathfinding_trace; tick_crash_crumbs"), false);
+                        s.sendFeedback(() -> Text.literal("Config: seek_target_cache; clam_repair_grow_cycle_interval_seconds; clam_seek_attempt_interval_seconds; clam_defense_detection_interval_seconds; clam_material_seek_threshold; astar_mode, bfs_mode; pathfind_chunk_cache; pathfinding_trace; tick_crash_crumbs"), false);
                         return 1;
                     }))
                 .then(CommandManager.literal("make")
@@ -204,7 +204,30 @@ public class VoidClamModEntry implements ModInitializer {
                         .executes(ctx -> {
                             try {
                                 Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                VoidClamMod.requestRepairCommand(ctx.getSource().getWorld(), m.clamId);
+                                ServerWorld modWorld = VoidClamMod.getWorldForModule(ctx.getSource().getServer(), m);
+                                if (modWorld == null) {
+                                    ctx.getSource().sendError(Text.literal("Dimension for this voidclam is not loaded."));
+                                    return 0;
+                                }
+                                if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+                                    ctx.getSource().sendError(Text.literal("Heart chunk is not loaded."));
+                                    return 0;
+                                }
+                                VoidClamMod.ShellDamageStats stats = VoidClamMod.inspectObsidianShellDamage(modWorld, m);
+                                int material = Math.max(0, m.material);
+                                int budgetFill = Math.min(stats.shellMissing(), material);
+                                int remaining = Math.max(0, stats.shellMissing() - budgetFill);
+                                ctx.getSource().sendFeedback(
+                                    () -> Text.literal("Repair stats: shellTotal=" + stats.shellTotal()
+                                        + " obsidianPresent=" + stats.obsidianPresent()
+                                        + " missing=" + stats.shellMissing()),
+                                    false);
+                                ctx.getSource().sendFeedback(
+                                    () -> Text.literal("Material budget: material=" + material
+                                        + " canFillNow=" + budgetFill
+                                        + " missingAfterPass=" + remaining),
+                                    false);
+                                VoidClamMod.requestRepairCommand(modWorld, m.clamId);
                                 ctx.getSource().sendFeedback(() -> Text.literal("Repair scheduled; will run once pathfinding is idle."), false);
                                 return 1;
                             } catch (CommandSyntaxException e) {
@@ -455,7 +478,7 @@ public class VoidClamModEntry implements ModInitializer {
                             if (closest != null) {
                                 Module m = closest;
                                 ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
-                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy));
+                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
                             }
                         } else {
                             List<Module> list = new ArrayList<>(VoidClamMod.getAllModules());
@@ -463,7 +486,7 @@ public class VoidClamModEntry implements ModInitializer {
                             ctx.getSource().sendMessage(Text.literal("Voidclam count: " + list.size()));
                             for (Module m : list) {
                                 if (m == null) continue;
-                                ctx.getSource().sendMessage(Text.literal(m.clamId + " @ " + m.x + " " + m.y + " " + m.z + " size " + m.currentSize));
+                                ctx.getSource().sendMessage(Text.literal(m.clamId + " @ " + m.x + " " + m.y + " " + m.z + " size " + m.currentSize + " material " + m.material));
                             }
                         }
                         return 1;
@@ -473,7 +496,7 @@ public class VoidClamModEntry implements ModInitializer {
                             try {
                                 Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                 ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
-                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy));
+                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
                                 ctx.getSource().sendMessage(Text.literal("Seek lights: " + m.seekLights + "  Seek ores: " + m.seekOres + "  Protect: " + m.protectItself));
                                 return 1;
                             } catch (CommandSyntaxException e) {
@@ -488,7 +511,7 @@ public class VoidClamModEntry implements ModInitializer {
                                 Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                 int maxSize = VoidClamConfig.get().clam_size_max;
                                 int cur = m.currentSize;
-                                int cSize = Math.min(cur + 2, maxSize);
+                                int cSize = Math.min(cur + 1, maxSize);
                                 if (cSize <= cur) {
                                     ctx.getSource().sendError(Text.literal("Already at max size (" + maxSize + ")"));
                                     return 0;

@@ -31,6 +31,8 @@ public class Module {
     public int currentSize;
     /** 1 = awake, 0 = asleep */
     public int status;
+    /** Internal resource used for shell repair and ore-hunger logic (persisted on heart NBT). */
+    public int material;
     public int energy;
     /** Age since last phase change / startpassive */
     public int age;
@@ -110,6 +112,10 @@ public class Module {
      * {@link VoidClamConfig#seekTargetCacheEnabled()} (repair-style refresh; light-block deltas can still grow caches incrementally).
      */
     public boolean seekEphemeralNeedSeekDataRefresh;
+    /** Set by repair cycle when shell damage exists and additional ore intake should be prioritized. */
+    public boolean prioritizeRepairOreSeek;
+    /** Current ore path was selected for material-hunger / repair replenishment (consume ore block, no loot drops). */
+    public boolean orePathForMaterialHunger;
 
     public void ensureClamId() {
         if (clamId == null) {

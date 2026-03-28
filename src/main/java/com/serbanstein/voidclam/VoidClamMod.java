@@ -7,6 +7,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.Identifier;
+import net.minecraft.registry.Registries;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
@@ -25,9 +26,11 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import net.minecraft.registry.RegistryKey;
+import net.minecraft.registry.RegistryKeys;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.component.ComponentMap;
+import net.minecraft.registry.tag.TagKey;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
@@ -94,7 +97,15 @@ public final class VoidClamMod {
     private static final Set<Block> lights = new HashSet<>();
     /** Blocks that count as ores (fortune-3 style drops when eaten). */
     private static final Set<Block> ores = new HashSet<>();
+    private static final Set<Block> fullBlockLightEnergy2 = new HashSet<>();
     private static final Set<Block> baseCost = new HashSet<>();
+    private static final TagKey<Block> SCULK_REPLACEABLE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "sculk_replaceable"));
+    private static final TagKey<Block> PALE_MOSS_REPLACE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "pale_moss_replace"));
+    public record ShellDamageStats(int obsidianPresent, int shellMissing) {
+        public int shellTotal() {
+            return obsidianPresent + shellMissing;
+        }
+    }
 
     static {
         ores.add(Blocks.COAL_ORE);
@@ -126,6 +137,11 @@ public final class VoidClamMod {
         lights.add(Blocks.WALL_TORCH);
         lights.add(Blocks.SHROOMLIGHT);
         lights.add(Blocks.LAVA);
+        fullBlockLightEnergy2.add(Blocks.GLOWSTONE);
+        fullBlockLightEnergy2.add(Blocks.JACK_O_LANTERN);
+        fullBlockLightEnergy2.add(Blocks.SEA_LANTERN);
+        fullBlockLightEnergy2.add(Blocks.SHROOMLIGHT);
+        fullBlockLightEnergy2.add(Blocks.END_ROD);
         baseCost.add(Blocks.AIR);
         baseCost.add(Blocks.WATER);
         baseCost.add(Blocks.LAVA);
@@ -135,6 +151,19 @@ public final class VoidClamMod {
 
     public static boolean isAsyncPathfindingShutdownRequested() {
         return asyncPathfindingShutdownRequested;
+    }
+
+    public static int resourceCapForSize(int size) {
+        return Math.max(1, size) * 10;
+    }
+
+    public static void clampResourcesForSize(Module m) {
+        if (m == null) return;
+        int cap = resourceCapForSize(m.currentSize);
+        if (m.energy > cap) m.energy = cap;
+        if (m.material > cap) m.material = cap;
+        if (m.energy < 0) m.energy = 0;
+        if (m.material < 0) m.material = 0;
     }
 
     public static int autoGrowRepairIntervalTicks() {
@@ -637,6 +666,7 @@ public final class VoidClamMod {
                     }
                 }
             }
+            clampResourcesForSize(m);
             syncClamCoreBlockEntityFromModule(world, m);
             tickLightCacheRebuildStep(world, m);
             tickOreCacheRebuildStep(world, m);
@@ -658,6 +688,8 @@ public final class VoidClamMod {
             int phase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, 20);
             int seekIntervalTicks = VoidClamConfig.get().seekAttemptIntervalTicks();
             int seekPhase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, seekIntervalTicks);
+            int defenseIntervalTicks = VoidClamConfig.get().defenseDetectionIntervalTicks();
+            int defensePhase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13 + 7, defenseIntervalTicks);
             UUID clamId = m.clamId;
             if ((t + phase) % 20 == 0) {
                 tickCoreCheckAtHeart(world, pos, clamId);
@@ -669,13 +701,30 @@ public final class VoidClamMod {
             if ((t + phase + 11) % (4 * 20) == 0) {
                 tickHeartbeatForModule(world, getModuleByClamId(clamId));
             }
-            if ((t + phase + 7) % (5 * 20) == 0) {
+            if ((t + defensePhase) % defenseIntervalTicks == 0) {
                 tickDefenseForModule(world, getModuleByClamId(clamId));
             }
         }
     }
 
-    public static boolean isLight(Block block) { return lights.contains(block); }
+    private static boolean isCopperTorchOrLantern(Block block) {
+        Identifier id = Registries.BLOCK.getId(block);
+        if (id == null) return false;
+        String p = id.getPath();
+        if (!p.contains("copper")) return false;
+        if (p.contains("bulb")) return false;
+        return p.contains("torch") || p.contains("lantern");
+    }
+
+    public static boolean isLight(Block block) {
+        return lights.contains(block) || isCopperTorchOrLantern(block);
+    }
+
+    public static int lightEnergyForBlock(Block block) {
+        if (block == Blocks.BEACON) return 5;
+        if (fullBlockLightEnergy2.contains(block)) return 2;
+        return 1;
+    }
 
     /**
      * Half-width of the light seek box on each axis: {@code max(dx,dy,dz) <= 4 * effectiveSize},
@@ -901,6 +950,7 @@ public final class VoidClamMod {
         m.busyFlagMainCycle = 0;
         m.lightPathGoalPacked = null;
         m.orePathGoalPacked = null;
+        m.orePathForMaterialHunger = false;
     }
 
     /**
@@ -1156,6 +1206,9 @@ public final class VoidClamMod {
             return lines;
         }
         if (world == null) {
+            boolean oreHunger = m.seekLights && m.material < VoidClamConfig.get().clam_material_seek_threshold;
+            boolean materialOreFlow = oreHunger || (m.seekLights && m.prioritizeRepairOreSeek);
+            String activeGoal = m.orePathGoalPacked != null ? "ore" : (m.lightPathGoalPacked != null ? "light" : "none");
             lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
                 + " status=" + m.status + " stubBuilt=" + m.stubBuilt + " (dimension not loaded)");
             lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
@@ -1165,10 +1218,16 @@ public final class VoidClamMod {
             lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
                 + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
                 + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
+            lines.add("resources: energy=" + m.energy + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
+                + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
+            lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " activeGoal=" + activeGoal);
             lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=?");
             lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
             return lines;
         }
+        boolean oreHunger = m.seekLights && m.material < VoidClamConfig.get().clam_material_seek_threshold;
+        boolean materialOreFlow = oreHunger || (m.seekLights && m.prioritizeRepairOreSeek);
+        String activeGoal = m.orePathGoalPacked != null ? "ore" : (m.lightPathGoalPacked != null ? "light" : "none");
         lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
             + " status=" + m.status + " stubBuilt=" + m.stubBuilt);
         lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
@@ -1178,6 +1237,9 @@ public final class VoidClamMod {
         lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
             + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
             + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
+        lines.add("resources: energy=" + m.energy + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
+            + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
+        lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " activeGoal=" + activeGoal);
         lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=" + world.getTime());
         lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
         return lines;
@@ -1258,7 +1320,18 @@ public final class VoidClamMod {
 
     public static void addEnergy(UUID clamId, int delta) {
         Module m = getModuleById(clamId);
-        if (m != null) m.energy = Math.max(0, m.energy + delta);
+        if (m != null) {
+            m.energy = m.energy + delta;
+            clampResourcesForSize(m);
+        }
+    }
+
+    public static void addMaterial(UUID clamId, int delta) {
+        Module m = getModuleById(clamId);
+        if (m != null) {
+            m.material = m.material + delta;
+            clampResourcesForSize(m);
+        }
     }
 
     /** Schedule runnable on main thread after delayTicks (call from main thread). */
@@ -1449,33 +1522,94 @@ public final class VoidClamMod {
         growSavedSeekOres.clear();
     }
 
+    /**
+     * Expected obsidian shell geometry built by {@link CommandToolbox#buildShell}: diamond rings per Y level,
+     * intentional horizontal gap at y=0, and intentionally no full bottom cap.
+     */
+    public static boolean isExpectedObsidianShellBlock(int dx, int dy, int dz, int size) {
+        int t = Math.max(1, size);
+        if (dy == 0) return false; // intentional horizontal gap
+        int yMin = -t / 2 + 1;     // intentional lack of bottom cap
+        int yMax = t - 1;
+        if (dy < yMin || dy > yMax) return false;
+        int ringRadius = (t - 1) - Math.abs(dy);
+        if (ringRadius < 0) return false;
+        return Math.abs(dx) + Math.abs(dz) == ringRadius;
+    }
+
+    public static ShellDamageStats inspectObsidianShellDamage(ServerWorld world, Module m) {
+        int size = Math.max(1, m.currentSize);
+        int missing = 0;
+        int present = 0;
+        int yMin = -size / 2 + 1;
+        int yMax = size - 1;
+        int horiz = Math.max(0, size - 1);
+        for (int dy = yMin; dy <= yMax; dy++) {
+            for (int dx = -horiz; dx <= horiz; dx++) {
+                for (int dz = -horiz; dz <= horiz; dz++) {
+                    if (!isExpectedObsidianShellBlock(dx, dy, dz, size)) continue;
+                    BlockPos p = new BlockPos(m.x + dx, m.y + dy, m.z + dz);
+                    if (world.getBlockState(p).isOf(Blocks.OBSIDIAN)) {
+                        present++;
+                    } else {
+                        missing++;
+                    }
+                }
+            }
+        }
+        return new ShellDamageStats(present, missing);
+    }
+
+    private static boolean isGrowthPassThrough(BlockState state) {
+        if (state == null || state.isAir() || state.isOf(Blocks.WATER) || state.isOf(Blocks.LAVA)
+            || state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.NETHER_WART_BLOCK)
+            || state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            return true;
+        }
+        return state.isIn(SCULK_REPLACEABLE_TAG) || state.isIn(PALE_MOSS_REPLACE_TAG);
+    }
+
     /** Auto repair + optional grow for one clam (scheduled periodically when awake). */
     private static void runAutoGrowRoutineSingle(ServerWorld world, Module m) {
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
+        int shellDamage = inspectObsidianShellDamage(world, m).shellMissing();
+        if (shellDamage > 0) {
+            m.prioritizeRepairOreSeek = m.seekLights && m.material < shellDamage;
+            CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
+            m.oresBlackList.clear();
+            m.lightsBlackList.clear();
+            clampResourcesForSize(m);
+            return;
+        }
+        m.prioritizeRepairOreSeek = false;
+        // No shell damage: flesh/path cleanup remains free as before.
         CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
         m.oresBlackList.clear();
         m.lightsBlackList.clear();
         VoidClamConfig cfg = VoidClamConfig.get();
         if (m.energy > cfg.clam_grow_energymultiplier * m.currentSize && m.currentSize < cfg.clam_size_max) {
             double cst = 0;
-            int hasRoom = 1;
             for (int ix = x - csize + 2; ix <= x + csize - 2; ix++) {
                 for (int iz = z - csize + 2; iz <= z + csize - 2; iz++) {
                     for (int iy = y - 2; iy <= y + csize / 2 + 2; iy++) {
                         BlockState state = world.getBlockState(new BlockPos(ix, iy, iz));
-                        Block b = state.getBlock();
-                        if (b != Blocks.AIR && b != Blocks.WATER && b != Blocks.LAVA && b != Blocks.OBSIDIAN
-                            && b != Blocks.NETHER_WART_BLOCK && b != VoidClamCoreBlocks.CORE_BLOCK) {
+                        if (!isGrowthPassThrough(state)) {
+                            Block b = state.getBlock();
                             float br = b.getBlastResistance();
-                            if (br < 0) hasRoom = 0;
+                            if (br < 0) {
+                                cst = Double.MAX_VALUE;
+                                break;
+                            }
                             else cst += br;
                         }
                     }
+                    if (cst == Double.MAX_VALUE) break;
                 }
+                if (cst == Double.MAX_VALUE) break;
             }
             if (cst <= 10 * csize) {
-                int nextSize = Math.min(m.currentSize + 2, cfg.clam_size_max);
+                int nextSize = Math.min(m.currentSize + 1, cfg.clam_size_max);
                 if (nextSize > m.currentSize) {
                     m.energy = 0;
                     CommandToolbox.clamReSize(world, m.clamId, nextSize);
@@ -1483,6 +1617,7 @@ public final class VoidClamMod {
                 }
             }
         }
+        clampResourcesForSize(m);
     }
 
     public static void tickCoreCheck(ServerWorld world) {
@@ -1519,8 +1654,10 @@ public final class VoidClamMod {
         if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         float volume = Math.min(3f, (float) m.currentSize / 4f);
-        SoundEvent dreamHornSound = net.minecraft.registry.Registries.SOUND_EVENT.get(Identifier.of("minecraft", "item.goat_horn.sound.dream_goat_horn"));
-        final SoundEvent soundRef = dreamHornSound;
+        SoundEvent soundRef = SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
+        if (SoundEvents.GOAT_HORN_SOUNDS.size() > 6) {
+            soundRef = SoundEvents.GOAT_HORN_SOUNDS.get(6).value();
+        }
         for (ServerPlayerEntity player : world.getPlayers()) {
             if (player.isSpectator()) continue;
             if ("serbantein".equalsIgnoreCase(player.getName().getString())) continue;
@@ -1532,9 +1669,8 @@ public final class VoidClamMod {
                 if (state.isReplaceable() || state.isAir())
                     world.setBlockState(adj, Blocks.NETHER_WART_BLOCK.getDefaultState());
             }
-            SoundEvent hornSound = soundRef != null ? soundRef : SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
             VoidClamSfx.playBlockSound(world, null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,
-                hornSound, SoundCategory.HOSTILE, volume, DEFENSE_HORN_PITCH);
+                soundRef, SoundCategory.HOSTILE, volume, DEFENSE_HORN_PITCH);
             player.addStatusEffect(new StatusEffectInstance(StatusEffects.HUNGER, DEFENSE_EFFECT_TICKS, 0));
             player.addStatusEffect(new StatusEffectInstance(StatusEffects.MINING_FATIGUE, DEFENSE_EFFECT_TICKS, 0));
         }

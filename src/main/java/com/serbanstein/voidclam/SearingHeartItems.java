@@ -91,6 +91,7 @@ public final class SearingHeartItems {
         n.putInt("type", m.type);
         n.putInt("currentSize", m.currentSize);
         n.putInt("status", m.status);
+        n.putInt("material", m.material);
         n.putInt("energy", m.energy);
         n.putInt("age", m.age);
         n.putBoolean("seekLights", m.seekLights);
@@ -136,6 +137,7 @@ public final class SearingHeartItems {
         m.currentSize = n.getInt("currentSize").orElse(1);
         if (m.currentSize < 1) m.currentSize = 1;
         m.status = n.getInt("status").orElse(0);
+        m.material = Math.max(0, n.getInt("material").orElse(0));
         m.energy = n.getInt("energy").orElse(0);
         m.age = n.getInt("age").orElse(0);
         m.seekLights = n.getBoolean("seekLights").orElse(false);
@@ -159,6 +161,7 @@ public final class SearingHeartItems {
         into.type = snapshot.type;
         into.currentSize = snapshot.currentSize;
         into.status = snapshot.status;
+        into.material = snapshot.material;
         into.energy = snapshot.energy;
         into.age = snapshot.age;
         into.seekLights = snapshot.seekLights;
@@ -180,6 +183,8 @@ public final class SearingHeartItems {
         into.oreCacheRebuildTicksRemaining = 0;
         into.oreCacheRebuildCursor = 0L;
         into.pathfindingResumeWorldTime = 0;
+        into.prioritizeRepairOreSeek = false;
+        into.orePathForMaterialHunger = false;
     }
 
     public static boolean isPlainBlastFurnaceDrop(ItemStack stack) {
@@ -195,6 +200,8 @@ public final class SearingHeartItems {
             return;
         }
         m.ensureClamId();
+        m.material = Math.max(0, m.material);
+        m.energy = Math.max(0, m.energy);
         ComponentMap current = furnace.getComponents();
         NbtCompound root = new NbtCompound();
         NbtComponent existingData = current.get(DataComponentTypes.CUSTOM_DATA);

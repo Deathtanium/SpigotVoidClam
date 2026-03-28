@@ -265,7 +265,18 @@ public final class CommandToolbox {
         return false;
     }
 
-    public static void buildShell(ServerWorld world, int x, int y, int z, int tsize, net.minecraft.block.Block mat) {
+    /**
+     * @param shrinkEquatorialWartByOneRing when {@code mat} is wart: if true (grow), heart-plane flesh uses
+     *     {@code |dx|+|dz| <= tsize-3} to sit inside the shell ring; if false (repair), uses full oct slice
+     *     {@code <= tsize-2}. Ignored for obsidian (no iy==y placement).
+     */
+    public static void buildShell(
+        ServerWorld world,
+        int x, int y, int z,
+        int tsize,
+        net.minecraft.block.Block mat,
+        boolean shrinkEquatorialWartByOneRing
+    ) {
         net.minecraft.block.BlockState state = mat.getDefaultState();
         for (int iy = y + tsize - 1; iy >= y + 1; iy--) {
             int k = Math.abs(iy - y);
@@ -305,6 +316,30 @@ public final class CommandToolbox {
                 world.setBlockState(new BlockPos(j, iy, iz), state);
             }
         }
+        // iy == y: wart only; grow uses one inset ring so the plane matches shell step-in from iy=±1.
+        if (mat == Blocks.NETHER_WART_BLOCK) {
+            int maxHoriz = shrinkEquatorialWartByOneRing ? tsize - 3 : tsize - 2;
+            int h = Math.max(0, maxHoriz);
+            for (int dx = -h; dx <= h; dx++) {
+                for (int dz = -h; dz <= h; dz++) {
+                    if (Math.abs(dx) + Math.abs(dz) > maxHoriz) {
+                        continue;
+                    }
+                    if (!isInsideOctahedronInterior(dx, 0, dz, tsize)) {
+                        continue;
+                    }
+                    if (dx == 0 && dz == 0) {
+                        continue;
+                    }
+                    world.setBlockState(new BlockPos(x + dx, y, z + dz), state);
+                }
+            }
+        }
+    }
+
+    /** Grow / obsidian shell: wart uses inset equatorial ring; obsidian ignores inset. */
+    public static void buildShell(ServerWorld world, int x, int y, int z, int tsize, net.minecraft.block.Block mat) {
+        buildShell(world, x, y, z, tsize, mat, true);
     }
 
     public static void clamReSize(ServerWorld world, UUID clamId, int tsize) {
@@ -312,9 +347,62 @@ public final class CommandToolbox {
         if (m == null) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         VoidClamMod.prepareClamForResizeShell(m);
-        net.minecraft.block.Block mat = Blocks.NETHER_WART_BLOCK;
         int csize = m.currentSize;
         int x = m.x, y = m.y, z = m.z;
+
+        // Repair cycle (same-size resize): preserve existing obsidian shell and patch missing shell cells with wart
+        // as far as available material allows.
+        if (tsize <= csize) {
+            int size = Math.max(1, csize);
+            int yMin = -size / 2 + 1;
+            int yMax = size - 1;
+            int horiz = Math.max(0, size - 1);
+            int initialMaterial = m.material;
+            int obsidianPresent = 0;
+            int shellMissing = 0;
+            int timer = 0;
+            // Rebuild flesh without touching the outer shell: stop at size-1 so existing obsidian shell stays intact.
+            for (int i = 1; i <= Math.max(1, size - 1); i++) {
+                final int iFinal = i;
+                VoidClamMod.scheduleResizeShellDelayed(world, timer * 10L, () -> {
+                    buildShell(world, x, y, z, iFinal, Blocks.NETHER_WART_BLOCK, false);
+                    VoidClamSfx.playBlockSound(world, null, x + 0.5, y + 0.5, z + 0.5,
+                        SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
+                });
+                timer++;
+            }
+            for (int dy = yMin; dy <= yMax; dy++) {
+                for (int dx = -horiz; dx <= horiz; dx++) {
+                    for (int dz = -horiz; dz <= horiz; dz++) {
+                        if (!VoidClamMod.isExpectedObsidianShellBlock(dx, dy, dz, size)) continue;
+                        BlockPos p = new BlockPos(x + dx, y + dy, z + dz);
+                        BlockState state = world.getBlockState(p);
+                        if (state.isOf(Blocks.OBSIDIAN)) {
+                            obsidianPresent++;
+                            continue;
+                        }
+                        shellMissing++;
+                        if (m.material > 0) {
+                            world.setBlockState(p, Blocks.NETHER_WART_BLOCK.getDefaultState());
+                            m.material--;
+                            VoidClamSfx.playBlockSound(world, p, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+                        }
+                    }
+                }
+            }
+            int shellObserved = obsidianPresent + shellMissing;
+            // Keep an explicit shell inventory snapshot while repairing.
+            m.prioritizeRepairOreSeek = m.seekLights && shellObserved > 0 && shellMissing > initialMaterial;
+            // Do not run buildShell(obsidian) here: it would repaint the whole shell for free and undo material-gated wart patches.
+            long lastWartStaggerTick = world.getTime() + (long) Math.max(0, timer - 1) * 10L;
+            m.pathfindingResumeWorldTime = lastWartStaggerTick + VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
+            m.currentSize = csize;
+            VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
+            VoidClamMod.startSeekCachesRebuild(m);
+            return;
+        }
+
+        net.minecraft.block.Block mat = Blocks.NETHER_WART_BLOCK;
         int timer = 0;
 
         for (int i = 1; i <= tsize; i += 1) {
@@ -347,28 +435,6 @@ public final class CommandToolbox {
         m.currentSize = tsize;
         VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         VoidClamMod.startSeekCachesRebuild(m);
-
-        int ts = tsize - 2;
-        for (int ix = x - ts + 1; ix <= x; ix++) {
-            int iz = z - ts + 1 + Math.abs(ix - x);
-            if (ix != x || iz != z)
-                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
-        }
-        for (int ix = x - ts + 1; ix <= x; ix++) {
-            int iz = z + ts - 1 - Math.abs(ix - x);
-            if (ix != x || iz != z)
-                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
-        }
-        for (int ix = x + ts - 1; ix >= x; ix--) {
-            int iz = z - ts + 1 + Math.abs(ix - x);
-            if (ix != x || iz != z)
-                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
-        }
-        for (int ix = x + ts - 1; ix >= x; ix--) {
-            int iz = z + ts - 1 - Math.abs(x - ix);
-            if (ix != x || iz != z)
-                world.setBlockState(new BlockPos(ix, y, iz), mat.getDefaultState());
-        }
     }
 
     /** Start light/ore search for module. Scans box off-thread, pathfinds to closest target. */
@@ -399,8 +465,13 @@ public final class CommandToolbox {
                 double closestLightDist = Double.MAX_VALUE;
                 BlockPos closestOre = null;
                 double closestOreDist = Double.MAX_VALUE;
+                VoidClamConfig cfg = VoidClamConfig.get();
+                boolean oreHunger = m.seekLights && m.material < cfg.clam_material_seek_threshold;
+                boolean oreRepairPriority = m.seekLights && m.prioritizeRepairOreSeek;
+                boolean materialOreFlow = oreHunger || oreRepairPriority;
+                boolean shouldSeekOre = m.seekOres || materialOreFlow;
 
-                if (m.seekLights || m.seekOres) {
+                if (m.seekLights || shouldSeekOre) {
                     if (m.seekLights) {
                         if (VoidClamConfig.get().lightBlockCacheEnabled()) {
                             for (long packed : m.lightsCache) {
@@ -448,8 +519,10 @@ public final class CommandToolbox {
                             }
                         }
                     }
-                    if (m.seekOres) {
-                        if (VoidClamConfig.get().oreBlockCacheEnabled()) {
+                    if (shouldSeekOre) {
+                        boolean useOreCache = VoidClamConfig.get().oreBlockCacheEnabled()
+                            && !(materialOreFlow && m.oresCache.isEmpty());
+                        if (useOreCache) {
                             for (long packed : m.oresCache) {
                                 if (m.oresBlackList.contains(packed)) {
                                     continue;
@@ -501,7 +574,12 @@ public final class CommandToolbox {
                 }
 
                 BlockPos closest = null;
-                if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
+                if (materialOreFlow && closestOre != null) {
+                    closest = closestOre;
+                } else if (materialOreFlow && closestLight != null) {
+                    // Material refill mode: if no ore candidate is available, fall back to regular light seeking.
+                    closest = closestLight;
+                } else if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
                     closest = closestLight;
                 } else if (closestOre != null) {
                     closest = closestOre;
@@ -517,17 +595,21 @@ public final class CommandToolbox {
                         m.lightsBlackList.add(goalPacked);
                         m.lightPathGoalPacked = goalPacked;
                         m.orePathGoalPacked = null;
+                        m.orePathForMaterialHunger = false;
                     } else if (closestOre != null && closest.equals(closestOre)) {
                         long goalPacked = closest.asLong();
                         m.oresBlackList.add(goalPacked);
                         m.orePathGoalPacked = goalPacked;
                         m.lightPathGoalPacked = null;
+                        m.orePathForMaterialHunger = materialOreFlow;
                     } else {
                         m.lightPathGoalPacked = null;
                         m.orePathGoalPacked = null;
+                        m.orePathForMaterialHunger = false;
                     }
                     Pathfinder.calculatePath(world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ());
                 } else {
+                    m.orePathForMaterialHunger = false;
                     VoidClamMod.releasePathfindingMainCycle(m);
                 }
             } catch (Throwable t) {
@@ -552,6 +634,8 @@ public final class CommandToolbox {
         lines.add(
             "config seek_target_cache="
                 + cfg.seekTargetCacheEnabled()
+                + " material_seek_threshold="
+                + cfg.clam_material_seek_threshold
                 + " astar_mode="
                 + (cfg.astar_mode != null ? cfg.astar_mode : "async")
                 + " (clamReach target scan shares thread with A*)"

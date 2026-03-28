@@ -1453,7 +1453,7 @@ public final class Pathfinder {
         // Skip if this goal was enqueued before seek flags were turned off
         BlockPos goalPos = new BlockPos(gnode.x, gnode.y, gnode.z);
         net.minecraft.block.Block goalBlock = world.getBlockState(goalPos).getBlock();
-        if (VoidClamMod.isOre(goalBlock) && !mod.seekOres) {
+        if (VoidClamMod.isOre(goalBlock) && !mod.seekOres && !mod.orePathForMaterialHunger) {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
@@ -1541,11 +1541,19 @@ public final class Pathfinder {
                                         return;
                                     }
                                     applyContainerResult(world, containers, breakPos, starDrop);
-                                    VoidClamMod.addEnergy(pathClamId, 1);
+                                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(Blocks.BEACON));
                                     VoidClamMod.completeOnePathApplyStep(modForFlag);
                                 });
                         }
                     );
+                    return;
+                }
+
+                // Ore at goal: fortune-3 drops, store in containers, replace with wart
+                if (refNode == gnode && VoidClamMod.isOre(mat.getBlock()) && modForFlag.orePathForMaterialHunger) {
+                    replaceWithWartAndPulse(world, pos);
+                    VoidClamMod.addMaterial(pathClamId, 1);
+                    VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
 
@@ -1639,7 +1647,7 @@ public final class Pathfinder {
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat.getBlock()))
-                    VoidClamMod.addEnergy(pathClamId, 1); // energy only when light source is eaten
+                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat.getBlock())); // energy only when light source is eaten
                 if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
