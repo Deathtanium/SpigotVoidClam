@@ -33,10 +33,12 @@ import org.jetbrains.annotations.Nullable;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Central state: modules keyed by {@link Module#clamId}, path-result queue, grow-pending coordination.
- * Persistence is the searing heart (blast furnace) in-world; each {@link Module} records {@link Module#worldKey}.
+ * Persistence is the searing heart (blast furnace) in-world (no seek cache / blacklist lists on disk); each {@link Module}
+ * records {@link Module#worldKey}.
  */
 public final class VoidClamMod {
     private static final int MAX_MODULES = 1001;
@@ -72,10 +74,15 @@ public final class VoidClamMod {
     private static int growCommandTargetSize = 0;
     private static final Map<UUID, Boolean> growSavedSeekLights = new HashMap<>();
     private static final Map<UUID, Boolean> growSavedSeekOres = new HashMap<>();
+    /**
+     * Outstanding {@link CommandToolbox#clamReSize} delayed shell/obsidian steps per dimension. Grow/repair waits on this instead of
+     * {@link VoidClamModScheduler#hasPendingTasks(ServerWorld)} so path-apply and other scheduled work does not wedge the queue.
+     */
+    private static final Map<RegistryKey<World>, AtomicInteger> resizeShellAnimationPendingByWorld = new ConcurrentHashMap<>();
     /** Blast furnace fuel slot (see {@code AbstractFurnaceBlockEntity.FUEL_SLOT_INDEX} in mappings). */
     private static final int CLAM_CORE_FUEL_SLOT = 1;
-    /** Per-clam auto repair/grow cadence (overworld world time ticks), staggered by core position. */
-    public static final int AUTO_GROW_REPAIR_INTERVAL_TICKS = 5 * 60 * 20;
+    /** Default per-clam auto repair/grow cadence in ticks when config is absent. */
+    public static final int DEFAULT_AUTO_GROW_REPAIR_INTERVAL_TICKS = 5 * 60 * 20;
     /** Batched ticks to spread a full light-cache rescan after repair (sync on server thread). */
     public static final int LIGHT_CACHE_REBUILD_TICKS = 100;
     /** No reach/pathfind until this many ticks after obsidian shell from {@link CommandToolbox#clamReSize}. */
@@ -128,6 +135,14 @@ public final class VoidClamMod {
 
     public static boolean isAsyncPathfindingShutdownRequested() {
         return asyncPathfindingShutdownRequested;
+    }
+
+    public static int autoGrowRepairIntervalTicks() {
+        VoidClamConfig cfg = VoidClamConfig.get();
+        if (cfg == null) {
+            return DEFAULT_AUTO_GROW_REPAIR_INTERVAL_TICKS;
+        }
+        return cfg.autoGrowRepairIntervalTicks();
     }
 
     /**
@@ -196,6 +211,9 @@ public final class VoidClamMod {
         if (m == null) return;
         releasePathfindingMainCycle(m);
         m.lightsBlackList.clear();
+        m.oresBlackList.clear();
+        m.seekEphemeralDataExpireAtWorldTime = 0L;
+        m.seekEphemeralNeedSeekDataRefresh = false;
         purgeTargetsForClam(m.clamId);
         Pathfinder.clearSyncAStarJobsForClam(m.clamId);
     }
@@ -236,7 +254,16 @@ public final class VoidClamMod {
             return;
         }
         releasePathfindingMainCycle(victim);
+        victim.lightsCache.clear();
+        victim.oresCache.clear();
+        victim.lightCacheRebuildTicksRemaining = 0;
+        victim.lightCacheRebuildCursor = 0L;
+        victim.oreCacheRebuildTicksRemaining = 0;
+        victim.oreCacheRebuildCursor = 0L;
         victim.lightsBlackList.clear();
+        victim.oresBlackList.clear();
+        victim.seekEphemeralDataExpireAtWorldTime = 0L;
+        victim.seekEphemeralNeedSeekDataRefresh = false;
         purgeTargetsForVictimClamId(victimId);
         asyncPathfindingKillVictimClamId = victimId;
         asyncPathfindingKillBarrierInEffect = true;
@@ -374,7 +401,66 @@ public final class VoidClamMod {
         }
         if (registerModule(m)) {
             SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+            VoidClamConfig rcfg = VoidClamConfig.get();
+            if (rcfg.lightBlockCacheEnabled() && m.seekLights && m.lightsCache.isEmpty()
+                && m.lightCacheRebuildTicksRemaining == 0) {
+                startLightCacheRebuild(m);
+            }
+            if (rcfg.oreBlockCacheEnabled() && m.seekOres && m.oresCache.isEmpty()
+                && m.oreCacheRebuildTicksRemaining == 0) {
+                startOreCacheRebuild(m);
+            }
         }
+    }
+
+    /**
+     * When a clam’s heart chunk stays unloaded for {@link #autoGrowRepairIntervalTicks()} in that dimension’s world time,
+     * drops in-memory seek caches, blacklists, and path state (same cadence as auto repair). Reloading the chunk triggers
+     * cache rebuild when {@link VoidClamConfig#seekTargetCacheEnabled()}.
+     */
+    public static void tickSeekEphemeralExpiry(MinecraftServer server) {
+        if (server == null) {
+            return;
+        }
+        for (Module m : modulesById.values()) {
+            if (m == null) {
+                continue;
+            }
+            ServerWorld w = getWorldForModule(server, m);
+            if (w == null) {
+                continue;
+            }
+            boolean loaded = w.isChunkLoaded(m.x >> 4, m.z >> 4);
+            if (loaded) {
+                m.seekEphemeralDataExpireAtWorldTime = 0L;
+                continue;
+            }
+            long t = w.getTime();
+            if (m.seekEphemeralDataExpireAtWorldTime == 0L) {
+                m.seekEphemeralDataExpireAtWorldTime = t + (long) autoGrowRepairIntervalTicks();
+            } else if (t >= m.seekEphemeralDataExpireAtWorldTime) {
+                clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry(m);
+                m.seekEphemeralDataExpireAtWorldTime = 0L;
+            }
+        }
+    }
+
+    static void clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry(Module m) {
+        if (m == null) {
+            return;
+        }
+        releasePathfindingMainCycle(m);
+        purgeTargetsForClam(m.clamId);
+        Pathfinder.clearSyncAStarJobsForClam(m.clamId);
+        m.lightsCache.clear();
+        m.oresCache.clear();
+        m.lightsBlackList.clear();
+        m.oresBlackList.clear();
+        m.lightCacheRebuildTicksRemaining = 0;
+        m.lightCacheRebuildCursor = 0L;
+        m.oreCacheRebuildTicksRemaining = 0;
+        m.oreCacheRebuildCursor = 0L;
+        m.seekEphemeralNeedSeekDataRefresh = true;
     }
 
     /** Push live {@link Module} fields into the heart blast furnace so chunk NBT persists across restarts. */
@@ -404,7 +490,7 @@ public final class VoidClamMod {
     public static void ensureAutoGrowScheduled(ServerWorld world, Module m) {
         if (m.nextAutoGrowRepairWorldTime > 0) return;
         long t = world.getTime();
-        int spread = Math.floorMod(m.x * 31 + m.y * 17 + m.z * 13, AUTO_GROW_REPAIR_INTERVAL_TICKS);
+        int spread = Math.floorMod(m.x * 31 + m.y * 17 + m.z * 13, autoGrowRepairIntervalTicks());
         m.nextAutoGrowRepairWorldTime = t + 1 + spread;
     }
 
@@ -413,7 +499,7 @@ public final class VoidClamMod {
         for (Module mm : modulesById.values()) {
             if (mm != null && mm.dimensionWorldKey().equals(world.getRegistryKey())) {
                 ensureAutoGrowScheduled(world, mm);
-                startLightCacheRebuild(mm);
+                startSeekCachesRebuild(mm);
             }
         }
     }
@@ -454,12 +540,14 @@ public final class VoidClamMod {
     public static void applySearingHeartBlockLabel(ServerWorld world, BlockPos pos) {
         BlockEntity be = world.getBlockEntity(pos);
         if (be == null) return;
-        ComponentMap withName = ComponentMap.of(
-            be.getComponents(),
-            ComponentMap.builder()
-                .add(DataComponentTypes.CUSTOM_NAME, SearingHeartItems.SEARING_NAME)
-                .build()
-        );
+        ComponentMap current = be.getComponents();
+        if (SearingHeartItems.SEARING_NAME.equals(current.get(DataComponentTypes.CUSTOM_NAME))) {
+            return;
+        }
+        ComponentMap withName = ComponentMap.builder()
+            .addAll(current)
+            .add(DataComponentTypes.CUSTOM_NAME, SearingHeartItems.SEARING_NAME)
+            .build();
         be.setComponents(withName);
         be.markDirty();
     }
@@ -526,7 +614,7 @@ public final class VoidClamMod {
         m.status = 0;
         m.stubBuilt = false;
         syncClamCoreBlockEntityFromModule(world, m);
-        startLightCacheRebuild(m);
+        startSeekCachesRebuild(m);
     }
 
     /**
@@ -537,9 +625,23 @@ public final class VoidClamMod {
         for (Module m : modulesById.values()) {
             if (m == null || !m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            if (m.seekEphemeralNeedSeekDataRefresh) {
+                m.seekEphemeralNeedSeekDataRefresh = false;
+                VoidClamConfig rcfg0 = VoidClamConfig.get();
+                if (rcfg0.seekTargetCacheEnabled()) {
+                    if (m.seekLights) {
+                        startLightCacheRebuild(m);
+                    }
+                    if (m.seekOres) {
+                        startOreCacheRebuild(m);
+                    }
+                }
+            }
             syncClamCoreBlockEntityFromModule(world, m);
             tickLightCacheRebuildStep(world, m);
-            if (m.busyFlagMainCycle == 0 && m.lightPathGoalPacked != null) {
+            tickOreCacheRebuildStep(world, m);
+            if (m.busyFlagMainCycle == 0
+                && (m.lightPathGoalPacked != null || m.orePathGoalPacked != null)) {
                 releasePathfindingMainCycle(m);
             }
             BlockPos pos = new BlockPos(m.x, m.y, m.z);
@@ -549,17 +651,19 @@ public final class VoidClamMod {
                 long due = m.nextAutoGrowRepairWorldTime;
                 if (due > 0 && t >= due) {
                     if (tryScheduleAutoGrowRepairForClam(world, m.clamId)) {
-                        m.nextAutoGrowRepairWorldTime = t + AUTO_GROW_REPAIR_INTERVAL_TICKS;
+                        m.nextAutoGrowRepairWorldTime = t + autoGrowRepairIntervalTicks();
                     }
                 }
             }
             int phase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, 20);
+            int seekIntervalTicks = VoidClamConfig.get().seekAttemptIntervalTicks();
+            int seekPhase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, seekIntervalTicks);
             UUID clamId = m.clamId;
             if ((t + phase) % 20 == 0) {
                 tickCoreCheckAtHeart(world, pos, clamId);
             }
             if (m.status != 1) continue;
-            if ((t + phase) % 20 == 0) {
+            if ((t + seekPhase) % seekIntervalTicks == 0) {
                 CommandToolbox.clamReach(world, clamId);
             }
             if ((t + phase + 11) % (4 * 20) == 0) {
@@ -602,6 +706,21 @@ public final class VoidClamMod {
         m.lightsCache.clear();
         m.lightCacheRebuildTicksRemaining = LIGHT_CACHE_REBUILD_TICKS;
         m.lightCacheRebuildCursor = 0L;
+    }
+
+    /** Clears the ore cache and rescans the seek box over {@link #LIGHT_CACHE_REBUILD_TICKS} server ticks. */
+    public static void startOreCacheRebuild(Module m) {
+        if (m == null) return;
+        if (!VoidClamConfig.get().oreBlockCacheEnabled()) return;
+        m.oresCache.clear();
+        m.oreCacheRebuildTicksRemaining = LIGHT_CACHE_REBUILD_TICKS;
+        m.oreCacheRebuildCursor = 0L;
+    }
+
+    /** After resize/repair/wake: restart both seek caches when their respective configs are enabled. */
+    public static void startSeekCachesRebuild(Module m) {
+        startLightCacheRebuild(m);
+        startOreCacheRebuild(m);
     }
 
     /**
@@ -655,6 +774,57 @@ public final class VoidClamMod {
         }
     }
 
+    /**
+     * Call from server tick for each loaded clam while {@link Module#oreCacheRebuildTicksRemaining} &gt; 0.
+     * Processes a fair slice of the scan volume for this tick.
+     */
+    public static void tickOreCacheRebuildStep(ServerWorld world, Module m) {
+        if (m == null || m.oreCacheRebuildTicksRemaining <= 0) return;
+        if (!VoidClamConfig.get().oreBlockCacheEnabled()) {
+            m.oreCacheRebuildTicksRemaining = 0;
+            m.oreCacheRebuildCursor = 0;
+            return;
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (!isPathfindingAllowedYet(world, m)) return;
+        long total = lightSeekScanVolume(m.currentSize);
+        long cursor = m.oreCacheRebuildCursor;
+        int ticksLeft = m.oreCacheRebuildTicksRemaining;
+        long remaining = total - cursor;
+        if (remaining <= 0) {
+            m.oreCacheRebuildTicksRemaining = 0;
+            m.oreCacheRebuildCursor = 0;
+            return;
+        }
+        int e = lightSeekHalfExtent(m.currentSize);
+        long span = 2L * e + 1;
+        long layer = span * span;
+        long toProcess = (remaining + (long) ticksLeft - 1L) / (long) ticksLeft;
+        BlockPos.Mutable mut = new BlockPos.Mutable();
+        for (long j = 0; j < toProcess && cursor < total; j++, cursor++) {
+            long xi = cursor / layer;
+            long rem = cursor % layer;
+            long yi = rem / span;
+            long zi = rem % span;
+            int bx = m.x - e + (int) xi;
+            int by = m.y - e + (int) yi;
+            int bz = m.z - e + (int) zi;
+            mut.set(bx, by, bz);
+            if (!world.isChunkLoaded(mut.getX() >> 4, mut.getZ() >> 4)) {
+                continue;
+            }
+            if (isOre(world.getBlockState(mut).getBlock())) {
+                m.oresCache.add(mut.asLong());
+            }
+        }
+        m.oreCacheRebuildCursor = cursor;
+        m.oreCacheRebuildTicksRemaining--;
+        if (m.oreCacheRebuildTicksRemaining <= 0 || cursor >= total) {
+            m.oreCacheRebuildTicksRemaining = 0;
+            m.oreCacheRebuildCursor = 0;
+        }
+    }
+
     /** When pathfinding cannot reach a light goal, drop it from the cache until the next repair rebuild. */
     public static void removeLightFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
         Module m = getModuleById(clamId);
@@ -677,16 +847,60 @@ public final class VoidClamMod {
         removeLightFromClamCacheAfterFailedPath(clamId, goal);
     }
 
-    /** Clears main-cycle busy, releases the light path lock in {@link Module#lightsBlackList}, and clears the active light goal. */
+    /** If the path goal is still a registered ore block, drop it from this clam's cache (unreachable prepass). */
+    public static void removeOreGoalFromCacheIfPrepassUnreachable(ServerWorld world, UUID clamId, int gx, int gy, int gz) {
+        BlockPos goal = new BlockPos(gx, gy, gz);
+        if (!isOre(world.getBlockState(goal).getBlock())) {
+            return;
+        }
+        removeOreFromClamCacheAfterFailedPath(clamId, goal);
+    }
+
+    /** When pathfinding cannot reach an ore goal, drop it from the cache until the next repair rebuild. */
+    public static void removeOreFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
+        Module m = getModuleById(clamId);
+        if (m != null) {
+            long p = pos.asLong();
+            m.oresCache.remove(p);
+            m.oresBlackList.remove(p);
+            if (m.orePathGoalPacked != null && m.orePathGoalPacked == p) {
+                m.orePathGoalPacked = null;
+            }
+        }
+    }
+
+    /**
+     * After A* cap/abort while the goal block is still a light or ore: update the matching seek cache like other failure paths.
+     */
+    public static void removeSeekGoalFromCachesAfterFailedPath(ServerWorld world, UUID clamId, int gx, int gy, int gz) {
+        BlockPos goal = new BlockPos(gx, gy, gz);
+        Block b = world.getBlockState(goal).getBlock();
+        if (isLight(b)) {
+            removeLightFromClamCacheAfterFailedPath(clamId, goal);
+        }
+        if (isOre(b)) {
+            removeOreFromClamCacheAfterFailedPath(clamId, goal);
+        }
+    }
+
+    /**
+     * Clears main-cycle busy, releases path locks in {@link Module#lightsBlackList} / {@link Module#oresBlackList},
+     * and clears active light / ore goals.
+     */
     public static void releasePathfindingMainCycle(Module m) {
         if (m == null) return;
         m.pathApplyPendingSteps = 0;
-        Long goal = m.lightPathGoalPacked;
-        if (goal != null) {
-            m.lightsBlackList.remove(goal);
+        Long lightGoal = m.lightPathGoalPacked;
+        if (lightGoal != null) {
+            m.lightsBlackList.remove(lightGoal);
+        }
+        Long oreGoal = m.orePathGoalPacked;
+        if (oreGoal != null) {
+            m.oresBlackList.remove(oreGoal);
         }
         m.busyFlagMainCycle = 0;
         m.lightPathGoalPacked = null;
+        m.orePathGoalPacked = null;
     }
 
     /**
@@ -707,10 +921,17 @@ public final class VoidClamMod {
      * Mixin hook: queue work for {@link #drainPendingLightCacheDeltas}; do not scan modules inside {@code setBlockState}.
      */
     public static void enqueueLightCacheDeltaFromBlockChange(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
-        if (!VoidClamConfig.get().lightBlockCacheEnabled()) return;
         Block ob = oldState.getBlock();
         Block nb = newState.getBlock();
-        if (!isLight(ob) && !isLight(nb)) {
+        boolean lightRel = isLight(ob) || isLight(nb);
+        boolean oreRel = isOre(ob) || isOre(nb);
+        if (!lightRel && !oreRel) {
+            return;
+        }
+        VoidClamConfig cfg = VoidClamConfig.get();
+        boolean needLight = lightRel && cfg.lightBlockCacheEnabled();
+        boolean needOre = oreRel && cfg.oreBlockCacheEnabled();
+        if (!needLight && !needOre) {
             return;
         }
         pendingLightCacheDeltas.add(new PendingLightCacheDelta(world, pos.toImmutable(), oldState, newState));
@@ -725,10 +946,57 @@ public final class VoidClamMod {
         PendingLightCacheDelta d;
         while (budget-- > 0 && (d = pendingLightCacheDeltas.poll()) != null) {
             applyLightCacheDelta(d.world, d.pos, d.oldState, d.newState);
+            applyOreCacheDelta(d.world, d.pos, d.oldState, d.newState);
         }
     }
 
+    /**
+     * If this clam has no light seek cache work in flight and the set is still empty, start the same batched rebuild used
+     * after repair so deltas are not the only source of truth until the next repair tick.
+     */
+    private static void ensureLightSeekCacheForIncomingDelta(Module m, ServerWorld world) {
+        if (m == null || !VoidClamConfig.get().lightBlockCacheEnabled() || !m.seekLights) {
+            return;
+        }
+        if (!m.dimensionWorldKey().equals(world.getRegistryKey())) {
+            return;
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            return;
+        }
+        if (!world.getBlockState(new BlockPos(m.x, m.y, m.z)).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            return;
+        }
+        if (m.lightCacheRebuildTicksRemaining > 0 || !m.lightsCache.isEmpty()) {
+            return;
+        }
+        startLightCacheRebuild(m);
+    }
+
+    /** Same idea as {@link #ensureLightSeekCacheForIncomingDelta} for ores. */
+    private static void ensureOreSeekCacheForIncomingDelta(Module m, ServerWorld world) {
+        if (m == null || !VoidClamConfig.get().oreBlockCacheEnabled() || !m.seekOres) {
+            return;
+        }
+        if (!m.dimensionWorldKey().equals(world.getRegistryKey())) {
+            return;
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            return;
+        }
+        if (!world.getBlockState(new BlockPos(m.x, m.y, m.z)).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            return;
+        }
+        if (m.oreCacheRebuildTicksRemaining > 0 || !m.oresCache.isEmpty()) {
+            return;
+        }
+        startOreCacheRebuild(m);
+    }
+
     private static void applyLightCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
+        if (!VoidClamConfig.get().lightBlockCacheEnabled()) {
+            return;
+        }
         Block ob = oldState.getBlock();
         Block nb = newState.getBlock();
         boolean wasLight = isLight(ob);
@@ -755,7 +1023,44 @@ public final class VoidClamMod {
                     m.lightPathGoalPacked = null;
                 }
             } else if (nowLight) {
+                ensureLightSeekCacheForIncomingDelta(m, world);
                 m.lightsCache.add(packed);
+            }
+        }
+    }
+
+    private static void applyOreCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
+        if (!VoidClamConfig.get().oreBlockCacheEnabled()) {
+            return;
+        }
+        Block ob = oldState.getBlock();
+        Block nb = newState.getBlock();
+        boolean wasOre = isOre(ob);
+        boolean nowOre = isOre(nb);
+        if (!wasOre && !nowOre) {
+            return;
+        }
+        long packed = pos.asLong();
+        int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
+        for (Module m : modulesById.values()) {
+            if (m == null || !m.seekOres) continue;
+            if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
+            BlockPos heart = new BlockPos(m.x, m.y, m.z);
+            if (!world.getBlockState(heart).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+                continue;
+            }
+            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            int e = lightSeekHalfExtent(m.currentSize);
+            if (Math.abs(m.x - px) > e || Math.abs(m.y - py) > e || Math.abs(m.z - pz) > e) continue;
+            if (wasOre && !nowOre) {
+                m.oresCache.remove(packed);
+                m.oresBlackList.remove(packed);
+                if (m.orePathGoalPacked != null && m.orePathGoalPacked == packed) {
+                    m.orePathGoalPacked = null;
+                }
+            } else if (nowOre) {
+                ensureOreSeekCacheForIncomingDelta(m, world);
+                m.oresCache.add(packed);
             }
         }
     }
@@ -789,7 +1094,7 @@ public final class VoidClamMod {
             m.stubBuilt = true;
         }
         ensureAutoGrowScheduled(world, m);
-        startLightCacheRebuild(m);
+        startSeekCachesRebuild(m);
     }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
@@ -855,10 +1160,11 @@ public final class VoidClamMod {
                 + " status=" + m.status + " stubBuilt=" + m.stubBuilt + " (dimension not loaded)");
             lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
                 + " pathApplyPendingSteps=" + m.pathApplyPendingSteps);
-            lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " resumeWorldTime=" + m.pathfindingResumeWorldTime
-                + " pathAllowed=?");
-            lines.add("caches: lightsCache=" + m.lightsCache.size() + " lightsBL=" + m.lightsBlackList.size()
-                + " oresBL=" + m.oresBlackList.size() + " lightCacheRebuildTicks=" + m.lightCacheRebuildTicksRemaining);
+            lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " orePathGoalPacked=" + m.orePathGoalPacked
+                + " resumeWorldTime=" + m.pathfindingResumeWorldTime + " pathAllowed=?");
+            lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
+                + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
+                + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
             lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=?");
             lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
             return lines;
@@ -867,12 +1173,55 @@ public final class VoidClamMod {
             + " status=" + m.status + " stubBuilt=" + m.stubBuilt);
         lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
             + " pathApplyPendingSteps=" + m.pathApplyPendingSteps);
-        lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " resumeWorldTime=" + m.pathfindingResumeWorldTime
-            + " pathAllowed=" + isPathfindingAllowedYet(world, m));
-        lines.add("caches: lightsCache=" + m.lightsCache.size() + " lightsBL=" + m.lightsBlackList.size()
-            + " oresBL=" + m.oresBlackList.size() + " lightCacheRebuildTicks=" + m.lightCacheRebuildTicksRemaining);
+        lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " orePathGoalPacked=" + m.orePathGoalPacked
+            + " resumeWorldTime=" + m.pathfindingResumeWorldTime + " pathAllowed=" + isPathfindingAllowedYet(world, m));
+        lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
+            + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
+            + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
         lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=" + world.getTime());
         lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
+        return lines;
+    }
+
+    /**
+     * OP debug focused on chunk-unload behavior: whether activity should be paused, unload-expiry timer state,
+     * and whether cache/blacklist refresh is pending on next loaded tick.
+     */
+    public static List<String> debugChunkUnloadPauseLines(MinecraftServer server, Module m) {
+        List<String> lines = new ArrayList<>();
+        if (m == null) {
+            lines.add("module=null");
+            return lines;
+        }
+        ServerWorld world = getWorldForModule(server, m);
+        int intervalTicks = autoGrowRepairIntervalTicks();
+        lines.add("interval: autoGrowRepairTicks=" + intervalTicks + " (" + (intervalTicks / 20) + "s)");
+        if (world == null) {
+            lines.add("dimensionLoaded=false dimKey=" + m.dimensionWorldKey().getValue());
+            lines.add("activityPausedBecauseChunkUnloaded=true (dimension unavailable)");
+            lines.add("ephemeral: unloadExpiryWorldTime=" + m.seekEphemeralDataExpireAtWorldTime
+                + " needPostUnloadRefresh=" + m.seekEphemeralNeedSeekDataRefresh);
+            lines.add("cachesNow: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
+                + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size());
+            return lines;
+        }
+        long now = world.getTime();
+        boolean chunkLoaded = world.isChunkLoaded(m.x >> 4, m.z >> 4);
+        long expiryAt = m.seekEphemeralDataExpireAtWorldTime;
+        long remaining = expiryAt > 0 ? Math.max(0L, expiryAt - now) : -1L;
+        lines.add("world: dim=" + world.getRegistryKey().getValue() + " worldTime=" + now
+            + " heartChunkLoaded=" + chunkLoaded);
+        lines.add("activity: tickLoadedClamCoreActive=" + chunkLoaded
+            + " pathfindingAllowedNow=" + (chunkLoaded && isPathfindingAllowedYet(world, m))
+            + " busyMainCycle=" + m.busyFlagMainCycle
+            + " status=" + m.status);
+        lines.add("ephemeral: unloadExpiryWorldTime=" + expiryAt
+            + " remainingTicks=" + (remaining >= 0 ? remaining : "not-armed")
+            + " needPostUnloadRefresh=" + m.seekEphemeralNeedSeekDataRefresh);
+        lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId)
+            + " nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime);
+        lines.add("cachesNow: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
+            + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size());
         return lines;
     }
 
@@ -885,7 +1234,9 @@ public final class VoidClamMod {
         lines.add("growPending: active=" + (growPendingWorld != null)
             + " cmdClamId=" + growCommandClamId
             + " targetSize=" + growCommandTargetSize
-            + " dim=" + (growPendingWorld == null ? "null" : growPendingWorld.getRegistryKey().getValue().toString()));
+            + " dim=" + (growPendingWorld == null ? "null" : growPendingWorld.getRegistryKey().getValue().toString())
+            + " resizeShellAnimPending="
+            + (growPendingWorld != null && isResizeShellAnimationPending(growPendingWorld)));
         if (clamId != null) {
             Boolean savedL = growSavedSeekLights.get(clamId);
             Boolean savedO = growSavedSeekOres.get(clamId);
@@ -897,12 +1248,12 @@ public final class VoidClamMod {
 
     public static void removeOresBlackList(UUID clamId, BlockPos pos) {
         Module m = getModuleById(clamId);
-        if (m != null) m.oresBlackList.remove(pos);
+        if (m != null) m.oresBlackList.remove(pos.asLong());
     }
 
     public static void addOresBlackList(UUID clamId, BlockPos pos) {
         Module m = getModuleById(clamId);
-        if (m != null) m.oresBlackList.add(pos.toImmutable());
+        if (m != null) m.oresBlackList.add(pos.asLong());
     }
 
     public static void addEnergy(UUID clamId, int delta) {
@@ -913,6 +1264,40 @@ public final class VoidClamMod {
     /** Schedule runnable on main thread after delayTicks (call from main thread). */
     public static void scheduleDelayed(ServerWorld world, long delayTicks, Runnable run) {
         VoidClamModScheduler.schedule(world, delayTicks, run);
+    }
+
+    static void trackResizeShellTaskScheduled(ServerWorld world) {
+        resizeShellAnimationPendingByWorld
+            .computeIfAbsent(world.getRegistryKey(), k -> new AtomicInteger(0))
+            .incrementAndGet();
+    }
+
+    static void trackResizeShellTaskCompleted(ServerWorld world) {
+        AtomicInteger c = resizeShellAnimationPendingByWorld.get(world.getRegistryKey());
+        if (c != null) {
+            c.decrementAndGet();
+        }
+    }
+
+    /** True while {@link CommandToolbox#clamReSize} still has delayed shell/obsidian runnables queued for this dimension. */
+    public static boolean isResizeShellAnimationPending(ServerWorld world) {
+        AtomicInteger c = resizeShellAnimationPendingByWorld.get(world.getRegistryKey());
+        return c != null && c.get() > 0;
+    }
+
+    /**
+     * Like {@link #scheduleDelayed} but pairs with {@link #trackResizeShellTaskScheduled}/{@link #trackResizeShellTaskCompleted}
+     * so grow/repair can wait only for resize animation, not all main-thread delayed tasks.
+     */
+    public static void scheduleResizeShellDelayed(ServerWorld world, long delayTicks, Runnable run) {
+        trackResizeShellTaskScheduled(world);
+        VoidClamModScheduler.schedule(world, delayTicks, () -> {
+            try {
+                run.run();
+            } finally {
+                trackResizeShellTaskCompleted(world);
+            }
+        });
     }
 
     /** Called every tick on server thread: drain path queue and run buildPath in each clam's dimension. */
@@ -977,7 +1362,7 @@ public final class VoidClamMod {
         placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
         m.stubBuilt = true;
-        startLightCacheRebuild(m);
+        startSeekCachesRebuild(m);
         return m.clamId;
     }
 
@@ -1045,7 +1430,9 @@ public final class VoidClamMod {
         }
         Module m = getModuleById(cmdId);
         boolean idle = (m == null || m.busyFlagMainCycle == 0);
-        if (!idle || !isTargetsQueueEmpty() || VoidClamModScheduler.hasPendingTasks(world)) return;
+        if (!idle || countTargetsQueuedForClam(cmdId) > 0 || isResizeShellAnimationPending(world)) {
+            return;
+        }
         int cmdSize = growCommandTargetSize;
         growPendingWorld = null;
         growCommandClamId = null;

@@ -9,6 +9,7 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
@@ -25,6 +26,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 
@@ -39,6 +41,35 @@ public final class Pathfinder {
 
     private static boolean pathfindingTraceEnabled() {
         return VoidClamConfig.get().pathfinding_trace;
+    }
+
+    private static boolean tickCrashCrumbsEnabled() {
+        return VoidClamConfig.get().tick_crash_crumbs;
+    }
+
+    /** Rough JVM stack depth (for correlating how close we were to overflow). */
+    private static int approxJavaStackDepth() {
+        return Thread.currentThread().getStackTrace().length;
+    }
+
+    private static String itemIdForCrumb(ItemStack stack) {
+        try {
+            return Registries.ITEM.getId(stack.getItem()).toString();
+        } catch (Throwable t) {
+            return String.valueOf(stack.getItem());
+        }
+    }
+
+    private static void logStackOverflowContext(String where, Object... extra) {
+        try {
+            LOGGER.error(
+                "[voidclam/crash-crumbs] StackOverflowError in {} — if trace stops at Guava only, run with larger -Xss. approxFrames={} thread={} extra={}",
+                where,
+                approxJavaStackDepth(),
+                Thread.currentThread().getName(),
+                extra.length > 0 ? Arrays.toString(extra) : "()");
+        } catch (Throwable ignored) {
+        }
     }
 
     /** {@link BlockBfs} uses {@code int} visit caps; unbounded job config maps to {@link Integer#MAX_VALUE}. */
@@ -131,6 +162,17 @@ public final class Pathfinder {
      */
     public static void tickSyncAStarJobs(int globalStepBudget) {
         if (globalStepBudget <= 0 || syncAStarJobs.isEmpty()) return;
+        if (tickCrashCrumbsEnabled()) {
+            AStarJob head = syncAStarJobs.peek();
+            long wt = head != null ? head.worldRef.getTime() : -1L;
+            LOGGER.info(
+                "[voidclam/crash-crumbs] tickSyncAStarJobs start worldTime={} budget={} queuedJobs={} fairnessDeque={} approxFrames={}",
+                wt,
+                globalStepBudget,
+                syncAStarJobs.size(),
+                syncAStarFairness.size(),
+                approxJavaStackDepth());
+        }
         if (syncAStarFairness.isEmpty()) {
             syncAStarFairness.addAll(syncAStarJobs);
         }
@@ -151,7 +193,13 @@ public final class Pathfinder {
                 syncAStarFairness.addLast(job);
                 continue;
             }
-            int used = job.step(job.worldRef, globalStepBudget);
+            int used;
+            try {
+                used = job.step(job.worldRef, globalStepBudget);
+            } catch (StackOverflowError e) {
+                logStackOverflowContext("tickSyncAStarJobs job.step", "clamId=" + job.clamId, "phase=" + job.phase);
+                throw e;
+            }
             globalStepBudget -= used;
             if (job.isFinished()) {
                 syncAStarJobs.remove(job);
@@ -298,6 +346,7 @@ public final class Pathfinder {
             prepassBfs = null;
             if (!reachable) {
                 VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+                VoidClamMod.removeOreGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
                 finishFail(modForFlag);
                 return used;
             }
@@ -561,9 +610,11 @@ public final class Pathfinder {
         if (blockEntityAsWall && bl.getBlock() instanceof BlockEntityProvider) {
             return 2500;
         }
-        float hard = getHardness(world, nextPos, bl);
-        if (hard > 5 || hard < 0) {
-            return 2500;
+        if (!skipHardnessWallForTraversal(bl)) {
+            float hard = getHardness(world, nextPos, bl);
+            if (hard > 5 || hard < 0) {
+                return 2500;
+            }
         }
         if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, pathChunkCache, nextPos) && isSolid(world, pathChunkCache, nextPos.down()))) {
             return 1;
@@ -591,6 +642,16 @@ public final class Pathfinder {
         UUID effectiveClamId = pathClamId != null ? pathClamId : modForFlag.clamId;
         if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
             return AStarExpandResult.ABORT;
+        }
+        if (tickCrashCrumbsEnabled() && astarIterationsBeforeStep > 0L && (astarIterationsBeforeStep & 16383L) == 0L) {
+            LOGGER.info(
+                "[voidclam/crash-crumbs] expandOneAStarIteration clamId={} astarIter={} goal=({},{},{}) open={} closed={} approxFrames={}",
+                effectiveClamId,
+                astarIterationsBeforeStep,
+                gx, gy, gz,
+                frontier.openSize(),
+                frontier.closedSize(),
+                approxJavaStackDepth());
         }
         if (frontier.isOpenEmpty()) {
             return AStarExpandResult.NO_PATH;
@@ -730,7 +791,17 @@ public final class Pathfinder {
     }
 
     /**
-     * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}).
+     * Pathfinding treats extreme {@link BlockState#getHardness} as a solid wall, but some blocks report misleading values
+     * (fluids, {@link VoidClamMod#isBaseCost base-cost} blocks like snow). Non-empty {@link BlockState#getFluidState}
+     * covers waterlogging, powder-snow fluid, and typical modded fluids without listing each block.
+     */
+    private static boolean skipHardnessWallForTraversal(BlockState bl) {
+        return VoidClamMod.isBaseCost(bl.getBlock()) || !bl.getFluidState().isEmpty();
+    }
+
+    /**
+     * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}, for
+     * neighbors where the goal exception for {@link BlockEntityProvider} does not apply).
      */
     private static boolean isPathfindCellImpassable(ServerWorld world, PathfindChunkCache pathChunkCache, BlockPos pos) {
         BlockState bl = pathChunkCache.getBlockState(pos);
@@ -739,6 +810,9 @@ public final class Pathfinder {
         }
         if (bl.getBlock() instanceof BlockEntityProvider) {
             return true;
+        }
+        if (skipHardnessWallForTraversal(bl)) {
+            return false;
         }
         float h = getHardness(world, pos, bl);
         return h > 5 || h < 0;
@@ -827,10 +901,9 @@ public final class Pathfinder {
             int raw = cfg.astar_sync_global_max_steps_per_tick;
             int perTick = cfg.effectiveSyncMaxStepsPerTick();
             if (raw == 0) {
-                int n = Math.max(1, Runtime.getRuntime().availableProcessors());
                 LOGGER.debug(
-                    "[VoidClam] pathfinding start sync_batched clamId={} {} -> {} expansionsPerTick={} (astar_sync_global_max_steps_per_tick=0 guessedBase={} cpus={})",
-                    clamId, from, goal, perTick, n * 128, n
+                    "[VoidClam] pathfinding start sync_batched clamId={} {} -> {} expansionsPerTick={} (astar_sync_global_max_steps_per_tick=0 guessedBase={} cpuMHz={})",
+                    clamId, from, goal, perTick, cfg.syncBudgetBaseBeforeQuarter(), VoidClamConfig.syncBudgetResolvedCpuMhz()
                 );
             } else {
                 LOGGER.debug(
@@ -883,6 +956,7 @@ public final class Pathfinder {
                     clamId, gx, gy, gz);
             }
             VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+            VoidClamMod.removeOreGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
         }
@@ -912,7 +986,7 @@ public final class Pathfinder {
                         "[voidclam/Pathfinder][trace] astar(async-pathworker) CAP clamId={} astarIter={} open={} closed={}",
                         clamId, astarIterations, af.openSize(), af.closedSize());
                 }
-                VoidClamMod.removeLightFromClamCacheAfterFailedPath(clamId, new BlockPos(gx, gy, gz));
+                VoidClamMod.removeSeekGoalFromCachesAfterFailedPath(world, clamId, gx, gy, gz);
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return false;
             }
@@ -1095,6 +1169,61 @@ public final class Pathfinder {
         }
     }
 
+    /**
+     * Counts chest, trapped chest, and barrel blocks reachable from the clam heart through nether wart / core
+     * within the same axis bounds as pathfinding container BFS ({@link #runContainerBfsOnWorld}).
+     * Runs synchronously on the calling thread (intended: server thread).
+     */
+    public static int countConnectedStorageBlocks(ServerWorld world, Module mod) {
+        if (mod == null || world == null) {
+            return 0;
+        }
+        mod.ensureClamId();
+        if (!world.getRegistryKey().equals(mod.dimensionWorldKey())) {
+            return 0;
+        }
+        if (!world.isChunkLoaded(mod.x >> 4, mod.z >> 4)) {
+            return 0;
+        }
+        int cSize = Math.max(1, mod.currentSize);
+        int cx = mod.x, cy = mod.y, cz = mod.z;
+        long startLong = BlockPos.asLong(cx, cy, cz);
+        List<Long> containersOut = new ArrayList<>();
+        BlockBfs.EdgePolicy containerPolicy = new BlockBfs.EdgePolicy() {
+            @Override
+            public boolean expandFrom(ServerWorld w, long curLong, int distanceFromStart) {
+                if (curLong == startLong) return true;
+                BlockState st = w.getBlockState(BlockPos.fromLong(curLong));
+                return VoidClamCoreBlocks.isWartOrCore(st);
+            }
+
+            @Override
+            public boolean canTraverseTo(ServerWorld w, long fromLong, long toLong, int fromDistance) {
+                BlockPos p = BlockPos.fromLong(toLong);
+                return isWithinPathfindingRange(p.getX(), p.getY(), p.getZ(), cx, cy, cz, cSize);
+            }
+        };
+        BlockBfs bfs = BlockBfs.start(
+            world,
+            startLong,
+            containerPolicy,
+            Integer.MAX_VALUE,
+            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
+            null,
+            null,
+            asyncPathfindingAbortChecker(world, cx, cz, mod.clamId),
+            BlockBfs.NO_EARLY_GOAL,
+            (w, posLong, d) -> {
+                BlockState state = w.getBlockState(BlockPos.fromLong(posLong));
+                if (isContainerBlock(state.getBlock())) {
+                    containersOut.add(posLong);
+                }
+            }
+        );
+        bfs.runToCompletionOnCurrentThread();
+        return containersOut.size();
+    }
+
     private static void replaceWithWartAndPulse(ServerWorld world, BlockPos breakPos) {
         int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, breakPos);
         world.setBlockState(breakPos, Blocks.NETHER_WART_BLOCK.getDefaultState());
@@ -1104,64 +1233,172 @@ public final class Pathfinder {
 
     /** Main thread: try insert into containers; if none, create barrel at breakPos. Replaces breakPos with wart when stored in existing container. */
     private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, ItemStack toStore) {
-        for (long l : containerPositions) {
-            if (toStore.isEmpty()) break;
-            tryInsertInto(world, BlockPos.fromLong(l), toStore);
+        if (tickCrashCrumbsEnabled()) {
+            LOGGER.info(
+                "[voidclam/crash-crumbs] applyContainerResult(single) wt={} dim={} containers={} break=({},{},{}) item={} x{} approxFrames={}",
+                world.getTime(),
+                world.getRegistryKey().getValue(),
+                containerPositions.size(),
+                breakPos.getX(), breakPos.getY(), breakPos.getZ(),
+                itemIdForCrumb(toStore),
+                toStore.getCount(),
+                approxJavaStackDepth());
         }
-        if (!toStore.isEmpty()) {
-            createBarrelAndInsert(world, breakPos, toStore);
-        } else {
-            replaceWithWartAndPulse(world, breakPos);
+        try {
+            for (long l : containerPositions) {
+                if (toStore.isEmpty()) break;
+                tryInsertInto(world, BlockPos.fromLong(l), toStore);
+            }
+            if (!toStore.isEmpty()) {
+                createBarrelAndInsert(world, breakPos, toStore);
+            } else {
+                replaceWithWartAndPulse(world, breakPos);
+            }
+        } catch (StackOverflowError e) {
+            logStackOverflowContext(
+                "applyContainerResult single",
+                "containers=" + containerPositions.size(),
+                "break=(" + breakPos.getX() + "," + breakPos.getY() + "," + breakPos.getZ() + ")",
+                "item=" + itemIdForCrumb(toStore));
+            throw e;
         }
     }
 
     /** Main thread: insert multiple stacks into containers; remainder goes to barrel. Replaces breakPos with wart when all stored. */
     private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, List<ItemStack> toStoreList) {
-        for (long l : containerPositions) {
-            boolean anyLeft = false;
-            for (ItemStack stack : toStoreList) {
-                if (stack.isEmpty()) continue;
-                tryInsertInto(world, BlockPos.fromLong(l), stack);
-                anyLeft = anyLeft || !stack.isEmpty();
+        if (tickCrashCrumbsEnabled()) {
+            int nonEmpty = 0;
+            int totalItems = 0;
+            for (ItemStack s : toStoreList) {
+                if (!s.isEmpty()) {
+                    nonEmpty++;
+                    totalItems += s.getCount();
+                }
             }
-            if (!anyLeft) break;
+            LOGGER.info(
+                "[voidclam/crash-crumbs] applyContainerResult(multi) wt={} dim={} containers={} break=({},{},{}) nonEmptyStacks={} totalItemCount={} approxFrames={}",
+                world.getTime(),
+                world.getRegistryKey().getValue(),
+                containerPositions.size(),
+                breakPos.getX(), breakPos.getY(), breakPos.getZ(),
+                nonEmpty,
+                totalItems,
+                approxJavaStackDepth());
         }
-        List<ItemStack> remainder = new ArrayList<>();
-        for (ItemStack stack : toStoreList) {
-            if (!stack.isEmpty()) remainder.add(stack);
-        }
-        if (remainder.isEmpty()) {
-            replaceWithWartAndPulse(world, breakPos);
-        } else {
-            createBarrelAndInsert(world, breakPos, remainder);
+        try {
+            for (long l : containerPositions) {
+                boolean anyLeft = false;
+                for (ItemStack stack : toStoreList) {
+                    if (stack.isEmpty()) continue;
+                    tryInsertInto(world, BlockPos.fromLong(l), stack);
+                    anyLeft = anyLeft || !stack.isEmpty();
+                }
+                if (!anyLeft) break;
+            }
+            List<ItemStack> remainder = new ArrayList<>();
+            for (ItemStack stack : toStoreList) {
+                if (!stack.isEmpty()) remainder.add(stack);
+            }
+            if (remainder.isEmpty()) {
+                replaceWithWartAndPulse(world, breakPos);
+            } else {
+                createBarrelAndInsert(world, breakPos, remainder);
+            }
+        } catch (StackOverflowError e) {
+            logStackOverflowContext(
+                "applyContainerResult multi",
+                "containers=" + containerPositions.size(),
+                "break=(" + breakPos.getX() + "," + breakPos.getY() + "," + breakPos.getZ() + ")");
+            throw e;
         }
     }
 
     private static boolean tryInsertInto(ServerWorld world, BlockPos pos, ItemStack stack) {
         if (stack.isEmpty()) return true;
+        int incoming = stack.getCount();
+        if (tickCrashCrumbsEnabled()) {
+            LOGGER.info(
+                "[voidclam/crash-crumbs] tryInsertInto enter wt={} dim={} pos=({},{},{}) item={} x{} approxFrames={}",
+                world.getTime(),
+                world.getRegistryKey().getValue(),
+                pos.getX(), pos.getY(), pos.getZ(),
+                itemIdForCrumb(stack),
+                incoming,
+                approxJavaStackDepth());
+        }
         BlockEntity be = world.getBlockEntity(pos);
-        if (!(be instanceof Inventory inv)) return false;
-        int size = inv.size();
-        for (int i = 0; i < size && !stack.isEmpty(); i++) {
-            ItemStack inSlot = inv.getStack(i);
-            if (inSlot.isEmpty()) {
-                int toPut = Math.min(stack.getCount(), inv.getMaxCountPerStack());
-                ItemStack put = stack.copy();
-                put.setCount(toPut);
-                inv.setStack(i, put);
-                stack.decrement(toPut);
-            } else if (ItemStack.areItemsEqual(inSlot, stack)) {
-                int max = Math.min(inv.getMaxCountPerStack(), inSlot.getMaxCount());
-                int canAdd = max - inSlot.getCount();
-                if (canAdd > 0) {
-                    int toAdd = Math.min(canAdd, stack.getCount());
-                    inSlot.increment(toAdd);
-                    stack.decrement(toAdd);
+        if (be == null) {
+            if (pathfindingTraceEnabled()) {
+                LOGGER.info(
+                    "[voidclam/Pathfinder][trace] tryInsertInto no block entity at ({}, {}, {}) stack={} x{}",
+                    pos.getX(), pos.getY(), pos.getZ(), stack.getItem(), incoming);
+            }
+            return false;
+        }
+        if (!(be instanceof Inventory inv)) {
+            if (pathfindingTraceEnabled()) {
+                LOGGER.info(
+                    "[voidclam/Pathfinder][trace] tryInsertInto not Inventory at ({}, {}, {}) be={} stack={} x{}",
+                    pos.getX(), pos.getY(), pos.getZ(), be.getClass().getName(), stack.getItem(), incoming);
+            }
+            return false;
+        }
+        if (pathfindingTraceEnabled()) {
+            LOGGER.info(
+                "[voidclam/Pathfinder][trace] tryInsertInto start ({}, {}, {}) inv={} slots={} stack={} x{}",
+                pos.getX(), pos.getY(), pos.getZ(), inv.getClass().getName(), inv.size(), stack.getItem(), incoming);
+        }
+        try {
+            int size = inv.size();
+            int emptySlotPuts = 0;
+            int mergeAdds = 0;
+            for (int i = 0; i < size && !stack.isEmpty(); i++) {
+                ItemStack inSlot = inv.getStack(i);
+                if (tickCrashCrumbsEnabled() && size > 16 && (i == 0 || i == size / 2 || i == size - 1)) {
+                    LOGGER.info(
+                        "[voidclam/crash-crumbs] tryInsertInto slot scan i={}/{} inv={} pos=({},{},{}) approxFrames={}",
+                        i,
+                        size,
+                        inv.getClass().getSimpleName(),
+                        pos.getX(), pos.getY(), pos.getZ(),
+                        approxJavaStackDepth());
+                }
+                if (inSlot.isEmpty()) {
+                    int toPut = Math.min(stack.getCount(), inv.getMaxCountPerStack());
+                    if (toPut <= 0) {
+                        continue;
+                    }
+                    // split: move a portion off the stack without ItemStack.copy() (avoids deep component cloning / Guava SO on nested items).
+                    ItemStack put = stack.split(toPut);
+                    inv.setStack(i, put);
+                    emptySlotPuts++;
+                } else if (ItemStack.areItemsEqual(inSlot, stack)) {
+                    int max = Math.min(inv.getMaxCountPerStack(), inSlot.getMaxCount());
+                    int canAdd = max - inSlot.getCount();
+                    if (canAdd > 0) {
+                        int toAdd = Math.min(canAdd, stack.getCount());
+                        inSlot.increment(toAdd);
+                        stack.decrement(toAdd);
+                        mergeAdds++;
+                    }
                 }
             }
+            be.markDirty();
+            if (pathfindingTraceEnabled()) {
+                LOGGER.info(
+                    "[voidclam/Pathfinder][trace] tryInsertInto end ({}, {}, {}) remaining={} drained={} emptySlotsUsed={} merges={}",
+                    pos.getX(), pos.getY(), pos.getZ(), stack.getCount(), incoming - stack.getCount(), emptySlotPuts, mergeAdds);
+            }
+            return stack.isEmpty();
+        } catch (StackOverflowError e) {
+            logStackOverflowContext(
+                "tryInsertInto loop/markDirty",
+                "pos=(" + pos.getX() + "," + pos.getY() + "," + pos.getZ() + ")",
+                "inv=" + inv.getClass().getName(),
+                "slots=" + inv.size(),
+                "item=" + itemIdForCrumb(stack));
+            throw e;
         }
-        if (be != null) be.markDirty();
-        return stack.isEmpty();
     }
 
     private static void createBarrelAndInsert(ServerWorld world, BlockPos pos, ItemStack stack) {
@@ -1282,6 +1519,36 @@ public final class Pathfinder {
                     cst = 1_000_000;
                 }
 
+                // Beacon at goal: preserve the nether star and route it through container BFS (barrel fallback if needed).
+                if (refNode == gnode && mat.isOf(Blocks.BEACON)) {
+                    ItemStack starDrop = new ItemStack(Items.NETHER_STAR, 1);
+                    BlockPos breakPos = pos.toImmutable();
+                    long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
+                    int mx = mod.x, my = mod.y, mz = mod.z;
+                    CommandToolbox.submitPathfinding(
+                        world,
+                        mx,
+                        mz,
+                        pathClamId,
+                        () -> VoidClamMod.completeOnePathApplyStep(modForFlag),
+                        () -> {
+                            List<Long> containers = Collections.synchronizedList(new ArrayList<>());
+                            runContainerBfsOnWorld(
+                                world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
+                                () -> {
+                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
+                                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                        return;
+                                    }
+                                    applyContainerResult(world, containers, breakPos, starDrop);
+                                    VoidClamMod.addEnergy(pathClamId, 1);
+                                    VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                });
+                        }
+                    );
+                    return;
+                }
+
                 // Ore at goal: fortune-3 drops, store in containers, replace with wart
                 if (refNode == gnode && VoidClamMod.isOre(mat.getBlock())) {
                     List<ItemStack> drops = getFortune3Drops(mat.getBlock());
@@ -1324,7 +1591,7 @@ public final class Pathfinder {
                             VoidClamMod.removeLightFromClamCacheAfterFailedPath(pathClamId, goalPos);
                         }
                         if (VoidClamMod.isOre(goalState.getBlock())) {
-                            VoidClamMod.addOresBlackList(pathClamId, goalPos);
+                            VoidClamMod.removeOreFromClamCacheAfterFailedPath(pathClamId, goalPos);
                         }
                     }
                     VoidClamMod.addEnergy(pathClamId, -1);

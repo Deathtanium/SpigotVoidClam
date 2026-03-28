@@ -28,6 +28,7 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -83,6 +84,7 @@ public class VoidClamModEntry implements ModInitializer {
     }
 
     private void onServerTick(MinecraftServer server) {
+        VoidClamMod.tickSeekEphemeralExpiry(server);
         VoidClamMod.drainPendingLightCacheDeltas();
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             Pathfinder.tickSyncAStarJobs(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
@@ -131,13 +133,16 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("make <x> <y> <z> — new clam"), false);
                         s.sendFeedback(() -> Text.literal("kill <target>"), false);
                         s.sendFeedback(() -> Text.literal("resize <size> <target> — size first"), false);
-                        s.sendFeedback(() -> Text.literal("repair <target> | reach <target> | grow <target>"), false);
+                        s.sendFeedback(() -> Text.literal("repair <target> | reach <target> | grow <target> | storage <target>"), false);
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect set <true|false> <target> — bool before target"), false);
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect get <target>"), false);
                         s.sendFeedback(() -> Text.literal("info [target] — list all (console) or nearest (player)"), false);
                         s.sendFeedback(() -> Text.literal("debug <target> — flags, grow/async globals, sync A*, executor + scheduler stats"), false);
+                        s.sendFeedback(() -> Text.literal("heartcachedebug <target> — seek cache stats, sync heart NBT, flush chunk save for this world"), false);
+                        s.sendFeedback(() -> Text.literal("chunkactivitydebug <target> — unload pause/expiry status for cache+blacklist lifecycle"), false);
+                        s.sendFeedback(() -> Text.literal("dumpnbt <target> — write searing heart block-entity NBT to run/voidclam-nbt-dumps/<UUID>.nbt"), false);
                         s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping — state lives in searing heart blocks"), false);
-                        s.sendFeedback(() -> Text.literal("Config (config/voidclam.json): astar_mode, bfs_mode; pathfind_chunk_cache (bool, default true — false = live getBlockState per cell)"), false);
+                        s.sendFeedback(() -> Text.literal("Config: seek_target_cache; clam_repair_grow_cycle_interval_seconds; clam_seek_attempt_interval_seconds; astar_mode, bfs_mode; pathfind_chunk_cache; pathfinding_trace; tick_crash_crumbs"), false);
                         return 1;
                     }))
                 .then(CommandManager.literal("make")
@@ -216,6 +221,98 @@ public class VoidClamModEntry implements ModInitializer {
                                 return 1;
                             } catch (CommandSyntaxException e) {
                                 ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                return 0;
+                            }
+                        })))
+                .then(CommandManager.literal("storage")
+                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            try {
+                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                m.ensureClamId();
+                                ServerWorld modWorld = VoidClamMod.getWorldForModule(ctx.getSource().getServer(), m);
+                                if (modWorld == null) {
+                                    ctx.getSource().sendError(Text.literal("Dimension for this voidclam is not loaded."));
+                                    return 0;
+                                }
+                                if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+                                    ctx.getSource().sendError(Text.literal("Heart chunk is not loaded; cannot count storage."));
+                                    return 0;
+                                }
+                                int n = Pathfinder.countConnectedStorageBlocks(modWorld, m);
+                                ctx.getSource().sendFeedback(
+                                    () -> Text.literal("Voidclam " + m.clamId + ": " + n
+                                        + " storage block(s) (chest / trapped chest / barrel) reachable via wart from heart."),
+                                    false);
+                                return 1;
+                            } catch (CommandSyntaxException e) {
+                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                return 0;
+                            }
+                        })))
+                .then(CommandManager.literal("heartcachedebug")
+                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            try {
+                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                ServerWorld modWorld = VoidClamMod.getWorldForModule(ctx.getSource().getServer(), m);
+                                if (modWorld == null) {
+                                    ctx.getSource().sendError(Text.literal("Dimension for this voidclam is not loaded."));
+                                    return 0;
+                                }
+                                if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+                                    ctx.getSource().sendError(Text.literal("Heart chunk is not loaded."));
+                                    return 0;
+                                }
+                                ServerCommandSource src = ctx.getSource();
+                                src.sendFeedback(() -> Text.literal("--- voidclam heartcachedebug " + m.clamId + " ---"), false);
+                                for (String line : CommandToolbox.buildHeartSeekCacheDebugLines(modWorld, m)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                CommandToolbox.flushPendingChunkIoForWorld(modWorld);
+                                src.sendFeedback(
+                                    () -> Text.literal("Chunk I/O: ServerChunkManager.save(false) on " + modWorld.getRegistryKey().getValue()),
+                                    false);
+                                return 1;
+                            } catch (CommandSyntaxException e) {
+                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                return 0;
+                            }
+                        })))
+                .then(CommandManager.literal("chunkactivitydebug")
+                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            try {
+                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                ServerCommandSource src = ctx.getSource();
+                                src.sendFeedback(() -> Text.literal("--- voidclam chunkactivitydebug " + m.clamId + " ---"), false);
+                                for (String line : VoidClamMod.debugChunkUnloadPauseLines(ctx.getSource().getServer(), m)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                                return 1;
+                            } catch (CommandSyntaxException e) {
+                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                return 0;
+                            }
+                        })))
+                .then(CommandManager.literal("dumpnbt")
+                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            try {
+                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                var path = CommandToolbox.writeClamHeartNbtDumpFile(ctx.getSource().getServer(), m);
+                                ctx.getSource().sendFeedback(
+                                    () -> Text.literal("Wrote heart NBT to " + path.toAbsolutePath()),
+                                    false);
+                                return 1;
+                            } catch (CommandSyntaxException e) {
+                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                return 0;
+                            } catch (IOException e) {
+                                String msg = e.getMessage();
+                                ctx.getSource().sendError(Text.literal(msg != null ? msg : e.toString()));
                                 return 0;
                             }
                         })))

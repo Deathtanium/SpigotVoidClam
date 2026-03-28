@@ -1,11 +1,9 @@
 package com.serbanstein.voidclam;
 
 import net.minecraft.registry.RegistryKey;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -61,8 +59,25 @@ public class Module {
      * {@link VoidClamMod#releasePathfindingMainCycle} or full clear on repair.
      */
     public final Set<Long> lightsBlackList = ConcurrentHashMap.newKeySet();
-    /** Positions of ores we've failed or are ignoring for this cycle */
-    public final Set<BlockPos> oresBlackList = new HashSet<>();
+    /**
+     * Packed {@link BlockPos#asLong()} positions of ore blocks in seek range (same box as {@code clamReach}).
+     * Incrementally updated on block changes; fully rebuilt in batches during the clam repair cycle.
+     */
+    public final Set<Long> oresCache = ConcurrentHashMap.newKeySet();
+    /** Counts down during a full ore-cache rescan after repair; 0 when idle. */
+    public int oreCacheRebuildTicksRemaining;
+    /** Linear index into the scan volume during ore rebuild. */
+    public long oreCacheRebuildCursor;
+    /**
+     * Packed ore block this clam is currently routing toward (set in {@code clamReach}, cleared when pathfinding releases busy).
+     * Entries are also in {@link #oresBlackList} so scans skip this goal until the path/build cycle ends or repair clears all.
+     */
+    public volatile Long orePathGoalPacked;
+    /**
+     * Packed positions of ores reserved for an in-flight path or marked unreachable: skip in {@code clamReach} until
+     * {@link VoidClamMod#releasePathfindingMainCycle} or full clear on repair.
+     */
+    public final Set<Long> oresBlackList = ConcurrentHashMap.newKeySet();
     public short busyFlagPlaceEvent;
     public short busyFlagMainCycle;
     /**
@@ -83,6 +98,18 @@ public class Module {
     public long nextAutoGrowRepairWorldTime;
     /** {@code false} until {@link com.serbanstein.voidclam.CommandToolbox#buildStub} has run (searing-heart placements defer until first fuel). */
     public boolean stubBuilt = true;
+
+    /**
+     * When the heart chunk is unloaded, {@link VoidClamMod#tickSeekEphemeralExpiry} sets this to overworld-equivalent world time
+     * (+ {@link VoidClamMod#autoGrowRepairIntervalTicks()}) for that dimension; when reached, in-memory seek caches and
+     * blacklists are cleared. {@code 0} means not counting down (chunk loaded or no timer).
+     */
+    public long seekEphemeralDataExpireAtWorldTime;
+    /**
+     * After unload expiry cleared seek data, set so the next tick in a loaded chunk restarts cache rebuild when
+     * {@link VoidClamConfig#seekTargetCacheEnabled()} (repair-style refresh; light-block deltas can still grow caches incrementally).
+     */
+    public boolean seekEphemeralNeedSeekDataRefresh;
 
     public void ensureClamId() {
         if (clamId == null) {

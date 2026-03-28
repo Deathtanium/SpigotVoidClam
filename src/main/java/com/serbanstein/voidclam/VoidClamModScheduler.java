@@ -8,8 +8,6 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -53,7 +51,8 @@ public final class VoidClamModScheduler {
         if (nThis > 0) {
             lines.add("  earliestRunAtTick=" + earliest + " ticksUntil=" + (earliest - now));
         }
-        lines.add("  grow/repair idle gate: hasPendingTasks(this dimension)=" + hasPendingTasks(world));
+        lines.add("  note: grow/repair idle uses resizeShellAnim+busy+targets(clam); not raw hasPendingTasks="
+            + hasPendingTasks(world));
         return lines;
     }
 

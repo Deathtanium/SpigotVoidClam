@@ -15,7 +15,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 /**
- * Keeps per-clam {@link com.serbanstein.voidclam.Module#lightsCache} in sync when any code path changes a block.
+ * Queues per-clam light and ore seek cache deltas when any code path changes a block ({@code setBlockState} success).
  */
 @Mixin(World.class)
 public abstract class WorldLightCacheMixin {

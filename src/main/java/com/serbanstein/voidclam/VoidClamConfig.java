@@ -7,9 +7,13 @@ import net.fabricmc.loader.api.FabricLoader;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Server config at {@code config/voidclam.json}. Created with defaults if missing.
@@ -54,7 +58,8 @@ public final class VoidClamConfig {
     public String bfs_mode = "sync_batched";
     /**
      * Sync A* + prepass budget source: when &gt; 0, effective steps per tick = this value divided by 4.
-     * When {@code 0}, estimates {@code max(1, processors) * 128} and uses one quarter of that (not tied to omni BFS).
+     * When {@code 0}, estimates a base budget from host CPU max clock (see {@link #syncBudgetResolvedCpuMhz()}) and uses
+     * one quarter of that, then one fifth (calibrated so ~4.0 GHz reported → ~205 steps/tick).
      */
     public int astar_sync_global_max_steps_per_tick = 0;
     /** Max parallel async pathfinding threads. 0 = estimate from available processors (minimum 2). */
@@ -75,19 +80,31 @@ public final class VoidClamConfig {
     public Boolean pathfind_chunk_cache;
 
     /**
-     * When {@code true} (default), {@link Module#lightsCache} is filled via {@link VoidClamMod#tickLightCacheRebuildStep}
-     * and block-change deltas; {@link CommandToolbox#clamReach} reads the cache.
-     * When {@code false}, cache maintenance is skipped and clamReach rescans the full light seek box off-thread each run
-     * (legacy behavior before the mixin-backed cache).
-     * {@code null} after load = default {@code true}.
+     * Light + ore seek caches: when {@code true} (default), {@link Module#lightsCache}/{@link Module#oresCache} are
+     * maintained (tick rebuild + block deltas) and {@link CommandToolbox#clamReach} reads them; cache and blacklist
+     * positions stay in server memory only (see {@link VoidClamMod#tickSeekEphemeralExpiry}). When {@code false}
+     * (“live”), caches are not maintained and clamReach rescans the full seek box each run; threading follows
+     * {@link #astar_mode} like A*.
+     * {@code null} after load ⇒ {@code true}, or legacy migration from {@link #light_block_cache}/{@link #ore_block_cache}.
+     */
+    public Boolean seek_target_cache;
+
+    /**
+     * Legacy keys read only when {@link #seek_target_cache} is null after JSON load; both explicitly {@code false}
+     * migrates to {@code seek_target_cache false}. Prefer {@link #seek_target_cache} in new configs.
      */
     public Boolean light_block_cache;
+    public Boolean ore_block_cache;
 
     public int clam_size_max = 15;
     /**
      * Natural grow attempts only when {@code energy > this * currentSize}. Each successful light feed adds 1 energy.
      */
     public int clam_grow_energymultiplier = 4;
+    /** Auto repair/grow cadence in seconds (world-time based; per-clam phase offset still applies). */
+    public int clam_repair_grow_cycle_interval_seconds = 5 * 60;
+    /** How often awake clams attempt target selection/pathfinding in seconds (phase-staggered per clam). */
+    public int clam_seek_attempt_interval_seconds = 1;
 
     public boolean vfx_enabled = true;
     public double sfx_volume_multiplier = 1.0;
@@ -137,6 +154,8 @@ public final class VoidClamConfig {
         if (clam_spawn_natural_default_chunk_chance > 1) clam_spawn_natural_default_chunk_chance = 1;
         if (clam_size_max < 1) clam_size_max = 1;
         if (clam_grow_energymultiplier < 1) clam_grow_energymultiplier = 1;
+        if (clam_repair_grow_cycle_interval_seconds < 1) clam_repair_grow_cycle_interval_seconds = 1;
+        if (clam_seek_attempt_interval_seconds < 1) clam_seek_attempt_interval_seconds = 1;
         if (sfx_volume_multiplier < 0) sfx_volume_multiplier = 0;
         if (astar_sync_global_max_steps_per_tick < 0) astar_sync_global_max_steps_per_tick = 0;
         if (astar_async_global_max_threads < 0) astar_async_global_max_threads = 0;
@@ -148,6 +167,16 @@ public final class VoidClamConfig {
         } else {
             bfs_mode = "sync_batched";
         }
+        if (seek_target_cache == null) {
+            if (Boolean.FALSE.equals(light_block_cache) && Boolean.FALSE.equals(ore_block_cache)) {
+                seek_target_cache = false;
+            } else {
+                seek_target_cache = true;
+            }
+        }
+        // Keep legacy keys migration-only so config converges to one cache flag.
+        light_block_cache = null;
+        ore_block_cache = null;
     }
 
     public NaturalSpawnMethod naturalSpawnMethodEnum() {
@@ -179,20 +208,152 @@ public final class VoidClamConfig {
 
     /**
      * Global A* + prepass BFS expansion budget per server tick for {@link AstarMode#SYNC_BATCHED}.
-     * Quarter of {@code astar_sync_global_max_steps_per_tick} when set; when {@code 0}, quarter of {@code processors * 128}.
+     * Quarter of {@code astar_sync_global_max_steps_per_tick} when set; when {@code 0}, quarter of a MHz-derived base
+     * (see {@link #syncBudgetBaseBeforeQuarter()}); when that value is MHz-auto, it is also divided by 5 after the quartering.
      * Floored at {@link #ASTAR_SYNC_MIN_STEPS_PER_TICK} so very small configured values do not stall jobs for an excessive number of ticks.
      */
     public static final int ASTAR_SYNC_MIN_STEPS_PER_TICK = 48;
 
-    public int effectiveSyncMaxStepsPerTick() {
-        int base;
-        if (astar_sync_global_max_steps_per_tick > 0) {
-            base = astar_sync_global_max_steps_per_tick;
-        } else {
-            int n = Math.max(1, Runtime.getRuntime().availableProcessors());
-            base = n * 128;
+    /**
+     * Host CPU MHz at which the auto base equals {@link #AUTO_SYNC_STEPS_BASE_AT_CALIBRATION_MHZ} (4096), so effective
+     * steps/tick after ÷4 and ÷5 is ~205.
+     */
+    private static final double AUTO_SYNC_STEPS_CPU_MHZ_CALIBRATION = 4000.0;
+
+    private static final int AUTO_SYNC_STEPS_BASE_AT_CALIBRATION_MHZ = 4096;
+
+    private static final int AUTO_SYNC_STEPS_BASE_MIN = 256;
+
+    /** Resolved once at class init: detected max MHz or {@link #AUTO_SYNC_STEPS_CPU_MHZ_CALIBRATION} if unknown. */
+    private static final double RESOLVED_SYNC_BUDGET_CPU_MHZ = resolveSyncBudgetCpuMhz();
+
+    private static double resolveSyncBudgetCpuMhz() {
+        Double mhz = tryDetectHostCpuMaxMhz();
+        if (mhz != null && mhz > 0.0 && Double.isFinite(mhz)) {
+            return mhz;
         }
-        return Math.max(ASTAR_SYNC_MIN_STEPS_PER_TICK, Math.max(1, base / 4));
+        return AUTO_SYNC_STEPS_CPU_MHZ_CALIBRATION;
+    }
+
+    /**
+     * Best-effort host CPU max frequency in MHz (Linux sysfs / {@code /proc/cpuinfo}, Windows {@code wmic}).
+     * {@code null} when unavailable.
+     */
+    private static Double tryDetectHostCpuMaxMhz() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("linux")) {
+            Double d = tryReadLinuxCpufreqKhzToMhz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+            if (d != null) {
+                return d;
+            }
+            d = tryReadLinuxCpufreqKhzToMhz("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq");
+            if (d != null) {
+                return d;
+            }
+            d = tryReadLinuxProcCpuinfoMaxMhz();
+            if (d != null) {
+                return d;
+            }
+        } else if (os.contains("win")) {
+            Double d = tryReadWindowsWmicMaxClockMhz();
+            if (d != null) {
+                return d;
+            }
+        }
+        return null;
+    }
+
+    private static Double tryReadLinuxCpufreqKhzToMhz(String sysfsPath) {
+        try {
+            String s = Files.readString(Path.of(sysfsPath)).trim();
+            long khz = Long.parseLong(s);
+            if (khz <= 0L) {
+                return null;
+            }
+            return khz / 1000.0;
+        } catch (IOException | NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private static Double tryReadLinuxProcCpuinfoMaxMhz() {
+        try {
+            double max = -1.0;
+            for (String line : Files.readAllLines(Path.of("/proc/cpuinfo"))) {
+                line = line.trim();
+                if (line.startsWith("cpu MHz")) {
+                    int c = line.indexOf(':');
+                    if (c < 0) {
+                        continue;
+                    }
+                    double v = Double.parseDouble(line.substring(c + 1).trim());
+                    max = Math.max(max, v);
+                }
+            }
+            return max > 0.0 ? max : null;
+        } catch (IOException | NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private static Double tryReadWindowsWmicMaxClockMhz() {
+        Process proc = null;
+        try {
+            proc = new ProcessBuilder("wmic", "cpu", "get", "MaxClockSpeed", "/value")
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    line = line.trim();
+                    if (line.startsWith("MaxClockSpeed=")) {
+                        double v = Double.parseDouble(line.substring("MaxClockSpeed=".length()).trim());
+                        return v > 0.0 ? v : null;
+                    }
+                }
+            }
+            proc.waitFor(3, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+            // missing WMIC or parse failure
+        } finally {
+            if (proc != null) {
+                proc.destroyForcibly();
+            }
+        }
+        return null;
+    }
+
+    private static int autoSyncStepsBaseFromDetectedMhz(double mhz) {
+        int base = (int) Math.round(
+            AUTO_SYNC_STEPS_BASE_AT_CALIBRATION_MHZ * (mhz / AUTO_SYNC_STEPS_CPU_MHZ_CALIBRATION));
+        return Math.max(AUTO_SYNC_STEPS_BASE_MIN, base);
+    }
+
+    /** MHz used for the auto sync-step budget when {@link #astar_sync_global_max_steps_per_tick} is {@code 0}. */
+    public static double syncBudgetResolvedCpuMhz() {
+        return RESOLVED_SYNC_BUDGET_CPU_MHZ;
+    }
+
+    /**
+     * Expansion budget numerator before the legacy ÷4 applied in {@link #effectiveSyncMaxStepsPerTick()}:
+     * {@link #astar_sync_global_max_steps_per_tick} when set, otherwise the MHz-derived auto base.
+     */
+    public int syncBudgetBaseBeforeQuarter() {
+        if (astar_sync_global_max_steps_per_tick > 0) {
+            return astar_sync_global_max_steps_per_tick;
+        }
+        return autoSyncStepsBaseFromDetectedMhz(RESOLVED_SYNC_BUDGET_CPU_MHZ);
+    }
+
+    public int effectiveSyncMaxStepsPerTick() {
+        int base = syncBudgetBaseBeforeQuarter();
+        int quartered = Math.max(1, base / 4);
+        if (astar_sync_global_max_steps_per_tick <= 0) {
+            quartered = Math.max(1, quartered / 5);
+        }
+        return Math.max(ASTAR_SYNC_MIN_STEPS_PER_TICK, quartered);
     }
 
     /**
@@ -218,18 +379,43 @@ public final class VoidClamConfig {
         return !Boolean.FALSE.equals(pathfind_chunk_cache);
     }
 
-    /** {@code true} when enabled or key absent; only {@code false} when {@link #light_block_cache} is explicitly false. */
+    /** {@code true} when {@link #seek_target_cache} is not explicitly {@code false} (default cached mode). */
+    public boolean seekTargetCacheEnabled() {
+        return !Boolean.FALSE.equals(seek_target_cache);
+    }
+
+    /** Same as {@link #seekTargetCacheEnabled()} — light and ore share one switch. */
     public boolean lightBlockCacheEnabled() {
-        return !Boolean.FALSE.equals(light_block_cache);
+        return seekTargetCacheEnabled();
+    }
+
+    /** Same as {@link #seekTargetCacheEnabled()}. */
+    public boolean oreBlockCacheEnabled() {
+        return seekTargetCacheEnabled();
+    }
+
+    public int autoGrowRepairIntervalTicks() {
+        return Math.max(20, clam_repair_grow_cycle_interval_seconds * 20);
+    }
+
+    public int seekAttemptIntervalTicks() {
+        return Math.max(20, clam_seek_attempt_interval_seconds * 20);
     }
 
     /**
      * When {@code true}, {@link Pathfinder} logs {@code [voidclam/Pathfinder][trace]} INFO lines to the server log (console)
      * for BFS prepass progress (sync-batched slices and async full runs), A* iterations (open/closed sizes, running vs done),
-     * and detected {@link Node#parent} cycles during path apply.
+     * detected {@link Node#parent} cycles during path apply, and {@code tryInsertInto} (container storage after mining).
      * Default off.
      */
     public boolean pathfinding_trace = false;
+
+    /**
+     * When {@code true}, logs {@code [voidclam/crash-crumbs]} INFO lines before sync A* slices and container/inventory work,
+     * and on {@link StackOverflowError} in those voidclam hotspots logs extra context then rethrows (best-effort—deep SO may skip).
+     * Enable while hunting server tick {@code Sets$1$1} / Guava iterator overflows. Default off.
+     */
+    public boolean tick_crash_crumbs = false;
 
     public int effectiveAsyncThreadPoolSize() {
         return effectiveAsyncThreadPoolSize(astar_async_global_max_threads);

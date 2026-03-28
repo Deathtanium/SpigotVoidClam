@@ -2,6 +2,11 @@ package com.serbanstein.voidclam;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.nbt.NbtCompound;
+import net.minecraft.nbt.NbtIo;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
@@ -22,6 +27,9 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /** Block building, shell/stub construction, resize/repair, and reach (pathfind trigger). */
 public final class CommandToolbox {
@@ -311,7 +319,7 @@ public final class CommandToolbox {
 
         for (int i = 1; i <= tsize; i += 1) {
             final int iFinal = i;
-            VoidClamMod.scheduleDelayed(world, timer * 10L, () -> {
+            VoidClamMod.scheduleResizeShellDelayed(world, timer * 10L, () -> {
                 buildShell(world, x, y, z, iFinal, Blocks.NETHER_WART_BLOCK);
                 VoidClamSfx.playBlockSound(world, null, x + 0.5, y + 0.5, z + 0.5,
                     SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 3f, 0.01f);
@@ -333,12 +341,12 @@ public final class CommandToolbox {
         }
 
         long obsidianAtTick = world.getTime() + (long) timer * 20L;
-        VoidClamMod.scheduleDelayed(world, timer * 20L, () -> buildShell(world, x, y, z, tsize, Blocks.OBSIDIAN));
+        VoidClamMod.scheduleResizeShellDelayed(world, timer * 20L, () -> buildShell(world, x, y, z, tsize, Blocks.OBSIDIAN));
         m.pathfindingResumeWorldTime = obsidianAtTick + VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
 
         m.currentSize = tsize;
         VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
-        VoidClamMod.startLightCacheRebuild(m);
+        VoidClamMod.startSeekCachesRebuild(m);
 
         int ts = tsize - 2;
         for (int ix = x - ts + 1; ix <= x; ix++) {
@@ -441,23 +449,46 @@ public final class CommandToolbox {
                         }
                     }
                     if (m.seekOres) {
-                        int scanStep = 0;
-                        outerScan:
-                        for (int iy = y - 4 * cSize; iy <= y + 4 * cSize; iy++) {
-                            for (int ix = x - 4 * cSize; ix <= x + 4 * cSize; ix++) {
-                                for (int iz = z - 4 * cSize; iz <= z + 4 * cSize; iz++) {
-                                    if ((scanStep++ & 0xFFF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
-                                        break outerScan;
-                                    }
-                                    if (!world.isChunkLoaded(ix >> 4, iz >> 4)) {
-                                        continue;
-                                    }
-                                    BlockPos pos = new BlockPos(ix, iy, iz);
-                                    net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
-                                    double dist = modPos.getSquaredDistance(pos);
-                                    if (VoidClamMod.isOre(block) && !m.oresBlackList.contains(pos) && dist < closestOreDist) {
-                                        closestOreDist = dist;
-                                        closestOre = pos;
+                        if (VoidClamConfig.get().oreBlockCacheEnabled()) {
+                            for (long packed : m.oresCache) {
+                                if (m.oresBlackList.contains(packed)) {
+                                    continue;
+                                }
+                                BlockPos pos = BlockPos.fromLong(packed);
+                                if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+                                net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                                if (!VoidClamMod.isOre(block)) continue;
+                                double dist = modPos.getSquaredDistance(pos);
+                                if (dist < closestOreDist) {
+                                    closestOreDist = dist;
+                                    closestOre = pos.toImmutable();
+                                }
+                            }
+                        } else {
+                            int e = VoidClamMod.lightSeekHalfExtent(m.currentSize);
+                            int scanStep = 0;
+                            outerScan:
+                            for (int iy = y - e; iy <= y + e; iy++) {
+                                for (int ix = x - e; ix <= x + e; ix++) {
+                                    for (int iz = z - e; iz <= z + e; iz++) {
+                                        if ((scanStep++ & 0xFFF) == 0
+                                            && VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+                                            break outerScan;
+                                        }
+                                        if (!world.isChunkLoaded(ix >> 4, iz >> 4)) {
+                                            continue;
+                                        }
+                                        BlockPos pos = new BlockPos(ix, iy, iz);
+                                        long packed = pos.asLong();
+                                        if (m.oresBlackList.contains(packed)) {
+                                            continue;
+                                        }
+                                        net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
+                                        double dist = modPos.getSquaredDistance(pos);
+                                        if (VoidClamMod.isOre(block) && dist < closestOreDist) {
+                                            closestOreDist = dist;
+                                            closestOre = pos.toImmutable();
+                                        }
                                     }
                                 }
                             }
@@ -474,13 +505,9 @@ public final class CommandToolbox {
                     closest = closestLight;
                 } else if (closestOre != null) {
                     closest = closestOre;
-                    m.oresBlackList.add(closest.toImmutable());
                 }
 
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
-                    if (closest != null && closestOre != null && closest.equals(closestOre)) {
-                        m.oresBlackList.remove(closest.toImmutable());
-                    }
                     VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
@@ -489,8 +516,15 @@ public final class CommandToolbox {
                         long goalPacked = closest.asLong();
                         m.lightsBlackList.add(goalPacked);
                         m.lightPathGoalPacked = goalPacked;
+                        m.orePathGoalPacked = null;
+                    } else if (closestOre != null && closest.equals(closestOre)) {
+                        long goalPacked = closest.asLong();
+                        m.oresBlackList.add(goalPacked);
+                        m.orePathGoalPacked = goalPacked;
+                        m.lightPathGoalPacked = null;
                     } else {
                         m.lightPathGoalPacked = null;
+                        m.orePathGoalPacked = null;
                     }
                     Pathfinder.calculatePath(world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ());
                 } else {
@@ -501,5 +535,111 @@ public final class CommandToolbox {
                 throw t;
             }
         });
+    }
+
+    /**
+     * Human-readable diagnostics for seek caches (runtime {@link Module} + heart {@link SearingHeartItems#syncModuleToBlockEntity}
+     * then persisted list sizes). Caller prints to chat or console.
+     */
+    public static List<String> buildHeartSeekCacheDebugLines(ServerWorld world, Module m) {
+        List<String> lines = new ArrayList<>();
+        if (m == null) {
+            lines.add("module=null");
+            return lines;
+        }
+        m.ensureClamId();
+        VoidClamConfig cfg = VoidClamConfig.get();
+        lines.add(
+            "config seek_target_cache="
+                + cfg.seekTargetCacheEnabled()
+                + " astar_mode="
+                + (cfg.astar_mode != null ? cfg.astar_mode : "async")
+                + " (clamReach target scan shares thread with A*)"
+        );
+        lines.add(
+            "runtime sizes lightsCache=" + m.lightsCache.size()
+                + " oresCache=" + m.oresCache.size()
+                + " lightsBlackList=" + m.lightsBlackList.size()
+                + " oresBlackList=" + m.oresBlackList.size()
+        );
+        lines.add(
+            "rebuild lightTicksRemaining=" + m.lightCacheRebuildTicksRemaining
+                + " oreTicksRemaining=" + m.oreCacheRebuildTicksRemaining
+                + " cursors light=" + m.lightCacheRebuildCursor + " ore=" + m.oreCacheRebuildCursor
+        );
+        lines.add(
+            "goals lightPacked=" + m.lightPathGoalPacked
+                + " orePacked=" + m.orePathGoalPacked
+                + " seekLights=" + m.seekLights
+                + " seekOres=" + m.seekOres
+        );
+        BlockPos heart = new BlockPos(m.x, m.y, m.z);
+        BlockEntity be = world.getBlockEntity(heart);
+        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) {
+            lines.add("heart block entity: missing or not a furnace — sync skipped");
+            return lines;
+        }
+        SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+        SearingHeartItems.PersistedSeekCacheSnapshot snap = SearingHeartItems.readPersistedSeekCacheSnapshot(furnace);
+        lines.add(
+            "CUSTOM_DATA module lists (not persisted; always empty in NBT): lightsC=" + snap.lightsC()
+                + " oresC=" + snap.oresC()
+                + " oresBL=" + snap.oresBL()
+                + " hadVoidclamModuleNbt=" + snap.hadVoidclamModuleNbt()
+        );
+        lines.add(
+            "seek box volume (positions)=" + VoidClamMod.lightSeekScanVolume(m.currentSize)
+                + " currentSize=" + m.currentSize
+        );
+        lines.add("heart block " + m.x + "," + m.y + "," + m.z + " chunk " + (m.x >> 4) + "," + (m.z >> 4));
+        lines.add(
+            "ephemeral unloadExpiryWorldTime=" + m.seekEphemeralDataExpireAtWorldTime
+                + " needPostUnloadRefresh=" + m.seekEphemeralNeedSeekDataRefresh
+        );
+        return lines;
+    }
+
+    /**
+     * Writes the searing heart block entity’s full NBT (including identifying fields, same as chunk disk form) to
+     * {@code <runDir>/voidclam-nbt-dumps/<clamId>.nbt} using gzip-compressed NBT.
+     */
+    public static Path writeClamHeartNbtDumpFile(MinecraftServer server, Module m) throws IOException {
+        if (server == null || m == null) {
+            throw new IOException("server or module missing");
+        }
+        m.ensureClamId();
+        ServerWorld world = VoidClamMod.getWorldForModule(server, m);
+        if (world == null) {
+            throw new IOException("dimension for this voidclam is not loaded");
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            throw new IOException("heart chunk is not loaded");
+        }
+        BlockPos heart = new BlockPos(m.x, m.y, m.z);
+        if (!world.getBlockState(heart).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            throw new IOException(
+                "no searing heart block at " + heart.getX() + " " + heart.getY() + " " + heart.getZ());
+        }
+        BlockEntity be = world.getBlockEntity(heart);
+        if (!(be instanceof AbstractFurnaceBlockEntity)) {
+            throw new IOException("heart block entity missing or not a furnace");
+        }
+        NbtCompound tag = be.createNbtWithIdentifyingData(server.getRegistryManager());
+        Path dir = server.getRunDirectory().resolve("voidclam-nbt-dumps");
+        Files.createDirectories(dir);
+        Path file = dir.resolve(m.clamId.toString() + ".nbt");
+        NbtIo.writeCompressed(tag, file);
+        return file;
+    }
+
+    /**
+     * Runs {@link net.minecraft.server.world.ServerChunkManager#save(boolean)} for this world after {@link SearingHeartItems#syncModuleToBlockEntity}
+     * (which calls {@link AbstractFurnaceBlockEntity#markDirty()}). Flushes pending chunk writes for the dimension.
+     */
+    public static void flushPendingChunkIoForWorld(ServerWorld world) {
+        if (world == null) {
+            return;
+        }
+        world.getChunkManager().save(false);
     }
 }

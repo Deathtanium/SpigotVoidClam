@@ -5,18 +5,13 @@ import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.NbtComponent;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.nbt.AbstractNbtNumber;
 import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtElement;
-import net.minecraft.nbt.NbtList;
-import net.minecraft.nbt.NbtLong;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.RegistryKeys;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
@@ -32,6 +27,13 @@ public final class SearingHeartItems {
         .styled(s -> s.withColor(Formatting.RED).withBold(true).withItalic(false));
     private static final String ROOT_KEY = "voidclam";
     private static final String MODULE_KEY = "module";
+
+    /**
+     * Seek caches / blacklists are no longer written to the heart NBT; this snapshot is retained for debug commands and
+     * always reports zero persisted list sizes when lists were removed from {@link #writeModuleNbt}.
+     */
+    public record PersistedSeekCacheSnapshot(int lightsC, int oresC, int oresBL, boolean hadVoidclamModuleNbt) {
+    }
 
     private SearingHeartItems() {
     }
@@ -98,16 +100,6 @@ public final class SearingHeartItems {
         if (m.worldKey != null) {
             n.putString("dimension", m.worldKey.getValue().toString());
         }
-        NbtList lights = new NbtList();
-        for (Long p : m.lightsCache) {
-            lights.add(NbtLong.of(p));
-        }
-        n.put("lightsC", lights);
-        NbtList ores = new NbtList();
-        for (BlockPos p : m.oresBlackList) {
-            ores.add(NbtLong.of(p.asLong()));
-        }
-        n.put("oresBL", ores);
         return n;
     }
 
@@ -156,22 +148,6 @@ public final class SearingHeartItems {
                 m.worldKey = RegistryKey.of(RegistryKeys.WORLD, id);
             }
         });
-        n.getList("lightsC").ifPresent(list -> {
-            for (int i = 0; i < list.size(); i++) {
-                NbtElement el = list.get(i);
-                if (el instanceof AbstractNbtNumber num) {
-                    m.lightsCache.add(num.longValue());
-                }
-            }
-        });
-        n.getList("oresBL").ifPresent(list -> {
-            for (int i = 0; i < list.size(); i++) {
-                NbtElement el = list.get(i);
-                if (el instanceof AbstractNbtNumber num) {
-                    m.oresBlackList.add(BlockPos.fromLong(num.longValue()));
-                }
-            }
-        });
         return m;
     }
 
@@ -191,16 +167,18 @@ public final class SearingHeartItems {
         into.stubBuilt = snapshot.stubBuilt;
         into.worldKey = snapshot.worldKey;
         into.lightsCache.clear();
-        into.lightsCache.addAll(snapshot.lightsCache);
+        into.oresCache.clear();
         into.oresBlackList.clear();
-        for (BlockPos p : snapshot.oresBlackList) {
-            into.oresBlackList.add(p.toImmutable());
-        }
         into.lightsBlackList.clear();
         into.busyFlagPlaceEvent = 0;
         into.busyFlagMainCycle = 0;
         into.pathApplyPendingSteps = 0;
         into.lightPathGoalPacked = null;
+        into.orePathGoalPacked = null;
+        into.lightCacheRebuildTicksRemaining = 0;
+        into.lightCacheRebuildCursor = 0L;
+        into.oreCacheRebuildTicksRemaining = 0;
+        into.oreCacheRebuildCursor = 0L;
         into.pathfindingResumeWorldTime = 0;
     }
 
@@ -226,14 +204,43 @@ public final class SearingHeartItems {
         NbtCompound clam = new NbtCompound();
         clam.put(MODULE_KEY, writeModuleNbt(m));
         root.put(ROOT_KEY, clam);
-        ComponentMap merged = ComponentMap.of(
-            current,
-            ComponentMap.builder()
-                .add(DataComponentTypes.CUSTOM_DATA, NbtComponent.of(root))
-                .add(DataComponentTypes.CUSTOM_NAME, SEARING_NAME)
-                .build()
-        );
+        NbtComponent updatedData = NbtComponent.of(root);
+        boolean sameData = existingData != null && existingData.equals(updatedData);
+        boolean sameName = SEARING_NAME.equals(current.get(DataComponentTypes.CUSTOM_NAME));
+        if (sameData && sameName) {
+            return;
+        }
+        ComponentMap merged = ComponentMap.builder()
+            .addAll(current)
+            .add(DataComponentTypes.CUSTOM_DATA, updatedData)
+            .add(DataComponentTypes.CUSTOM_NAME, SEARING_NAME)
+            .build();
         furnace.setComponents(merged);
         furnace.markDirty();
+    }
+
+    /**
+     * Reads seek-cache list lengths from the furnace block entity’s custom data without requiring a {@link Module} round-trip.
+     * Missing keys yield size {@code 0}; {@code hadVoidclamModuleNbt} is false when no {@code voidclam/module} compound exists.
+     */
+    public static PersistedSeekCacheSnapshot readPersistedSeekCacheSnapshot(AbstractFurnaceBlockEntity furnace) {
+        if (furnace == null) {
+            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+        }
+        net.minecraft.component.ComponentMap current = furnace.getComponents();
+        NbtComponent data = current.get(DataComponentTypes.CUSTOM_DATA);
+        if (data == null) {
+            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+        }
+        NbtCompound root = data.copyNbt();
+        var clamOpt = root.getCompound(ROOT_KEY);
+        if (clamOpt.isEmpty()) {
+            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+        }
+        var modOpt = clamOpt.get().getCompound(MODULE_KEY);
+        if (modOpt.isEmpty()) {
+            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+        }
+        return new PersistedSeekCacheSnapshot(0, 0, 0, true);
     }
 }
