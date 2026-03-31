@@ -30,6 +30,27 @@ Working notes for planned behavior and balance changes. Items are not implemente
 
 ---
 
+## GitHub issue — Searing heart drops (tracking; not fixed here)
+
+**Title:** Searing heart drops: dormant inert UUID; pre-awaken double drop / dupe
+
+**Summary:** Two related bugs around breaking searing hearts and item `clamId` / inert stacks.
+
+### 1) Dormant clam → break → inert heart → place again has no UUID
+
+After making a clam **dormant** and **breaking** the heart, the dropped heart is **inert**. When that item is **placed again**, it **does not get a new UUID** (expected: successful placement should assign/persist `clamId` like a normal place).
+
+### 2) Spawned-in heart broken before awaken → two hearts; one dupes
+
+Breaking a **spawned-in** (or not-yet-awakened) heart drops **two** heart items:
+
+- One **inert** stack that **keeps the original UUID** — reported: does **not** duplicate again on that pattern.
+- A second stack that **gets a new UUID** and **duplicates again** when broken (repeatable dup path).
+
+**Likely code areas:** `onClamCoreBroken`, dormant/kill paths, `SearingHeartItems` NBT, `createFreshHeartStack` vs break drops, placement (`onSearingHeartItemPlaced` / `registerClam` / `ensureClamId`).
+
+---
+
 ## Notes
 
 - Implementation should stay consistent with existing tick order, `busyFlagMainCycle`, and resize cooldown rules documented under `docs/logic/` (the logic docs may need to be updated btw)
