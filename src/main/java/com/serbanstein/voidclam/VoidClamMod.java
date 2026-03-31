@@ -104,6 +104,12 @@ public final class VoidClamMod {
     public static final int POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS = 20;
     /** Completed {@code clamReSize} chains required before a placed heart (or one that left ice encasement) becomes {@link Clam#status} {@code 1} without relying on this count for {@link #makeStub}. */
     public static final int SEARING_WAKE_REPAIR_CYCLES = 2;
+    /** {@link #tryAutogrowIntoPrebuiltShell}: no matching prebuilt shell — default stub may be needed. */
+    private static final int PREBUILT_WAKE_NONE = 0;
+    /** {@link #tryAutogrowIntoPrebuiltShell}: {@link CommandToolbox#clamReSize} scheduled for larger size. */
+    private static final int PREBUILT_WAKE_RESIZED = 1;
+    /** {@link #tryAutogrowIntoPrebuiltShell}: valid prebuilt shell already matches {@link Clam#currentSize}. */
+    private static final int PREBUILT_WAKE_ALREADY_MATCHES = 2;
     /** Legacy wart/horn defense (annulus) only when size is at least this. */
     private static final int DEFENSE_MIN_SIZE = 3;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
@@ -305,22 +311,30 @@ public final class VoidClamMod {
         return isSearingHeartThermallyActive(world, m);
     }
 
-    private static void tryAutogrowOrSeekAfterWake(ServerWorld world, Clam m) {
+    /**
+     * After the heart is placed awake: try prebuilt-shell autogrow first; only if no suitable shell exists
+     * run the fixed {@link CommandToolbox#buildStub}. Seek caches refresh unless a resize was just scheduled.
+     */
+    private static void applyPostWakeShellAndSeek(ServerWorld world, Clam m) {
         if (m == null) return;
-        if (!tryAutogrowIntoPrebuiltShell(world, m)) {
+        int prebuilt = tryAutogrowIntoPrebuiltShell(world, m);
+        if (prebuilt != PREBUILT_WAKE_RESIZED) {
             startSeekCachesRebuild(m);
         }
+        if (prebuilt == PREBUILT_WAKE_NONE && !m.stubBuilt) {
+            CommandToolbox.buildStub(world, m.x, m.y, m.z);
+            m.stubBuilt = true;
+        } else if (prebuilt != PREBUILT_WAKE_NONE) {
+            m.stubBuilt = true;
+        }
+        syncClamCoreBlockEntityFromClam(world, m);
     }
 
     private static void finishSearingWakeAfterRepairCycles(ServerWorld world, Clam m) {
         m.status = 1;
-        if (!m.stubBuilt) {
-            CommandToolbox.buildStub(world, m.x, m.y, m.z);
-            m.stubBuilt = true;
-        }
         ensureAutoGrowScheduled(world, m);
         placeHeartBlockForClam(world, new BlockPos(m.x, m.y, m.z), m);
-        tryAutogrowOrSeekAfterWake(world, m);
+        applyPostWakeShellAndSeek(world, m);
     }
 
     /** Called when a {@code clamReSize} delayed shell chain has fully finished (pathidle gate). */
@@ -1256,13 +1270,9 @@ public final class VoidClamMod {
         m.repairWakeCyclesRemaining = 0;
         m.repairResizeChainAwaitingCompletion = false;
         m.status = 1;
-        if (!m.stubBuilt) {
-            CommandToolbox.buildStub(world, m.x, m.y, m.z);
-            m.stubBuilt = true;
-        }
         ensureAutoGrowScheduled(world, m);
         placeHeartBlockForClam(world, pos, m);
-        tryAutogrowOrSeekAfterWake(world, m);
+        applyPostWakeShellAndSeek(world, m);
     }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
@@ -1829,20 +1839,20 @@ public final class VoidClamMod {
      * After placing a searing heart: find the smallest size ≥ current size where an existing shell has {@code >50%} obsidian
      * on expected shell cells and the octahedron interior is clear; grow into that shell if larger than current.
      *
-     * @return {@code true} if {@link CommandToolbox#clamReSize} was invoked (caller should skip redundant follow-up work)
+     * @return one of {@code PREBUILT_WAKE_NONE}, {@code PREBUILT_WAKE_RESIZED}, or {@code PREBUILT_WAKE_ALREADY_MATCHES}
      */
-    private static boolean tryAutogrowIntoPrebuiltShell(ServerWorld world, Clam m) {
+    private static int tryAutogrowIntoPrebuiltShell(ServerWorld world, Clam m) {
         if (m == null || !world.getRegistryKey().equals(m.dimensionWorldKey())) {
-            return false;
+            return PREBUILT_WAKE_NONE;
         }
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
-            return false;
+            return PREBUILT_WAKE_NONE;
         }
         int maxSize = VoidClamConfig.get().clam_size_max;
         int start = Math.max(1, m.currentSize);
         for (int t = start; t <= maxSize; t++) {
             if (!clamShellScanRegionChunksLoaded(world, m.x, m.y, m.z, t)) {
-                return false;
+                return PREBUILT_WAKE_NONE;
             }
             ShellDamageStats shell = inspectObsidianShellDamageAt(world, m.x, m.y, m.z, t);
             int total = shell.shellTotal();
@@ -1858,11 +1868,11 @@ public final class VoidClamMod {
             if (t > m.currentSize) {
                 prepareClamForResizeShell(m);
                 CommandToolbox.clamReSize(world, m.clamId, t);
-                return true;
+                return PREBUILT_WAKE_RESIZED;
             }
-            return false;
+            return PREBUILT_WAKE_ALREADY_MATCHES;
         }
-        return false;
+        return PREBUILT_WAKE_NONE;
     }
 
     private static boolean isGrowthPassThrough(BlockState state) {
