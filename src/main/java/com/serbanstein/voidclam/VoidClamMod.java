@@ -657,7 +657,9 @@ public final class VoidClamMod {
         m.status = 0;
         m.stubBuilt = false;
         syncClamCoreBlockEntityFromClam(world, m);
-        startSeekCachesRebuild(m);
+        if (!tryAutogrowIntoPrebuiltShell(world, m)) {
+            startSeekCachesRebuild(m);
+        }
     }
 
     /**
@@ -1621,16 +1623,22 @@ public final class VoidClamMod {
 
     public static ShellDamageStats inspectObsidianShellDamage(ServerWorld world, Clam m) {
         int size = Math.max(1, m.currentSize);
+        return inspectObsidianShellDamageAt(world, m.x, m.y, m.z, size);
+    }
+
+    /** Obsidian present vs missing on the expected shell lattice for a hypothetical size (same geometry as {@link #inspectObsidianShellDamage}). */
+    public static ShellDamageStats inspectObsidianShellDamageAt(ServerWorld world, int cx, int cy, int cz, int size) {
+        int t = Math.max(1, size);
         int missing = 0;
         int present = 0;
-        int yMin = -size / 2 + 1;
-        int yMax = size - 1;
-        int horiz = Math.max(0, size - 1);
+        int yMin = -t / 2 + 1;
+        int yMax = t - 1;
+        int horiz = Math.max(0, t - 1);
         for (int dy = yMin; dy <= yMax; dy++) {
             for (int dx = -horiz; dx <= horiz; dx++) {
                 for (int dz = -horiz; dz <= horiz; dz++) {
-                    if (!isExpectedObsidianShellBlock(dx, dy, dz, size)) continue;
-                    BlockPos p = new BlockPos(m.x + dx, m.y + dy, m.z + dz);
+                    if (!isExpectedObsidianShellBlock(dx, dy, dz, t)) continue;
+                    BlockPos p = new BlockPos(cx + dx, cy + dy, cz + dz);
                     if (world.getBlockState(p).isOf(Blocks.OBSIDIAN)) {
                         present++;
                     } else {
@@ -1640,6 +1648,97 @@ public final class VoidClamMod {
             }
         }
         return new ShellDamageStats(present, missing);
+    }
+
+    private static boolean clamShellScanRegionChunksLoaded(ServerWorld world, int cx, int cy, int cz, int t) {
+        int yMinW = cy + (-t / 2 + 1);
+        int yMaxW = cy + (t - 1);
+        int horiz = Math.max(0, t - 1);
+        for (int iy = yMinW; iy <= yMaxW; iy++) {
+            for (int ix = cx - horiz; ix <= cx + horiz; ix++) {
+                for (int iz = cz - horiz; iz <= cz + horiz; iz++) {
+                    if (!world.isChunkLoaded(ix >> 4, iz >> 4)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean isAllowedPrebuiltShellInteriorBlock(BlockState st) {
+        return st.isAir() || st.isOf(Blocks.WATER) || st.isOf(Blocks.NETHER_WART_BLOCK);
+    }
+
+    /**
+     * Octahedron interior (excluding the heart block) must be only air, water, or nether wart — same constraint as
+     * manual shell placement before autogrow.
+     */
+    private static boolean isPrebuiltShellInteriorClear(ServerWorld world, int cx, int cy, int cz, int t) {
+        int horiz = Math.max(0, t - 1);
+        int yLo = cy + (-t / 2 + 1);
+        int yHi = cy + (t - 2);
+        for (int iy = yLo; iy <= yHi; iy++) {
+            for (int ix = cx - horiz; ix <= cx + horiz; ix++) {
+                for (int iz = cz - horiz; iz <= cz + horiz; iz++) {
+                    int dx = ix - cx, dy = iy - cy, dz = iz - cz;
+                    if (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+                    if (!CommandToolbox.isInsideOctahedronInterior(dx, dy, dz, t)) {
+                        continue;
+                    }
+                    if (!world.isChunkLoaded(ix >> 4, iz >> 4)) {
+                        return false;
+                    }
+                    BlockState st = world.getBlockState(new BlockPos(ix, iy, iz));
+                    if (!isAllowedPrebuiltShellInteriorBlock(st)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * After placing a searing heart: find the smallest size ≥ current size where an existing shell has {@code >50%} obsidian
+     * on expected shell cells and the octahedron interior is clear; grow into that shell if larger than current.
+     *
+     * @return {@code true} if {@link CommandToolbox#clamReSize} was invoked (caller should skip redundant follow-up work)
+     */
+    private static boolean tryAutogrowIntoPrebuiltShell(ServerWorld world, Clam m) {
+        if (m == null || !world.getRegistryKey().equals(m.dimensionWorldKey())) {
+            return false;
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            return false;
+        }
+        int maxSize = VoidClamConfig.get().clam_size_max;
+        int start = Math.max(1, m.currentSize);
+        for (int t = start; t <= maxSize; t++) {
+            if (!clamShellScanRegionChunksLoaded(world, m.x, m.y, m.z, t)) {
+                return false;
+            }
+            ShellDamageStats shell = inspectObsidianShellDamageAt(world, m.x, m.y, m.z, t);
+            int total = shell.shellTotal();
+            if (total <= 0) {
+                continue;
+            }
+            if (shell.obsidianPresent() <= shell.shellMissing()) {
+                continue;
+            }
+            if (!isPrebuiltShellInteriorClear(world, m.x, m.y, m.z, t)) {
+                continue;
+            }
+            if (t > m.currentSize) {
+                prepareClamForResizeShell(m);
+                CommandToolbox.clamReSize(world, m.clamId, t);
+                return true;
+            }
+            return false;
+        }
+        return false;
     }
 
     private static boolean isGrowthPassThrough(BlockState state) {

@@ -1,8 +1,14 @@
 # Grow, repair, and energy
 
-## Command `/voidclam resize`
+## Autogrow into a prebuilt shell (searing heart placement)
 
-Calls **`CommandToolbox.clamReSize`** immediately (not the safe pending flow). Use when you accept possible overlap with path activity.
+When a **searing heart** successfully places the core block, **`VoidClamMod.tryAutogrowIntoPrebuiltShell`** scans sizes from **`currentSize`** up to **`clam_size_max`**. The **smallest** size where all of the following hold triggers **`CommandToolbox.clamReSize`** immediately (if that size is **greater** than `currentSize`):
+
+- Expected shell lattice has at least one cell, and **strictly more than half** of those cells are **obsidian** (`inspectObsidianShellDamageAt`).
+- The octahedron **interior** (per `CommandToolbox.isInsideOctahedronInterior`, heart block excluded) contains only **air**, **water**, or **nether wart**.
+- All chunks overlapping the scan volume for that size are **loaded**; if not, autogrow **aborts** for that placement (no partial resize).
+
+The **`/voidclam resize`** command was removed; use **`/voidclam grow`** (pending safe path), **repair**, or **auto** routine for size changes.
 
 ## Safe repair / grow (`requestRepairCommand`, `requestGrowCommand`)
 
