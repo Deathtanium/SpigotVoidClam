@@ -11,12 +11,12 @@
 
 ## Async pathfinding abort conditions
 
-Work tied to a specific module stops when **any** of: the server is stopping; a **coordinated clam kill** has marked this clam’s **UUID** as victim; that module’s **center chunk is unloaded** (`world.isChunkLoaded(cx >> 4, cz >> 4)`).
+Work tied to a specific clam stops when **any** of: the server is stopping; a **coordinated clam kill** has marked this clam’s **UUID** as victim; that clam’s **center chunk is unloaded** (`world.isChunkLoaded(cx >> 4, cz >> 4)`).
 
 - **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)` — pass the path job’s `clamId` for kill matching.
 - **Shutdown flag**: `isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
 - **Kill barrier**: `isAsyncPathfindingKillBarrierInEffect()` — while `true`, `submitPathfinding` **rejects without queuing** (runs `onAbortedBeforeRun` immediately). Used so no new async tasks are created during a kill drain. `asyncPathfindingKillVictimClamId` identifies which clam is aborted cooperatively in workers.
-- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). Clears kill barrier state, sets the shutdown flag, **shuts down and awaits** the pathfinder executor, **replaces** the pool, and clears every module’s `busyFlagMainCycle`.
+- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). Clears kill barrier state, sets the shutdown flag, **shuts down and awaits** the pathfinder executor, **replaces** the pool, and clears every clam’s `busyFlagMainCycle`.
 - **Cleared (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStart()` at `SERVER_STARTED` (before `load`).
 - **`submitPathfinding`**: `submitPathfinding(world, cx, cz, pathfindingClamId, onAbortedBeforeRun, task)`. Rejects if kill barrier **or** shutdown (no `execute`). Otherwise, if abort before the body, runs `onAbortedBeforeRun` (clears `busyFlagMainCycle` / `pathStoppedAwaitingContainer` where needed).
 - **Where abort is polled**:
@@ -27,20 +27,20 @@ Work tied to a specific module stops when **any** of: the server is stopping; a 
   - Main-thread `applyContainerResult` path after container BFS (via `world.getServer().execute`): skips applying if abort is true.
 - **`busyFlagMainCycle` on interrupt**: Aborted paths clear the flag via `onAbortedBeforeRun`, A* early exit, `calculatePath` failure, or container callback guards. Kill starts by clearing the victim’s flag and purging that slot from `targets` to narrow enqueue races.
 
-## Coordinated module kill (`clamKill` / `clamKillBlocking`)
+## Coordinated clam kill (`clamKill` / `clamKillBlocking`)
 
 `/voidclam kill` and automatic core death call `VoidClamMod.clamKill(server, clamId, saveAfter)` (alias for `clamKillBlocking`). Sequence:
 
 1. **Queue** the request (serialized with `asyncKillCoordinatorLock`).
 2. **Start drain**: clear victim `busyFlagMainCycle`, **purge `targets`** entries for that `clamId`, set victim UUID + kill barrier.
 3. **Background thread** runs `shutdownPathfinderExecutorAfterKillDrain()` (same await/replace as server stop) so the server thread is not blocked while workers may call `server.execute`.
-4. **Server thread** (`server.execute`): **purge `targets`**, clear grow-pending if it was for this victim, remove module from registry, clear victim/barrier, optional legacy `save`, then start the next queued kill if any.
+4. **Server thread** (`server.execute`): **purge `targets`**, clear grow-pending if it was for this victim, remove clam from registry, clear victim/barrier, optional legacy `save`, then start the next queued kill if any.
 
-**Stale scheduled path steps:** `Pathfinder.buildPath` records origin `(x,y,z)` and `clamId`; each `scheduleDelayed` step checks `moduleMatchesClamAt(clamId, …)` so work does not run against the wrong clam after kills or moves.
+**Stale scheduled path steps:** `Pathfinder.buildPath` records origin `(x,y,z)` and `clamId`; each `scheduleDelayed` step checks `clamMatchesAt(clamId, …)` so work does not run against the wrong clam after kills or moves.
 
-## `Module` mutation from pathfinding workers
+## `Clam` mutation from pathfinding workers
 
-`clamReach` runs on the pathfinder pool and reads/writes the same **`Module`** instance the main thread uses (`busyFlagMainCycle`, blacklists). Ordering is relied on so the busy flag is not corrupted in normal operation; blacklists are also cleared on grow/repair. This matches historical risk; a stricter port could confine `Module` mutation to the main thread only.
+`clamReach` runs on the pathfinder pool and reads/writes the same **`Clam`** instance the main thread uses (`busyFlagMainCycle`, blacklists). Ordering is relied on so the busy flag is not corrupted in normal operation; blacklists are also cleared on grow/repair. This matches historical risk; a stricter port could confine `Clam` mutation to the main thread only.
 
 **Porting:** New off-thread work must respect `shouldAbortAsyncPathfindingWork` and the kill barrier; new kill paths should use the same coordinator or extend it.
 
@@ -60,7 +60,7 @@ Work tied to a specific module stops when **any** of: the server is stopping; a 
 
 ## `busyFlagMainCycle`
 
-Per-module **binary lock** (0 = idle, non-zero = busy) for the **reach → pathfind → apply path** cycle.
+Per-clam **binary lock** (0 = idle, non-zero = busy) for the **reach → pathfind → apply path** cycle.
 
 | Phase | Set / clear |
 |--------|-------------|
@@ -70,15 +70,15 @@ Per-module **binary lock** (0 = idle, non-zero = busy) for the **reach → pathf
 | `calculatePath` succeeds | Left at `1` until `buildPath` finishes or aborts |
 | `buildPath` | Cleared on early exit (bad cost, unloaded chunk, seek flags off, stamina blocked, final light/empty goal step) or **after** container apply for ore / path-stopped block breaks (see `pathStoppedAwaitingContainer` in `Pathfinder`) |
 
-**Grow/repair idle check** (`tickGrowPendingCheck`): Waits until `busyFlagMainCycle == 0` for the relevant module(s), **`targets` is empty**, and **`!VoidClamModScheduler.hasPendingTasks(world)`** for that dimension before running resize logic.
+**Grow/repair idle check** (`tickGrowPendingCheck`): Waits until `busyFlagMainCycle == 0` for the command target clam, **`countTargetsQueuedForClam(cmdId) == 0`**, and **`!isResizeShellAnimationPending(world)`** (same dimension as `growPendingWorld`) before running **`clamReSize`** / auto routine. It does **not** use **`hasPendingTasks`**.
 
 ## `busyFlagPlaceEvent`
 
-Present on `Module` but **unused** in current sources — document any future use here when implemented.
+Present on `Clam` but **unused** in current sources — document any future use here when implemented.
 
 ## Priority between operations
 
-There is no explicit priority queue between modules. **Order of effects** comes from:
+There is no explicit priority queue between clams. **Order of effects** comes from:
 
 1. Tick phase order ([[Tick-order-and-intervals]]).
 2. **FIFO** drain of `targets` in `tickTargets`.
@@ -87,5 +87,6 @@ There is no explicit priority queue between modules. **Order of effects** comes 
 
 ## Related notes
 
+- [[Technical-documentation]]
 - [[Pathfinding-and-reach]]
 - [[Grow-repair-and-energy]]

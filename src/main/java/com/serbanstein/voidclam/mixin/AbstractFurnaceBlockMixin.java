@@ -44,7 +44,7 @@ public abstract class AbstractFurnaceBlockMixin {
         }
         if (pos == null) return;
         ServerWorld lootWorld = builder.getWorld();
-        if (lootWorld != null && VoidClamMod.findModuleAt(lootWorld, pos) != null) {
+        if (lootWorld != null && VoidClamMod.findClamAt(lootWorld, pos) != null) {
             cir.setReturnValue(Collections.emptyList());
         }
     }

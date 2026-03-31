@@ -17,12 +17,9 @@ import net.minecraft.util.math.Box;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,65 +34,49 @@ public final class CommandToolbox {
      * Shared executor for pathfinding (reach + container scan) so it doesn't block main thread.
      * Replaced after each server session ends so a new pool exists if the JVM loads another world.
      */
-    private static ExecutorService pathfinderExecutor = Executors.newFixedThreadPool(
+    private static ExecutorService pathfindingExecutor = Executors.newFixedThreadPool(
         VoidClamConfig.effectiveAsyncThreadPoolSize(0));
-
-    /** Each pathfinder worker thread may register a short description while its runnable runs (debug only). */
-    private static final ConcurrentMap<Long, String> PATHFINDER_THREAD_TASK_LABELS = new ConcurrentHashMap<>();
-
-    public static void pathfinderWorkerTaskBegin(String label) {
-        PATHFINDER_THREAD_TASK_LABELS.put(Thread.currentThread().getId(), label);
-    }
-
-    public static void pathfinderWorkerTaskEnd() {
-        PATHFINDER_THREAD_TASK_LABELS.remove(Thread.currentThread().getId());
-    }
-
-    public static List<String> pathfinderWorkerTaskLabelsSnapshot() {
-        return Collections.unmodifiableList(new ArrayList<>(PATHFINDER_THREAD_TASK_LABELS.values()));
-    }
 
     /** Same pool used for async A* work and {@link BlockBfs.ExecutionMode#BACKGROUND} when {@code bfs_mode} is async. */
     public static Executor pathfindingExecutor() {
-        return pathfinderExecutor;
+        return pathfindingExecutor;
     }
 
-    /** OP debug: thread-pool stats for async pathfinding / background BFS (not per-clam). */
-    public static List<String> debugPathfinderExecutorLines() {
-        List<String> lines = new ArrayList<>(2);
-        ExecutorService ex = pathfinderExecutor;
+    /** One-line status for {@code /voidclam status} (pool + omni pulse flag). */
+    public static List<String> pathfindingExecutorStatusLines() {
+        List<String> lines = new ArrayList<>(3);
+        ExecutorService ex = pathfindingExecutor;
         if (ex instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
-            lines.add("pathfinderExecutor: poolSize=" + tpe.getPoolSize()
+            lines.add("pathfindingExecutor: poolSize=" + tpe.getPoolSize()
                 + " active=" + tpe.getActiveCount()
                 + " queue=" + tpe.getQueue().size()
                 + " completed=" + tpe.getCompletedTaskCount()
                 + " largestPool=" + tpe.getLargestPoolSize()
                 + " shutdown=" + tpe.isShutdown());
         } else {
-            lines.add("pathfinderExecutor: (not ThreadPoolExecutor) isShutdown=" + ex.isShutdown());
+            lines.add("pathfindingExecutor: (not ThreadPoolExecutor) isShutdown=" + ex.isShutdown());
         }
-        lines.add("  workerTaskLabels=" + pathfinderWorkerTaskLabelsSnapshot());
         lines.add("  omniAsyncPulseRunning=" + TendrilPulseManager.isOmniAsyncPulseRunning());
         return lines;
     }
 
     public static void configurePathfinderExecutorSize(int poolSize) {
         int n = Math.max(1, poolSize);
-        if (pathfinderExecutor instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
+        if (pathfindingExecutor instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
             tpe.setMaximumPoolSize(n);
             tpe.setCorePoolSize(n);
             return;
         }
-        pathfinderExecutor.shutdown();
+        pathfindingExecutor.shutdown();
         try {
-            if (!pathfinderExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                pathfinderExecutor.shutdownNow();
+            if (!pathfindingExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                pathfindingExecutor.shutdownNow();
             }
         } catch (InterruptedException e) {
-            pathfinderExecutor.shutdownNow();
+            pathfindingExecutor.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        pathfinderExecutor = Executors.newFixedThreadPool(n);
+        pathfindingExecutor = Executors.newFixedThreadPool(n);
     }
 
     /**
@@ -119,8 +100,8 @@ public final class CommandToolbox {
             }
             return;
         }
-        Module pauseModule = pathfindingClamId != null ? VoidClamMod.getModuleById(pathfindingClamId) : null;
-        if (!VoidClamMod.isPathfindingAllowedYet(world, pauseModule)) {
+        Clam pauseClam = pathfindingClamId != null ? VoidClamMod.getClamById(pathfindingClamId) : null;
+        if (!VoidClamMod.isPathfindingAllowedYet(world, pauseClam)) {
             if (onAbortedBeforeRun != null) {
                 onAbortedBeforeRun.run();
             }
@@ -136,22 +117,14 @@ public final class CommandToolbox {
             task.run();
             return;
         }
-        pathfinderExecutor.execute(() -> {
-            String label = pathfindingClamId != null
-                ? "submitPathfinding clamReach clamId=" + pathfindingClamId
-                : "submitPathfinding (no clamId)";
-            pathfinderWorkerTaskBegin(label);
-            try {
-                if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
-                    if (onAbortedBeforeRun != null) {
-                        onAbortedBeforeRun.run();
-                    }
-                    return;
+        pathfindingExecutor.execute(() -> {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
+                if (onAbortedBeforeRun != null) {
+                    onAbortedBeforeRun.run();
                 }
-                task.run();
-            } finally {
-                pathfinderWorkerTaskEnd();
+                return;
             }
+            task.run();
         });
     }
 
@@ -160,19 +133,19 @@ public final class CommandToolbox {
      * then replaces the executor. Called from the server lifecycle only.
      */
     static void shutdownPathfinderExecutorForSessionEnd() {
-        pathfinderExecutor.shutdown();
+        pathfindingExecutor.shutdown();
         try {
-            if (!pathfinderExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-                pathfinderExecutor.shutdownNow();
-                if (!pathfinderExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+            if (!pathfindingExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                pathfindingExecutor.shutdownNow();
+                if (!pathfindingExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
                     Thread.currentThread().interrupt();
                 }
             }
         } catch (InterruptedException e) {
-            pathfinderExecutor.shutdownNow();
+            pathfindingExecutor.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        pathfinderExecutor = Executors.newFixedThreadPool(VoidClamConfig.get().effectiveAsyncThreadPoolSize());
+        pathfindingExecutor = Executors.newFixedThreadPool(VoidClamConfig.get().effectiveAsyncThreadPoolSize());
     }
 
     /**
@@ -215,7 +188,7 @@ public final class CommandToolbox {
         }
     }
 
-    /** True if (px, py, pz) is inside the clam octahedron interior (relative to module center at 0,0,0). */
+    /** True if (px, py, pz) is inside the clam octahedron interior (relative to clam center at 0,0,0). */
     public static boolean isInsideOctahedronInterior(double px, double py, double pz, int tsize) {
         if (py < -tsize / 2 + 1 || py > tsize - 2) return false;
         double horiz = Math.abs(px) + Math.abs(pz);
@@ -251,14 +224,50 @@ public final class CommandToolbox {
         }
     }
 
-    /** True if the player's bounding box intersects the module's octahedron interior. */
-    public static boolean isPlayerInsideOctahedron(ServerPlayerEntity player, Module m) {
+    /**
+     * Euclidean radius of the largest sphere centered on the clam heart that fits in the octahedron interior
+     * ({@link #isInsideOctahedronInterior}) — i.e. inside the obsidian shell volume.
+     */
+    public static double octahedronInteriorInscribedSphereRadius(int tsize) {
+        if (tsize < 1) {
+            return 0.0;
+        }
+        double s = tsize - 2;
+        if (s <= 0.0) {
+            return 0.0;
+        }
+        double rSlant = s / Math.sqrt(3.0);
+        double pyHi = tsize - 2;
+        double pyLo = -tsize / 2 + 1;
+        double rTop = pyHi > 0.0 ? pyHi : Double.POSITIVE_INFINITY;
+        double rBot = pyLo < 0.0 ? -pyLo : Double.POSITIVE_INFINITY;
+        return Math.min(rSlant, Math.min(rTop, rBot));
+    }
+
+    /** Defense intrusion radius: inscribed sphere above, minus one block (Euclidean). */
+    public static double clamDefenseIntrusionSphereRadius(int tsize) {
+        return Math.max(0.0, octahedronInteriorInscribedSphereRadius(tsize) - 1.0);
+    }
+
+    /**
+     * True if any corner of the player's bounding box lies inside the defense sphere: inscribed in the shell
+     * octahedron interior, then shrunk by one block, centered on the heart block.
+     */
+    public static boolean isPlayerInsideOctahedron(ServerPlayerEntity player, Clam m) {
+        double r = clamDefenseIntrusionSphereRadius(m.currentSize);
+        if (r <= 0.0) {
+            return false;
+        }
+        double cx = m.x + 0.5, cy = m.y + 0.5, cz = m.z + 0.5;
+        double r2 = r * r;
         Box box = player.getBoundingBox();
-        int mx = m.x, my = m.y, mz = m.z;
         for (double x : new double[]{box.minX, box.maxX}) {
             for (double y : new double[]{box.minY, box.maxY}) {
                 for (double z : new double[]{box.minZ, box.maxZ}) {
-                    if (isInsideOctahedronInterior(x - mx, y - my, z - mz, m.currentSize)) return true;
+                    double dx = x - cx, dy = y - cy, dz = z - cz;
+                    if (dx * dx + dy * dy + dz * dz <= r2) {
+                        return true;
+                    }
                 }
             }
         }
@@ -343,7 +352,7 @@ public final class CommandToolbox {
     }
 
     public static void clamReSize(ServerWorld world, UUID clamId, int tsize) {
-        Module m = VoidClamMod.getModuleById(clamId);
+        Clam m = VoidClamMod.getClamById(clamId);
         if (m == null) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         VoidClamMod.prepareClamForResizeShell(m);
@@ -438,7 +447,7 @@ public final class CommandToolbox {
             }
             m.pathfindingResumeWorldTime = world.getTime() + resumeAnimOffset + postTicks;
             m.currentSize = csize;
-            VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
+            VoidClamMod.placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
             VoidClamMod.startSeekCachesRebuild(m);
             return;
         }
@@ -474,13 +483,13 @@ public final class CommandToolbox {
         m.pathfindingResumeWorldTime = obsidianAtTick + VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
 
         m.currentSize = tsize;
-        VoidClamMod.placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
+        VoidClamMod.placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
         VoidClamMod.startSeekCachesRebuild(m);
     }
 
-    /** Start light/ore search for module. Scans box off-thread, pathfinds to closest target. */
+    /** Start light/ore search for a clam. Scans box off-thread, pathfinds to closest target. */
     public static void clamReach(ServerWorld world, UUID clamId) {
-        Module m = VoidClamMod.getModuleById(clamId);
+        Clam m = VoidClamMod.getClamById(clamId);
         if (m == null || m.status != 1) return;
         if (!world.getRegistryKey().equals(m.dimensionWorldKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
@@ -661,79 +670,15 @@ public final class CommandToolbox {
     }
 
     /**
-     * Human-readable diagnostics for seek caches (runtime {@link Module} + heart {@link SearingHeartItems#syncModuleToBlockEntity}
-     * then persisted list sizes). Caller prints to chat or console.
-     */
-    public static List<String> buildHeartSeekCacheDebugLines(ServerWorld world, Module m) {
-        List<String> lines = new ArrayList<>();
-        if (m == null) {
-            lines.add("module=null");
-            return lines;
-        }
-        m.ensureClamId();
-        VoidClamConfig cfg = VoidClamConfig.get();
-        lines.add(
-            "config seek_target_cache="
-                + cfg.seekTargetCacheEnabled()
-                + " material_seek_threshold="
-                + cfg.clam_material_seek_threshold
-                + " astar_mode="
-                + (cfg.astar_mode != null ? cfg.astar_mode : "async")
-                + " (clamReach target scan shares thread with A*)"
-        );
-        lines.add(
-            "runtime sizes lightsCache=" + m.lightsCache.size()
-                + " oresCache=" + m.oresCache.size()
-                + " lightsBlackList=" + m.lightsBlackList.size()
-                + " oresBlackList=" + m.oresBlackList.size()
-        );
-        lines.add(
-            "rebuild lightTicksRemaining=" + m.lightCacheRebuildTicksRemaining
-                + " oreTicksRemaining=" + m.oreCacheRebuildTicksRemaining
-                + " cursors light=" + m.lightCacheRebuildCursor + " ore=" + m.oreCacheRebuildCursor
-        );
-        lines.add(
-            "goals lightPacked=" + m.lightPathGoalPacked
-                + " orePacked=" + m.orePathGoalPacked
-                + " seekLights=" + m.seekLights
-                + " seekOres=" + m.seekOres
-        );
-        BlockPos heart = new BlockPos(m.x, m.y, m.z);
-        BlockEntity be = world.getBlockEntity(heart);
-        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) {
-            lines.add("heart block entity: missing or not a furnace — sync skipped");
-            return lines;
-        }
-        SearingHeartItems.syncModuleToBlockEntity(furnace, m);
-        SearingHeartItems.PersistedSeekCacheSnapshot snap = SearingHeartItems.readPersistedSeekCacheSnapshot(furnace);
-        lines.add(
-            "CUSTOM_DATA module lists (not persisted; always empty in NBT): lightsC=" + snap.lightsC()
-                + " oresC=" + snap.oresC()
-                + " oresBL=" + snap.oresBL()
-                + " hadVoidclamModuleNbt=" + snap.hadVoidclamModuleNbt()
-        );
-        lines.add(
-            "seek box volume (positions)=" + VoidClamMod.lightSeekScanVolume(m.currentSize)
-                + " currentSize=" + m.currentSize
-        );
-        lines.add("heart block " + m.x + "," + m.y + "," + m.z + " chunk " + (m.x >> 4) + "," + (m.z >> 4));
-        lines.add(
-            "ephemeral unloadExpiryWorldTime=" + m.seekEphemeralDataExpireAtWorldTime
-                + " needPostUnloadRefresh=" + m.seekEphemeralNeedSeekDataRefresh
-        );
-        return lines;
-    }
-
-    /**
      * Writes the searing heart block entity’s full NBT (including identifying fields, same as chunk disk form) to
      * {@code <runDir>/voidclam-nbt-dumps/<clamId>.nbt} using gzip-compressed NBT.
      */
-    public static Path writeClamHeartNbtDumpFile(MinecraftServer server, Module m) throws IOException {
+    public static Path writeClamHeartNbtDumpFile(MinecraftServer server, Clam m) throws IOException {
         if (server == null || m == null) {
-            throw new IOException("server or module missing");
+            throw new IOException("server or clam missing");
         }
         m.ensureClamId();
-        ServerWorld world = VoidClamMod.getWorldForModule(server, m);
+        ServerWorld world = VoidClamMod.getWorldForClam(server, m);
         if (world == null) {
             throw new IOException("dimension for this voidclam is not loaded");
         }
@@ -755,16 +700,5 @@ public final class CommandToolbox {
         Path file = dir.resolve(m.clamId.toString() + ".nbt");
         NbtIo.writeCompressed(tag, file);
         return file;
-    }
-
-    /**
-     * Runs {@link net.minecraft.server.world.ServerChunkManager#save(boolean)} for this world after {@link SearingHeartItems#syncModuleToBlockEntity}
-     * (which calls {@link AbstractFurnaceBlockEntity#markDirty()}). Flushes pending chunk writes for the dimension.
-     */
-    public static void flushPendingChunkIoForWorld(ServerWorld world) {
-        if (world == null) {
-            return;
-        }
-        world.getChunkManager().save(false);
     }
 }

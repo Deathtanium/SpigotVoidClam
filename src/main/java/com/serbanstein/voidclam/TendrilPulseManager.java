@@ -48,7 +48,7 @@ public final class TendrilPulseManager {
      * Omnidirectional pulse: caps for merged BFS. Previously {@code Integer.MAX_VALUE}, which let async mode
      * {@linkplain CommandToolbox#pathfindingExecutor() monopolize a pool thread} until the entire wart graph was visited.
      */
-    private static final int MAX_OMNI_BFS_PER_MODULE = 350_000;
+    private static final int MAX_OMNI_BFS_PER_CLAM = 350_000;
     private static final int MAX_OMNI_TOTAL_BLOCKS = 800_000;
     /** Async batching: expansions per inner {@link BlockBfs.MergedOmniBfsJob#step} to avoid one giant step. */
     private static final int OMNI_ASYNC_STEP_EXPANSIONS = 65_536;
@@ -64,16 +64,12 @@ public final class TendrilPulseManager {
     /** Entity tag persisted by vanilla in NBT (Tags); used to identify our tendril block displays after restart. */
     public static final String VOIDCLAM_DISPLAY_TAG = "voidclam_tendril_display";
 
-    private static final String DEBUG_PREFIX = "[VoidClam TendrilPulse] ";
-    private static final boolean DEBUG = false;
-
     private static final List<PulseEntry> entries = new CopyOnWriteArrayList<>();
 
     // Resolve by generic type so field names work across mappings (Yarn vs obfuscated)
     private static TrackedData<Vector3f> scaleData;
     private static TrackedData<BlockState> blockStateData;
     private static TrackedData<Integer> brightnessData;
-    private static String brightnessDataFieldName;
 
     static {
         try {
@@ -81,33 +77,12 @@ public final class TendrilPulseManager {
             blockStateData = findTrackedDataByType(DisplayEntity.BlockDisplayEntity.class, BlockState.class);
             try {
                 brightnessData = findTrackedDataByType(DisplayEntity.class, Integer.class, "brightness");
-                brightnessDataFieldName = findTrackedDataFieldName(DisplayEntity.class, brightnessData);
             } catch (Exception e) {
                 brightnessData = null;
-                brightnessDataFieldName = null;
-            }
-            if (DEBUG) {
-                System.out.println(DEBUG_PREFIX + "init: brightnessData=" + (brightnessData != null)
-                    + ", fieldName=" + brightnessDataFieldName);
             }
         } catch (Exception e) {
             throw new RuntimeException("TendrilPulseManager: failed to resolve DisplayEntity tracked data", e);
         }
-    }
-
-    /** Find which static TrackedData field holds the given data ref (for debug). */
-    private static String findTrackedDataFieldName(Class<?> clazz, TrackedData<?> target) {
-        if (target == null) return null;
-        for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
-            for (Field f : c.getDeclaredFields()) {
-                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) || f.getType() != TrackedData.class) continue;
-                f.setAccessible(true);
-                try {
-                    if (f.get(null) == target) return c.getSimpleName() + "." + f.getName();
-                } catch (Exception ignored) { }
-            }
-        }
-        return "?";
     }
 
     /** Ticks per full day (24000). Day flat 1000–11000 (max); night flat 13000–23000 (min); smooth transitions at dawn/dusk. */
@@ -171,7 +146,7 @@ public final class TendrilPulseManager {
         if (!VoidClamConfig.get().vfx_enabled) return;
         if (omniPulseJob != null || omniAsyncRunning) return;
         List<BlockBfs.MergedOmniBfsJob.SingleSource> bfsList = new ArrayList<>();
-        for (Module m : VoidClamMod.getAllModules()) {
+        for (Clam m : VoidClamMod.getAllClams()) {
             if (m == null || m.status != 1) continue;
             if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             BlockPos center = new BlockPos(m.x, m.y, m.z);
@@ -179,7 +154,7 @@ public final class TendrilPulseManager {
             BlockState startState = world.getBlockState(center);
             if (!VoidClamCoreBlocks.isWartOrCore(startState))
                 continue;
-            bfsList.add(new BlockBfs.MergedOmniBfsJob.SingleSource(center.asLong(), MAX_OMNI_BFS_PER_MODULE));
+            bfsList.add(new BlockBfs.MergedOmniBfsJob.SingleSource(center.asLong(), MAX_OMNI_BFS_PER_CLAM));
         }
         if (bfsList.isEmpty()) return;
         if (VoidClamConfig.get().bfsModeEnum() == VoidClamConfig.BfsMode.ASYNC) {
@@ -187,7 +162,6 @@ public final class TendrilPulseManager {
             omniAsyncRunning = true;
             omniPulseJobDimension = world.getRegistryKey();
             CommandToolbox.pathfindingExecutor().execute(() -> {
-                CommandToolbox.pathfinderWorkerTaskBegin("omniPulse MergedOmniBfsJob sources=" + bfsList.size());
                 try {
                     BlockBfs.MergedOmniBfsJob job = new BlockBfs.MergedOmniBfsJob(world, bfsList);
                     while (!job.isDone()) {
@@ -205,8 +179,6 @@ public final class TendrilPulseManager {
                         omniPulseJobDimension = null;
                     });
                     throw t;
-                } finally {
-                    CommandToolbox.pathfinderWorkerTaskEnd();
                 }
             });
             return;
@@ -246,36 +218,6 @@ public final class TendrilPulseManager {
         omniPulseJob = null;
         omniPulseJobDimension = null;
         scheduleOmniPulsesFromMergedResult(world, result);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static void debugLogAllIntegerTrackedData(DisplayEntity display) {
-        if (!DEBUG) return;
-        try {
-            StringBuilder sb = new StringBuilder(DEBUG_PREFIX + "all Integer TrackedData: ");
-            for (Class<?> c = DisplayEntity.class; c != null; c = c.getSuperclass()) {
-                for (Field f : c.getDeclaredFields()) {
-                    if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) || f.getType() != TrackedData.class) continue;
-                    f.setAccessible(true);
-                    Object val = f.get(null);
-                    if (val == null) continue;
-                    Type type = f.getGenericType();
-                    if (!(type instanceof ParameterizedType pt)) continue;
-                    Type arg = pt.getActualTypeArguments().length == 1 ? pt.getActualTypeArguments()[0] : null;
-                    if (arg != null && (arg.equals(Integer.class) || (arg instanceof Class<?> cls && cls == Integer.class))) {
-                        try {
-                            int v = display.getDataTracker().get((TrackedData<Integer>) val);
-                            sb.append(c.getSimpleName()).append('.').append(f.getName()).append('=').append(v).append(' ');
-                        } catch (Exception e) {
-                            sb.append(c.getSimpleName()).append('.').append(f.getName()).append("=err ");
-                        }
-                    }
-                }
-            }
-            System.out.println(sb);
-        } catch (Exception e) {
-            System.out.println(DEBUG_PREFIX + "debugLogAllIntegerTrackedData: " + e.getMessage());
-        }
     }
 
     @SuppressWarnings("unchecked")
@@ -505,26 +447,15 @@ public final class TendrilPulseManager {
         return toDiscard.size();
     }
 
-    private static final boolean CLEANUP_DEBUG = Boolean.getBoolean("voidclam.debug.cleanup");
-
     /** Removes only block display entities spawned by this mod (identified by entity tag, which vanilla persists). */
     public static void cleanupStrayDisplays(ServerWorld world) {
         Box box = fullWorldBox(world);
         List<DisplayEntity.BlockDisplayEntity> all = world.getEntitiesByClass(
             DisplayEntity.BlockDisplayEntity.class, box, entity -> true);
-        int withTag = 0;
-        int netherWartCount = 0;
         for (DisplayEntity.BlockDisplayEntity e : all) {
-            if (e.getDataTracker().get(blockStateData).isOf(Blocks.NETHER_WART_BLOCK)) netherWartCount++;
             if (e.getCommandTags().contains(VOIDCLAM_DISPLAY_TAG)) {
-                withTag++;
                 e.discard();
             }
-        }
-        if (CLEANUP_DEBUG || (netherWartCount > 0 && withTag == 0)) {
-            System.out.println("[VoidClam] cleanupStrayDisplays: world=" + world.getRegistryKey().getValue()
-                + " block_displays=" + all.size() + " nether_wart=" + netherWartCount
-                + " with_tag=" + withTag + " discarded=" + withTag);
         }
     }
 }

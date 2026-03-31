@@ -32,6 +32,8 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.component.ComponentMap;
 import net.minecraft.registry.tag.TagKey;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,14 +41,18 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Central state: modules keyed by {@link Module#clamId}, path-result queue, grow-pending coordination.
- * Persistence is the searing heart (blast furnace) in-world (no seek cache / blacklist lists on disk); each {@link Module}
- * records {@link Module#worldKey}.
+ * Central state: clams keyed by {@link Clam#clamId}, path-result queue, grow-pending coordination.
+ * Persistence is the searing heart (blast furnace) in-world (no seek cache / blacklist lists on disk); each {@link Clam}
+ * records {@link Clam#worldKey}.
  */
 public final class VoidClamMod {
-    private static final int MAX_MODULES = 1001;
+    private static final Logger LOGGER = LoggerFactory.getLogger("voidclam/VoidClamMod");
+    private static final int MAX_CLAMS = 1001;
+    /** Throttle "orphaned activity" warnings per clam (world-time ticks, overworld clock). */
+    private static final int ORPHANED_ACTIVITY_WARN_COOLDOWN_TICKS = 20 * 60;
+    private static final Map<UUID, Long> lastOrphanedActivityWarnWorldTick = new ConcurrentHashMap<>();
 
-    private static final Map<UUID, Module> modulesById = new ConcurrentHashMap<>();
+    private static final Map<UUID, Clam> clamsById = new ConcurrentHashMap<>();
 
     private record PendingLightCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {}
     /** Avoid synchronous cache work inside {@code World#setBlockState} (beacon/pyramid causes huge update chains). */
@@ -93,7 +99,7 @@ public final class VoidClamMod {
     private static final int DEFENSE_MIN_SIZE = 11;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
-    /** Blocks that count as "food" (light sources) for SIVA. */
+    /** Blocks that count as light-source "food" (energy) for clams. */
     private static final Set<Block> lights = new HashSet<>();
     /** Blocks that count as ores (fortune-3 style drops when eaten). */
     private static final Set<Block> ores = new HashSet<>();
@@ -157,7 +163,7 @@ public final class VoidClamMod {
         return Math.max(1, size) * 10;
     }
 
-    public static void clampResourcesForSize(Module m) {
+    public static void clampResourcesForSize(Clam m) {
         if (m == null) return;
         int cap = resourceCapForSize(m.currentSize);
         if (m.energy > cap) m.energy = cap;
@@ -199,7 +205,7 @@ public final class VoidClamMod {
     }
 
     /**
-     * Remove/adjust queued path targets and grow-pending indices, then shift the module array.
+     * Remove/adjust queued path targets and grow-pending indices, then remove the clam from the registry.
      * Call only from the server thread after async pathfinding has drained.
      */
     private static void finishClamKillAfterAsyncSettled(UUID victimId) {
@@ -211,7 +217,7 @@ public final class VoidClamMod {
         }
         growSavedSeekLights.remove(victimId);
         growSavedSeekOres.remove(victimId);
-        modulesById.remove(victimId);
+        clamsById.remove(victimId);
     }
 
     private static void purgeTargetsForVictimClamId(UUID victimClamId) {
@@ -236,7 +242,7 @@ public final class VoidClamMod {
     /**
      * Clears busy, targets queue, and sync A* jobs for this clam. Call at the start of {@link CommandToolbox#clamReSize}.
      */
-    public static void prepareClamForResizeShell(Module m) {
+    public static void prepareClamForResizeShell(Clam m) {
         if (m == null) return;
         releasePathfindingMainCycle(m);
         m.lightsBlackList.clear();
@@ -248,19 +254,19 @@ public final class VoidClamMod {
     }
 
     /** Whether {@code clamReach}, path enqueues, and sync A* may run (after obsidian + grace when resizing). */
-    public static boolean isPathfindingAllowedYet(ServerWorld world, Module m) {
+    public static boolean isPathfindingAllowedYet(ServerWorld world, Clam m) {
         if (m == null) return true;
         long t = m.pathfindingResumeWorldTime;
         return t == 0 || world.getTime() >= t;
     }
 
     /**
-     * Kill module at index: block all new async pathfinding, abort work for this slot, drain the pathfinder pool off-thread,
-     * then on the server thread adjust targets and the module array and clear the barrier. Kills are serialized; additional
+     * Kill one clam: block all new async pathfinding, abort work for it, drain the pathfinder pool off-thread,
+     * then on the server thread purge targets/registry and clear the barrier. Kills are serialized; additional
      * requests queue behind an in-progress drain. Saves after the shift when {@code saveAfter}.
      */
     public static void clamKillBlocking(MinecraftServer server, UUID victimId, boolean saveAfter) {
-        if (victimId == null || !modulesById.containsKey(victimId)) return;
+        if (victimId == null || !clamsById.containsKey(victimId)) return;
         synchronized (asyncKillCoordinatorLock) {
             pendingClamKills.add(new KillRequest(victimId, saveAfter));
             pendingKillDrainServer = server;
@@ -277,7 +283,7 @@ public final class VoidClamMod {
             return;
         }
         UUID victimId = next.victimId();
-        Module victim = modulesById.get(victimId);
+        Clam victim = clamsById.get(victimId);
         if (victim == null) {
             tryStartNextClamKillDrainLocked();
             return;
@@ -345,45 +351,45 @@ public final class VoidClamMod {
         CommandToolbox.shutdownPathfinderExecutorForSessionEnd();
         Pathfinder.clearSyncPathJobsForSessionEnd();
         NaturalSpawnHandler.clearForSessionEnd();
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m != null) {
                 releasePathfindingMainCycle(m);
             }
         }
     }
 
-    public static Collection<Module> getAllModules() {
-        return modulesById.values();
+    public static Collection<Clam> getAllClams() {
+        return clamsById.values();
     }
 
-    public static int getModuleCount() {
-        return modulesById.size();
+    public static int getClamCount() {
+        return clamsById.size();
     }
 
-    /** @deprecated use {@link #getModuleById} */
+    /** @deprecated use {@link #getClamById} */
     @Deprecated
-    public static Module[] getModules() {
-        Collection<Module> c = modulesById.values();
-        Module[] arr = c.toArray(new Module[0]);
+    public static Clam[] getClams() {
+        Collection<Clam> c = clamsById.values();
+        Clam[] arr = c.toArray(new Clam[0]);
         Arrays.sort(arr, Comparator.comparing(m -> m.clamId.toString()));
         return arr;
     }
 
-    /** @deprecated use {@link #getModuleCount} */
+    /** @deprecated use {@link #getClamCount} */
     @Deprecated
-    public static int getModuleNumber() {
-        return getModuleCount();
+    public static int getClamNumber() {
+        return getClamCount();
     }
 
-    public static @Nullable Module getModuleById(@Nullable UUID id) {
-        return id == null ? null : modulesById.get(id);
+    public static @Nullable Clam getClamById(@Nullable UUID id) {
+        return id == null ? null : clamsById.get(id);
     }
 
     /** Heart position in a specific dimension (avoids collisions across dimensions at the same block coords). */
-    public static @Nullable Module findModuleAt(ServerWorld world, BlockPos pos) {
+    public static @Nullable Clam findClamAt(ServerWorld world, BlockPos pos) {
         RegistryKey<World> dim = world.getRegistryKey();
         int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m != null && m.x == px && m.y == py && m.z == pz && m.dimensionWorldKey().equals(dim)) {
                 return m;
             }
@@ -391,7 +397,7 @@ public final class VoidClamMod {
         return null;
     }
 
-    public static @Nullable ServerWorld getWorldForModule(MinecraftServer server, @Nullable Module m) {
+    public static @Nullable ServerWorld getWorldForClam(MinecraftServer server, @Nullable Clam m) {
         if (m == null || server == null) {
             return null;
         }
@@ -399,28 +405,28 @@ public final class VoidClamMod {
     }
 
     /**
-     * After world reload: link runtime {@link Module} from heart blast furnace block entity custom data
+     * After world reload: link runtime {@link Clam} from heart blast furnace block entity custom data
      * (replaces legacy {@code modules.siva} bootstrap).
      */
     public static void tryRegisterFromClamCoreBlockEntity(ServerWorld world, BlockPos pos, AbstractFurnaceBlockEntity furnace) {
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
             return;
         }
-        if (findModuleAt(world, pos) != null) {
+        if (findClamAt(world, pos) != null) {
             return;
         }
-        Module snap = SearingHeartItems.readModuleTemplateFromComponentMap(furnace.getComponents());
+        Clam snap = SearingHeartItems.readClamTemplateFromComponentMap(furnace.getComponents());
         if (snap == null) {
             return;
         }
-        Module m = new Module();
-        SearingHeartItems.applyTemplateOntoModule(snap, m);
+        Clam m = new Clam();
+        SearingHeartItems.applyTemplateOntoClam(snap, m);
         m.x = pos.getX();
         m.y = pos.getY();
         m.z = pos.getZ();
         m.worldKey = world.getRegistryKey();
         m.ensureClamId();
-        Module existing = modulesById.get(m.clamId);
+        Clam existing = clamsById.get(m.clamId);
         if (existing != null) {
             if (existing.x == m.x && existing.y == m.y && existing.z == m.z
                 && existing.dimensionWorldKey().equals(m.dimensionWorldKey())) {
@@ -428,8 +434,8 @@ public final class VoidClamMod {
             }
             return;
         }
-        if (registerModule(m)) {
-            SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+        if (registerClam(m)) {
+            SearingHeartItems.syncClamToBlockEntity(furnace, m);
             VoidClamConfig rcfg = VoidClamConfig.get();
             if (rcfg.lightBlockCacheEnabled() && m.seekLights && m.lightsCache.isEmpty()
                 && m.lightCacheRebuildTicksRemaining == 0) {
@@ -451,11 +457,11 @@ public final class VoidClamMod {
         if (server == null) {
             return;
         }
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m == null) {
                 continue;
             }
-            ServerWorld w = getWorldForModule(server, m);
+            ServerWorld w = getWorldForClam(server, m);
             if (w == null) {
                 continue;
             }
@@ -474,7 +480,7 @@ public final class VoidClamMod {
         }
     }
 
-    static void clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry(Module m) {
+    static void clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry(Clam m) {
         if (m == null) {
             return;
         }
@@ -492,40 +498,40 @@ public final class VoidClamMod {
         m.seekEphemeralNeedSeekDataRefresh = true;
     }
 
-    /** Push live {@link Module} fields into the heart blast furnace so chunk NBT persists across restarts. */
-    public static void syncClamCoreBlockEntityFromModule(ServerWorld world, Module m) {
+    /** Push live {@link Clam} fields into the heart blast furnace so chunk NBT persists across restarts. */
+    public static void syncClamCoreBlockEntityFromClam(ServerWorld world, Clam m) {
         if (m == null) return;
         BlockPos pos = new BlockPos(m.x, m.y, m.z);
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
         BlockEntity be = world.getBlockEntity(pos);
         if (be instanceof AbstractFurnaceBlockEntity furnace) {
-            SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+            SearingHeartItems.syncClamToBlockEntity(furnace, m);
         }
     }
 
-    private static boolean registerModule(Module m) {
+    private static boolean registerClam(Clam m) {
         m.ensureClamId();
-        if (modulesById.size() >= MAX_MODULES) return false;
-        modulesById.put(m.clamId, m);
+        if (clamsById.size() >= MAX_CLAMS) return false;
+        clamsById.put(m.clamId, m);
         return true;
     }
 
     /** Placement from searing heart item (same package mixin); {@code false} if at capacity. */
-    static boolean registerModuleForSearingPlace(Module m) {
-        return registerModule(m);
+    static boolean registerClamForSearingPlace(Clam m) {
+        return registerClam(m);
     }
 
     /** First auto-grow deadline for a clam that has not been scheduled yet (spread across one interval by position). */
-    public static void ensureAutoGrowScheduled(ServerWorld world, Module m) {
+    public static void ensureAutoGrowScheduled(ServerWorld world, Clam m) {
         if (m.nextAutoGrowRepairWorldTime > 0) return;
         long t = world.getTime();
         int spread = Math.floorMod(m.x * 31 + m.y * 17 + m.z * 13, autoGrowRepairIntervalTicks());
         m.nextAutoGrowRepairWorldTime = t + 1 + spread;
     }
 
-    /** After CSV load: give every loaded module a first auto-grow fire time. */
-    public static void seedAutoGrowScheduleForAllModules(ServerWorld world) {
-        for (Module mm : modulesById.values()) {
+    /** After bulk registration (e.g. server start): give every clam in this world a first auto-grow fire time if unset. */
+    public static void seedAutoGrowScheduleForAllClams(ServerWorld world) {
+        for (Clam mm : clamsById.values()) {
             if (mm != null && mm.dimensionWorldKey().equals(world.getRegistryKey())) {
                 ensureAutoGrowScheduled(world, mm);
                 startSeekCachesRebuild(mm);
@@ -539,7 +545,7 @@ public final class VoidClamMod {
      */
     public static boolean tryScheduleAutoGrowRepairForClam(ServerWorld world, UUID clamId) {
         if (growPendingWorld != null || asyncPathfindingKillBarrierInEffect) return false;
-        Module mod = getModuleById(clamId);
+        Clam mod = getClamById(clamId);
         if (mod == null) return false;
         growSavedSeekLights.put(clamId, mod.seekLights);
         growSavedSeekOres.put(clamId, mod.seekOres);
@@ -555,7 +561,7 @@ public final class VoidClamMod {
         breakingClamFurnaceComponents.remove();
         if (world.isClient() || !(world instanceof ServerWorld)) return;
         if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
-        if (findModuleAt((ServerWorld) world, pos) == null) return;
+        if (findClamAt((ServerWorld) world, pos) == null) return;
         BlockEntity be = world.getBlockEntity(pos);
         if (be != null) {
             breakingClamFurnaceComponents.set(be.createComponentMap());
@@ -582,13 +588,13 @@ public final class VoidClamMod {
     }
 
     /** Place or replace the block at {@code pos} with the vanilla clam core block (blast furnace). */
-    public static void placeHeartBlockForModule(ServerWorld world, BlockPos pos, Module m) {
+    public static void placeHeartBlockForClam(ServerWorld world, BlockPos pos, Clam m) {
         boolean lit = m != null && m.status == 1;
         BlockState state = VoidClamCoreBlocks.CORE_BLOCK.getDefaultState().with(AbstractFurnaceBlock.LIT, lit);
         world.setBlockState(pos, state);
         BlockEntity be = world.getBlockEntity(pos);
         if (m != null && be instanceof AbstractFurnaceBlockEntity furnace) {
-            SearingHeartItems.syncModuleToBlockEntity(furnace, m);
+            SearingHeartItems.syncClamToBlockEntity(furnace, m);
         } else {
             applySearingHeartBlockLabel(world, pos);
         }
@@ -606,14 +612,14 @@ public final class VoidClamMod {
 
     /**
      * Clam core broken: replace the default blast furnace drop with a fresh Searing Heart (baby template),
-     * then remove the module from the save.
+     * then remove the clam from the registry (heart NBT / optional CSV mirror updated via kill path).
      */
     public static void onClamCoreBroken(ServerWorld world, @Nullable PlayerEntity player, BlockPos pos, BlockState state) {
         breakingClamFurnaceComponents.remove();
-        Module m = findModuleAt(world, pos);
+        Clam m = findClamAt(world, pos);
         if (m == null) return;
         stripVanillaBlastFurnaceDropsNear(world, pos);
-        // Baby heart only: no carry-over module size/stats or furnace contents (furnaceSnap ignored).
+        // Baby heart only: no carry-over clam size/stats or furnace contents (furnaceSnap ignored).
         ItemStack drop = SearingHeartItems.createFreshHeartStack();
         net.minecraft.block.Block.dropStack(world, pos, drop);
         clamKillBlocking(world.getServer(), m.clamId, true);
@@ -621,37 +627,37 @@ public final class VoidClamMod {
 
     /**
      * After a searing heart item successfully places a blast furnace: new clam id at placement position,
-     * inheriting module fields from the item.
+     * inheriting clam fields from the item.
      */
     public static void onSearingHeartItemPlaced(ServerWorld world, BlockPos pos, ItemStack templateFromBeforeConsume) {
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
-        Module snap = SearingHeartItems.readModuleTemplateFromStack(templateFromBeforeConsume);
+        Clam snap = SearingHeartItems.readClamTemplateFromStack(templateFromBeforeConsume);
         if (snap == null) return;
-        if (findModuleAt(world, pos) != null) return;
-        Module m = new Module();
+        if (findClamAt(world, pos) != null) return;
+        Clam m = new Clam();
         m.clamId = UUID.randomUUID();
-        SearingHeartItems.applyTemplateOntoModule(snap, m);
+        SearingHeartItems.applyTemplateOntoClam(snap, m);
         m.x = pos.getX();
         m.y = pos.getY();
         m.z = pos.getZ();
         m.worldKey = world.getRegistryKey();
-        if (!registerModuleForSearingPlace(m)) {
+        if (!registerClamForSearingPlace(m)) {
             world.breakBlock(pos, false);
             net.minecraft.block.Block.dropStack(world, pos, templateFromBeforeConsume.copy());
             return;
         }
         m.status = 0;
         m.stubBuilt = false;
-        syncClamCoreBlockEntityFromModule(world, m);
+        syncClamCoreBlockEntityFromClam(world, m);
         startSeekCachesRebuild(m);
     }
 
     /**
-     * Server tick for modules whose {@link Module#dimensionWorldKey()} matches {@code world}.
+     * Server tick for clams whose {@link Clam#dimensionWorldKey()} matches {@code world}.
      */
     public static void tickLoadedClamCores(ServerWorld world) {
         long t = world.getTime();
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m == null || !m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
             if (m.seekEphemeralNeedSeekDataRefresh) {
@@ -667,7 +673,7 @@ public final class VoidClamMod {
                 }
             }
             clampResourcesForSize(m);
-            syncClamCoreBlockEntityFromModule(world, m);
+            syncClamCoreBlockEntityFromClam(world, m);
             tickLightCacheRebuildStep(world, m);
             tickOreCacheRebuildStep(world, m);
             if (m.busyFlagMainCycle == 0
@@ -699,10 +705,10 @@ public final class VoidClamMod {
                 CommandToolbox.clamReach(world, clamId);
             }
             if ((t + phase + 11) % (4 * 20) == 0) {
-                tickHeartbeatForModule(world, getModuleByClamId(clamId));
+                tickHeartbeatForClam(world, getClamByClamId(clamId));
             }
             if ((t + defensePhase) % defenseIntervalTicks == 0) {
-                tickDefenseForModule(world, getModuleByClamId(clamId));
+                tickDefenseForClam(world, getClamByClamId(clamId));
             }
         }
     }
@@ -734,7 +740,7 @@ public final class VoidClamMod {
         return 4 * Math.max(1, currentSize);
     }
 
-    public static boolean inLightSeekRange(Module m, BlockPos pos) {
+    public static boolean inLightSeekRange(Clam m, BlockPos pos) {
         int e = lightSeekHalfExtent(m.currentSize);
         return Math.abs(pos.getX() - m.x) <= e
             && Math.abs(pos.getY() - m.y) <= e
@@ -749,7 +755,7 @@ public final class VoidClamMod {
     }
 
     /** Clears the cache and rescans the seek box over {@link #LIGHT_CACHE_REBUILD_TICKS} server ticks. */
-    public static void startLightCacheRebuild(Module m) {
+    public static void startLightCacheRebuild(Clam m) {
         if (m == null) return;
         if (!VoidClamConfig.get().lightBlockCacheEnabled()) return;
         m.lightsCache.clear();
@@ -758,7 +764,7 @@ public final class VoidClamMod {
     }
 
     /** Clears the ore cache and rescans the seek box over {@link #LIGHT_CACHE_REBUILD_TICKS} server ticks. */
-    public static void startOreCacheRebuild(Module m) {
+    public static void startOreCacheRebuild(Clam m) {
         if (m == null) return;
         if (!VoidClamConfig.get().oreBlockCacheEnabled()) return;
         m.oresCache.clear();
@@ -767,16 +773,16 @@ public final class VoidClamMod {
     }
 
     /** After resize/repair/wake: restart both seek caches when their respective configs are enabled. */
-    public static void startSeekCachesRebuild(Module m) {
+    public static void startSeekCachesRebuild(Clam m) {
         startLightCacheRebuild(m);
         startOreCacheRebuild(m);
     }
 
     /**
-     * Call from server tick for each loaded clam while {@link Module#lightCacheRebuildTicksRemaining} &gt; 0.
+     * Call from server tick for each loaded clam while {@link Clam#lightCacheRebuildTicksRemaining} &gt; 0.
      * Processes a fair slice of the scan volume for this tick.
      */
-    public static void tickLightCacheRebuildStep(ServerWorld world, Module m) {
+    public static void tickLightCacheRebuildStep(ServerWorld world, Clam m) {
         if (m == null || m.lightCacheRebuildTicksRemaining <= 0) return;
         if (!VoidClamConfig.get().lightBlockCacheEnabled()) {
             m.lightCacheRebuildTicksRemaining = 0;
@@ -824,10 +830,10 @@ public final class VoidClamMod {
     }
 
     /**
-     * Call from server tick for each loaded clam while {@link Module#oreCacheRebuildTicksRemaining} &gt; 0.
+     * Call from server tick for each loaded clam while {@link Clam#oreCacheRebuildTicksRemaining} &gt; 0.
      * Processes a fair slice of the scan volume for this tick.
      */
-    public static void tickOreCacheRebuildStep(ServerWorld world, Module m) {
+    public static void tickOreCacheRebuildStep(ServerWorld world, Clam m) {
         if (m == null || m.oreCacheRebuildTicksRemaining <= 0) return;
         if (!VoidClamConfig.get().oreBlockCacheEnabled()) {
             m.oreCacheRebuildTicksRemaining = 0;
@@ -876,7 +882,7 @@ public final class VoidClamMod {
 
     /** When pathfinding cannot reach a light goal, drop it from the cache until the next repair rebuild. */
     public static void removeLightFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) {
             long p = pos.asLong();
             m.lightsCache.remove(p);
@@ -907,7 +913,7 @@ public final class VoidClamMod {
 
     /** When pathfinding cannot reach an ore goal, drop it from the cache until the next repair rebuild. */
     public static void removeOreFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) {
             long p = pos.asLong();
             m.oresCache.remove(p);
@@ -933,10 +939,10 @@ public final class VoidClamMod {
     }
 
     /**
-     * Clears main-cycle busy, releases path locks in {@link Module#lightsBlackList} / {@link Module#oresBlackList},
+     * Clears main-cycle busy, releases path locks in {@link Clam#lightsBlackList} / {@link Clam#oresBlackList},
      * and clears active light / ore goals.
      */
-    public static void releasePathfindingMainCycle(Module m) {
+    public static void releasePathfindingMainCycle(Clam m) {
         if (m == null) return;
         m.pathApplyPendingSteps = 0;
         Long lightGoal = m.lightPathGoalPacked;
@@ -957,7 +963,7 @@ public final class VoidClamMod {
      * One delayed {@link Pathfinder#buildPath} step finished (server thread). When the last step completes, calls
      * {@link #releasePathfindingMainCycle}. Stale steps after a force-release see pending 0 and do nothing.
      */
-    public static void completeOnePathApplyStep(Module m) {
+    public static void completeOnePathApplyStep(Clam m) {
         if (m == null || m.pathApplyPendingSteps <= 0) {
             return;
         }
@@ -968,7 +974,7 @@ public final class VoidClamMod {
     }
 
     /**
-     * Mixin hook: queue work for {@link #drainPendingLightCacheDeltas}; do not scan modules inside {@code setBlockState}.
+     * Mixin hook: queue work for {@link #drainPendingLightCacheDeltas}; do not scan clams inside {@code setBlockState}.
      */
     public static void enqueueLightCacheDeltaFromBlockChange(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
         Block ob = oldState.getBlock();
@@ -1004,7 +1010,7 @@ public final class VoidClamMod {
      * If this clam has no light seek cache work in flight and the set is still empty, start the same batched rebuild used
      * after repair so deltas are not the only source of truth until the next repair tick.
      */
-    private static void ensureLightSeekCacheForIncomingDelta(Module m, ServerWorld world) {
+    private static void ensureLightSeekCacheForIncomingDelta(Clam m, ServerWorld world) {
         if (m == null || !VoidClamConfig.get().lightBlockCacheEnabled() || !m.seekLights) {
             return;
         }
@@ -1024,7 +1030,7 @@ public final class VoidClamMod {
     }
 
     /** Same idea as {@link #ensureLightSeekCacheForIncomingDelta} for ores. */
-    private static void ensureOreSeekCacheForIncomingDelta(Module m, ServerWorld world) {
+    private static void ensureOreSeekCacheForIncomingDelta(Clam m, ServerWorld world) {
         if (m == null || !VoidClamConfig.get().oreBlockCacheEnabled() || !m.seekOres) {
             return;
         }
@@ -1056,7 +1062,7 @@ public final class VoidClamMod {
         }
         long packed = pos.asLong();
         int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m == null || !m.seekLights) continue;
             if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             BlockPos heart = new BlockPos(m.x, m.y, m.z);
@@ -1092,7 +1098,7 @@ public final class VoidClamMod {
         }
         long packed = pos.asLong();
         int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m == null || !m.seekOres) continue;
             if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             BlockPos heart = new BlockPos(m.x, m.y, m.z);
@@ -1125,9 +1131,9 @@ public final class VoidClamMod {
     }
 
     /**
-     * If the core furnace has a valid wake item in the fuel slot, consume one and mark the module awake ({@link Module#status} {@code 1}).
+     * If the core furnace has a valid wake item in the fuel slot, consume one and mark the clam awake ({@link Clam#status} {@code 1}).
      */
-    public static void tryConsumeFuelAndWakeClam(ServerWorld world, Module m) {
+    public static void tryConsumeFuelAndWakeClam(ServerWorld world, Clam m) {
         if (m == null || m.status != 0) return;
         BlockPos pos = new BlockPos(m.x, m.y, m.z);
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
@@ -1149,30 +1155,30 @@ public final class VoidClamMod {
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
 
-    public static boolean isModuleInLoadedChunk(ServerWorld world, @Nullable UUID clamId) {
-        Module m = getModuleById(clamId);
+    public static boolean isClamInLoadedChunk(ServerWorld world, @Nullable UUID clamId) {
+        Clam m = getClamById(clamId);
         return m != null && world.isChunkLoaded(m.x >> 4, m.z >> 4);
     }
 
-    /** @deprecated use {@link #moduleMatchesClamAt(UUID, int, int, int)} */
+    /** @deprecated use {@link #clamMatchesAt(UUID, int, int, int)} */
     @Deprecated
-    public static boolean moduleAtSlotMatchesPosition(int tno, int x, int y, int z) {
+    public static boolean clamAtSlotMatchesPosition(int tno, int x, int y, int z) {
         return false;
     }
 
-    /** @deprecated use {@link #getModuleById} */
+    /** @deprecated use {@link #getClamById} */
     @Deprecated
     public static int getSlotByClamId(@Nullable UUID clamId) {
         return -1;
     }
 
-    public static @Nullable Module getModuleByClamId(@Nullable UUID clamId) {
-        return getModuleById(clamId);
+    public static @Nullable Clam getClamByClamId(@Nullable UUID clamId) {
+        return getClamById(clamId);
     }
 
-    public static boolean moduleMatchesClamAt(@Nullable UUID clamId, int x, int y, int z) {
+    public static boolean clamMatchesAt(@Nullable UUID clamId, int x, int y, int z) {
         if (clamId == null) return false;
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         return m != null && m.x == x && m.y == y && m.z == z;
     }
 
@@ -1198,10 +1204,118 @@ public final class VoidClamMod {
         return c;
     }
 
-    /** OP debug: flags, busy state, caches, and queue stats for one module. */
-    public static List<String> debugModuleFlagLines(MinecraftServer server, Module m) {
+    /** Heart dimension loaded, heart chunk loaded, and searing core block still present at recorded center. */
+    public static boolean isHeartSurfaceLoadedWithCoreBlock(MinecraftServer server, @Nullable Clam m) {
+        if (m == null || server == null) {
+            return false;
+        }
+        ServerWorld world = getWorldForClam(server, m);
+        if (world == null) {
+            return false;
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            return false;
+        }
+        return world.getBlockState(new BlockPos(m.x, m.y, m.z)).isOf(VoidClamCoreBlocks.CORE_BLOCK);
+    }
+
+    /**
+     * True when path/grow/cache bookkeeping for this clam still shows work in flight (queues, goals, busy flags, rebuild ticks).
+     * Paired with {@link #isHeartSurfaceLoadedWithCoreBlock} to detect stuck state when the heart cannot be ticked.
+     */
+    public static boolean clamHasResidualPathfindingOrGrowActivity(@Nullable Clam m) {
+        if (m == null) {
+            return false;
+        }
+        if (m.busyFlagMainCycle != 0) {
+            return true;
+        }
+        if (m.busyFlagPlaceEvent != 0) {
+            return true;
+        }
+        if (m.pathApplyPendingSteps != 0) {
+            return true;
+        }
+        if (m.lightPathGoalPacked != null || m.orePathGoalPacked != null) {
+            return true;
+        }
+        if (countTargetsQueuedForClam(m.clamId) > 0) {
+            return true;
+        }
+        if (m.lightCacheRebuildTicksRemaining > 0 || m.oreCacheRebuildTicksRemaining > 0) {
+            return true;
+        }
+        if (Pathfinder.hasSyncAStarWorkForClam(m.clamId)) {
+            return true;
+        }
+        return growPendingWorld != null && m.clamId.equals(growCommandClamId);
+    }
+
+    private static String describeHeartNotTickableReason(MinecraftServer server, Clam m) {
+        ServerWorld w = getWorldForClam(server, m);
+        if (w == null) {
+            return "dimension_not_loaded";
+        }
+        if (!w.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            return "heart_chunk_unloaded";
+        }
+        if (!w.getBlockState(new BlockPos(m.x, m.y, m.z)).isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
+            return "heart_block_missing_or_wrong";
+        }
+        return "tickable";
+    }
+
+    /**
+     * If a clam still has path/grow/cache activity but its heart chunk is missing, wrong block, or dimension unloaded,
+     * log occasionally for the mod author (replaces ad-hoc debug commands).
+     */
+    public static void tickOrphanedClamActivityWarnings(MinecraftServer server) {
+        if (server == null) {
+            return;
+        }
+        lastOrphanedActivityWarnWorldTick.keySet().removeIf(id -> getClamById(id) == null);
+        ServerWorld clockWorld = server.getOverworld();
+        if (clockWorld == null) {
+            Iterator<ServerWorld> it = server.getWorlds().iterator();
+            clockWorld = it.hasNext() ? it.next() : null;
+        }
+        if (clockWorld == null) {
+            return;
+        }
+        long now = clockWorld.getTime();
+        if (now % 100 != 0) {
+            return;
+        }
+        for (Clam m : clamsById.values()) {
+            if (m == null) {
+                continue;
+            }
+            if (isHeartSurfaceLoadedWithCoreBlock(server, m)) {
+                continue;
+            }
+            if (!clamHasResidualPathfindingOrGrowActivity(m)) {
+                continue;
+            }
+            Long last = lastOrphanedActivityWarnWorldTick.get(m.clamId);
+            if (last != null && now - last < ORPHANED_ACTIVITY_WARN_COOLDOWN_TICKS) {
+                continue;
+            }
+            lastOrphanedActivityWarnWorldTick.put(m.clamId, now);
+            LOGGER.warn(
+                "[voidclam] Residual mod activity while heart not tickable (report to mod author): clamId={} at {} {} {} dim={} reason={}",
+                m.clamId,
+                m.x,
+                m.y,
+                m.z,
+                m.dimensionWorldKey().getValue(),
+                describeHeartNotTickableReason(server, m));
+        }
+    }
+
+    /** OP debug: flags, busy state, caches, and queue stats for one clam. */
+    public static List<String> debugClamFlagLines(MinecraftServer server, Clam m) {
         List<String> lines = new ArrayList<>();
-        ServerWorld world = getWorldForModule(server, m);
+        ServerWorld world = getWorldForClam(server, m);
         if (m == null) {
             return lines;
         }
@@ -1245,48 +1359,6 @@ public final class VoidClamMod {
         return lines;
     }
 
-    /**
-     * OP debug focused on chunk-unload behavior: whether activity should be paused, unload-expiry timer state,
-     * and whether cache/blacklist refresh is pending on next loaded tick.
-     */
-    public static List<String> debugChunkUnloadPauseLines(MinecraftServer server, Module m) {
-        List<String> lines = new ArrayList<>();
-        if (m == null) {
-            lines.add("module=null");
-            return lines;
-        }
-        ServerWorld world = getWorldForModule(server, m);
-        int intervalTicks = autoGrowRepairIntervalTicks();
-        lines.add("interval: autoGrowRepairTicks=" + intervalTicks + " (" + (intervalTicks / 20) + "s)");
-        if (world == null) {
-            lines.add("dimensionLoaded=false dimKey=" + m.dimensionWorldKey().getValue());
-            lines.add("activityPausedBecauseChunkUnloaded=true (dimension unavailable)");
-            lines.add("ephemeral: unloadExpiryWorldTime=" + m.seekEphemeralDataExpireAtWorldTime
-                + " needPostUnloadRefresh=" + m.seekEphemeralNeedSeekDataRefresh);
-            lines.add("cachesNow: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
-                + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size());
-            return lines;
-        }
-        long now = world.getTime();
-        boolean chunkLoaded = world.isChunkLoaded(m.x >> 4, m.z >> 4);
-        long expiryAt = m.seekEphemeralDataExpireAtWorldTime;
-        long remaining = expiryAt > 0 ? Math.max(0L, expiryAt - now) : -1L;
-        lines.add("world: dim=" + world.getRegistryKey().getValue() + " worldTime=" + now
-            + " heartChunkLoaded=" + chunkLoaded);
-        lines.add("activity: tickLoadedClamCoreActive=" + chunkLoaded
-            + " pathfindingAllowedNow=" + (chunkLoaded && isPathfindingAllowedYet(world, m))
-            + " busyMainCycle=" + m.busyFlagMainCycle
-            + " status=" + m.status);
-        lines.add("ephemeral: unloadExpiryWorldTime=" + expiryAt
-            + " remainingTicks=" + (remaining >= 0 ? remaining : "not-armed")
-            + " needPostUnloadRefresh=" + m.seekEphemeralNeedSeekDataRefresh);
-        lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId)
-            + " nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime);
-        lines.add("cachesNow: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
-            + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size());
-        return lines;
-    }
-
     /** OP debug: global async pathfinding barrier and grow-pending coordinator; optional per-clam snapshot rows. */
     public static List<String> debugGrowAndAsyncLinesForClam(@Nullable UUID clamId) {
         List<String> lines = new ArrayList<>();
@@ -1309,17 +1381,17 @@ public final class VoidClamMod {
     }
 
     public static void removeOresBlackList(UUID clamId, BlockPos pos) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) m.oresBlackList.remove(pos.asLong());
     }
 
     public static void addOresBlackList(UUID clamId, BlockPos pos) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) m.oresBlackList.add(pos.asLong());
     }
 
     public static void addEnergy(UUID clamId, int delta) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) {
             m.energy = m.energy + delta;
             clampResourcesForSize(m);
@@ -1327,7 +1399,7 @@ public final class VoidClamMod {
     }
 
     public static void addMaterial(UUID clamId, int delta) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) {
             m.material = m.material + delta;
             clampResourcesForSize(m);
@@ -1378,8 +1450,8 @@ public final class VoidClamMod {
         List<Node> stalled = new ArrayList<>();
         Node n;
         while ((n = targets.poll()) != null) {
-            Module tm = getModuleById(n.clamId);
-            ServerWorld world = getWorldForModule(server, tm);
+            Clam tm = getClamById(n.clamId);
+            ServerWorld world = getWorldForClam(server, tm);
             if (world == null || !isPathfindingAllowedYet(world, tm)) {
                 stalled.add(n);
                 continue;
@@ -1394,9 +1466,9 @@ public final class VoidClamMod {
     /**
      * On server start: in each dimension, if a registered clam center is still wart or obsidian, place the blast furnace heart.
      */
-    public static void migrateLoadedModulesToHeartBlocks(MinecraftServer server) {
+    public static void migrateLoadedClamsToHeartBlocks(MinecraftServer server) {
         for (ServerWorld world : server.getWorlds()) {
-            for (Module m : modulesById.values()) {
+            for (Clam m : clamsById.values()) {
                 if (m == null) continue;
                 if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
                 if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
@@ -1406,7 +1478,7 @@ public final class VoidClamMod {
                     continue;
                 }
                 if (b == Blocks.NETHER_WART_BLOCK || b == Blocks.OBSIDIAN) {
-                    placeHeartBlockForModule(world, p, m);
+                    placeHeartBlockForClam(world, p, m);
                 }
             }
         }
@@ -1414,7 +1486,7 @@ public final class VoidClamMod {
 
     /** Create a new stub at (x,y,z). Returns clam UUID string for commands, or null on failure. */
     public static @Nullable UUID makeStub(ServerWorld world, int x, int y, int z) {
-        Module m = new Module();
+        Clam m = new Clam();
         m.clamId = UUID.randomUUID();
         m.type = 1;
         m.x = x;
@@ -1429,10 +1501,10 @@ public final class VoidClamMod {
         m.seekLights = cfg.clam_light_flag_default;
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
-        if (!registerModule(m)) {
+        if (!registerClam(m)) {
             return null;
         }
-        placeHeartBlockForModule(world, new BlockPos(x, y, z), m);
+        placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
         CommandToolbox.buildStub(world, x, y, z);
         m.stubBuilt = true;
         startSeekCachesRebuild(m);
@@ -1444,13 +1516,13 @@ public final class VoidClamMod {
     }
 
     public static void requestRepairCommand(ServerWorld world, UUID clamId) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m == null) return;
         requestGrowCommand(world, clamId, m.currentSize);
     }
 
     public static void requestGrowCommand(ServerWorld world, UUID clamId, int targetSize) {
-        Module target = getModuleById(clamId);
+        Clam target = getClamById(clamId);
         if (target == null) return;
         if (growPendingWorld == null) {
             growSavedSeekLights.clear();
@@ -1477,7 +1549,7 @@ public final class VoidClamMod {
     }
 
     private static void restoreSeekFlagsFromGrowSnapshots(UUID clamId) {
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m != null) {
             Boolean sl = growSavedSeekLights.remove(clamId);
             Boolean so = growSavedSeekOres.remove(clamId);
@@ -1501,7 +1573,7 @@ public final class VoidClamMod {
             growSavedSeekOres.clear();
             return;
         }
-        Module m = getModuleById(cmdId);
+        Clam m = getClamById(cmdId);
         boolean idle = (m == null || m.busyFlagMainCycle == 0);
         if (!idle || countTargetsQueuedForClam(cmdId) > 0 || isResizeShellAnimationPending(world)) {
             return;
@@ -1537,7 +1609,7 @@ public final class VoidClamMod {
         return Math.abs(dx) + Math.abs(dz) == ringRadius;
     }
 
-    public static ShellDamageStats inspectObsidianShellDamage(ServerWorld world, Module m) {
+    public static ShellDamageStats inspectObsidianShellDamage(ServerWorld world, Clam m) {
         int size = Math.max(1, m.currentSize);
         int missing = 0;
         int present = 0;
@@ -1570,7 +1642,7 @@ public final class VoidClamMod {
     }
 
     /** Auto repair + optional grow for one clam (scheduled periodically when awake). */
-    private static void runAutoGrowRoutineSingle(ServerWorld world, Module m) {
+    private static void runAutoGrowRoutineSingle(ServerWorld world, Clam m) {
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         int x = m.x, y = m.y, z = m.z, csize = m.currentSize;
         int shellDamage = inspectObsidianShellDamage(world, m).shellMissing();
@@ -1622,7 +1694,7 @@ public final class VoidClamMod {
 
     public static void tickCoreCheck(ServerWorld world) {
         List<UUID> toKill = new ArrayList<>();
-        for (Module m : modulesById.values()) {
+        for (Clam m : clamsById.values()) {
             if (m == null) continue;
             if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
@@ -1638,7 +1710,7 @@ public final class VoidClamMod {
 
     public static void tickCoreCheckAtHeart(ServerWorld world, BlockPos heartPos, @Nullable UUID clamId) {
         if (clamId == null) return;
-        Module m = getModuleById(clamId);
+        Clam m = getClamById(clamId);
         if (m == null || m.x != heartPos.getX() || m.y != heartPos.getY() || m.z != heartPos.getZ()) return;
         if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
@@ -1648,8 +1720,8 @@ public final class VoidClamMod {
         }
     }
 
-    /** Defense for one module (called from heart block entity tick when interval matches). */
-    public static void tickDefenseForModule(ServerWorld world, Module m) {
+    /** Defense for one clam (from {@link #tickLoadedClamCores} when interval matches). */
+    public static void tickDefenseForClam(ServerWorld world, Clam m) {
         if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE) return;
         if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
@@ -1676,15 +1748,15 @@ public final class VoidClamMod {
         }
     }
 
-    /** Legacy: defense for all modules (prefer {@link #tickDefenseForModule} from heart ticks). */
+    /** Legacy: defense for all clams (prefer {@link #tickDefenseForClam} from {@link #tickLoadedClamCores}). */
     public static void tickDefense(ServerWorld world) {
-        for (Module m : modulesById.values()) {
-            tickDefenseForModule(world, m);
+        for (Clam m : clamsById.values()) {
+            tickDefenseForClam(world, m);
         }
     }
 
-    /** Heartbeat for one module (from heart block entity tick). */
-    public static void tickHeartbeatForModule(ServerWorld world, Module m) {
+    /** Heartbeat for one clam (from {@link #tickLoadedClamCores}). */
+    public static void tickHeartbeatForClam(ServerWorld world, Clam m) {
         if (m == null) return;
         if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
@@ -1693,10 +1765,10 @@ public final class VoidClamMod {
             net.minecraft.sound.SoundEvents.BLOCK_CONDUIT_AMBIENT, net.minecraft.sound.SoundCategory.BLOCKS, volume, 0.7f);
     }
 
-    /** Legacy: heartbeat for all loaded modules. */
+    /** Legacy: heartbeat for all loaded clams. */
     public static void tickHeartbeat(ServerWorld world) {
-        for (Module m : modulesById.values()) {
-            tickHeartbeatForModule(world, m);
+        for (Clam m : clamsById.values()) {
+            tickHeartbeatForClam(world, m);
         }
     }
 

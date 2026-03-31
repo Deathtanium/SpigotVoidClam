@@ -7,31 +7,30 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 | Symbol | Role |
 |--------|------|
 | `onInitialize` | Register server start/stop, end tick, commands |
-| `onServerTick` | Encodes tick order (path queue, scheduler, grow pending, pulses) |
+| `onServerTick` | Encodes tick order (sync A*, per-world cores → grow check → pulses → scheduler → `tickTargets` → orphan activity `WARN`) |
 | `registerCommands` | Brigadier `/voidclam` tree |
 
 ## `VoidClamMod`
 
 | Symbol | Role |
 |--------|------|
-| `loadOptionalLegacyModulesSiva` / `save` / `maybeSaveLegacyModulesSiva` | Optional CSV mirror at `modules.siva` |
+| `clamsById`, `getClamById`, `findClamAt`, `getAllClams` | Runtime clam registry |
 | `makeStub`, `clamKill(server, clamId, saveAfter)` | Create clam / coordinated kill (async drain) |
-| `ensureRuntimeModuleForHeart` | Map heart BE → runtime `Module` on load |
+| `migrateLoadedClamsToHeartBlocks` | Migration toward heart-block persistence |
+| `tryRegisterFromClamCoreBlockEntity` | Map heart blast furnace BE → runtime `Clam` on load (mixin + tick) |
+| `syncClamCoreBlockEntityFromClam`, `SearingHeartItems.syncClamToBlockEntity` | Heart NBT ↔ `Clam` |
+| `tickLoadedClamCores` | Per-dimension tick: sync NBT, caches, reach, auto-grow, heartbeat, defense, core check |
+| `tickOrphanedClamActivityWarnings`, `clamHasResidualPathfindingOrGrowActivity`, `isHeartSurfaceLoadedWithCoreBlock` | Author `WARN` if mod work is stuck with no tickable heart |
 | `enqueueTarget`, `tickTargets`, `isTargetsQueueEmpty` | Path result queue |
 | `requestGrowCommand`, `requestRepairCommand`, `tickGrowPendingCheck` | Safe grow/repair (single-clam seek snapshot) |
 | `tryScheduleAutoGrowRepairForClam`, `runAutoGrowRoutineSingle` | Per-heart auto repair/grow |
-| `ensureAutoGrowScheduled`, `seedAutoGrowScheduleForAllModules` | Staggered auto-grow deadlines |
+| `ensureAutoGrowScheduled`, `seedAutoGrowScheduleForAllClams` | Staggered auto-grow deadlines |
 | `tickCoreCheck` | Integrity kill (legacy / global) |
-| `tickDefenseForModule`, `tickHeartbeatForModule` | Effects (typically from heart tick) |
+| `tickCoreCheckAtHeart` | Per-heart integrity kill from `tickLoadedClamCores` |
+| `tickDefenseForClam`, `tickHeartbeatForClam` | Effects (from `tickLoadedClamCores` when phased) |
 | `scheduleDelayed` | Delegates to scheduler |
 | `isLight`, `isOre`, `isBaseCost` | Block categorization |
 | Blacklist / energy helpers | Path retry behavior |
-
-## `VoidClamHeartBlockEntity`
-
-| Symbol | Role |
-|--------|------|
-| `tick` | Registry link, auto-grow scheduling (overworld), reach, core check, heartbeat, defense |
 
 ## `VoidClamModScheduler`
 
@@ -57,17 +56,27 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 | Symbol | Role |
 |--------|------|
 | `calculatePath` | A\*; enqueue or clear busy |
+| `tickSyncAStarJobs`, `enqueueSyncAStarJob`, `hasSyncAStarWorkForClam`, `clearSyncAStarJobsForClam` | Sync-batched A* stepping |
 | `buildPath` | Schedule placement along path, stamina, drops |
 | `getFortune3Drops` | Ore rewards |
 | Container helpers | BFS, insert, barrel fallback |
 
-## `Module`, `Node`, `Cursor`
+## `Clam`, `Node`, `Cursor`
 
 Data carriers for runtime state and A\* graph.
 
 ## `TendrilPulseManager`
 
 Pulse entities, omni job, cleanup commands, sky brightness helper for displays.
+
+## Technical cross-reference
+
+| Note | Use when |
+|------|----------|
+| [[Technical-documentation]] | Porter entry, full reading order |
+| [[Persistence-and-schema]] | Exact `module` / component persistence |
+| [[Loader-integration]] | Mixin targets and Fabric events |
+| [[Seek-caches-and-block-deltas]] | Rebuild math and delta queue |
 
 ## Related notes
 

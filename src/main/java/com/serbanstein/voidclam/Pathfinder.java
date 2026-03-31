@@ -9,7 +9,6 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
@@ -26,49 +25,29 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * A*, prepass BFS, path application, and container routing for clams.
+ * Stamina costs for dig steps use explicit air / water / lava checks; traversal costs elsewhere use
+ * {@link VoidClamMod#isBaseCost} and {@link #isAirLike} where fluid and snow-like blocks matter.
+ */
 public final class Pathfinder {
     private static final Logger LOGGER = LoggerFactory.getLogger("voidclam/Pathfinder");
-    private static final int TRACE_PREPASS_EVERY_EXPANSIONS = 512;
-    private static final int TRACE_ASTAR_SYNC_EVERY_ITERATIONS = 256;
-    private static final int TRACE_ASTAR_ASYNC_EVERY_ITERATIONS = 512;
 
-    private static boolean pathfindingTraceEnabled() {
-        return VoidClamConfig.get().pathfinding_trace;
-    }
+    /** Mutable flags shared across delayed path-apply runnables for one {@link #buildPath} invocation. */
+    private static final class PathApplySliceState {
+        int stamina;
+        boolean blocked;
+        boolean pathStopped;
+        boolean pathStoppedAwaitingContainer;
 
-    private static boolean tickCrashCrumbsEnabled() {
-        return VoidClamConfig.get().tick_crash_crumbs;
-    }
-
-    /** Rough JVM stack depth (for correlating how close we were to overflow). */
-    private static int approxJavaStackDepth() {
-        return Thread.currentThread().getStackTrace().length;
-    }
-
-    private static String itemIdForCrumb(ItemStack stack) {
-        try {
-            return Registries.ITEM.getId(stack.getItem()).toString();
-        } catch (Throwable t) {
-            return String.valueOf(stack.getItem());
-        }
-    }
-
-    private static void logStackOverflowContext(String where, Object... extra) {
-        try {
-            LOGGER.error(
-                "[voidclam/crash-crumbs] StackOverflowError in {} — if trace stops at Guava only, run with larger -Xss. approxFrames={} thread={} extra={}",
-                where,
-                approxJavaStackDepth(),
-                Thread.currentThread().getName(),
-                extra.length > 0 ? Arrays.toString(extra) : "()");
-        } catch (Throwable ignored) {
+        PathApplySliceState(int initialStamina) {
+            this.stamina = initialStamina;
         }
     }
 
@@ -136,6 +115,24 @@ public final class Pathfinder {
         return out;
     }
 
+    /** True if sync-batched mode still has a queued or in-progress job for this clam. */
+    public static boolean hasSyncAStarWorkForClam(@org.jetbrains.annotations.Nullable UUID clamId) {
+        if (clamId == null) {
+            return false;
+        }
+        for (AStarJob j : syncAStarJobs) {
+            if (clamId.equals(j.clamId)) {
+                return true;
+            }
+        }
+        for (AStarJob j : syncAStarFairness) {
+            if (clamId.equals(j.clamId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Remove queued sync A* jobs for one clam (e.g. before {@link CommandToolbox#clamReSize}). */
     public static void clearSyncAStarJobsForClam(@org.jetbrains.annotations.Nullable java.util.UUID clamId) {
         if (clamId == null) {
@@ -149,7 +146,7 @@ public final class Pathfinder {
      * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncAStarJobs}.
      */
     public static void enqueueSyncAStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
-        Module m = VoidClamMod.getModuleById(clamId);
+        Clam m = VoidClamMod.getClamById(clamId);
         if (m != null) {
             m.ensureClamId();
         }
@@ -162,17 +159,6 @@ public final class Pathfinder {
      */
     public static void tickSyncAStarJobs(int globalStepBudget) {
         if (globalStepBudget <= 0 || syncAStarJobs.isEmpty()) return;
-        if (tickCrashCrumbsEnabled()) {
-            AStarJob head = syncAStarJobs.peek();
-            long wt = head != null ? head.worldRef.getTime() : -1L;
-            LOGGER.info(
-                "[voidclam/crash-crumbs] tickSyncAStarJobs start worldTime={} budget={} queuedJobs={} fairnessDeque={} approxFrames={}",
-                wt,
-                globalStepBudget,
-                syncAStarJobs.size(),
-                syncAStarFairness.size(),
-                approxJavaStackDepth());
-        }
         if (syncAStarFairness.isEmpty()) {
             syncAStarFairness.addAll(syncAStarJobs);
         }
@@ -188,18 +174,12 @@ public final class Pathfinder {
             if (!syncAStarJobs.contains(job)) {
                 continue;
             }
-            Module pauseMod = VoidClamMod.getModuleById(job.clamId);
+            Clam pauseMod = VoidClamMod.getClamById(job.clamId);
             if (!VoidClamMod.isPathfindingAllowedYet(job.worldRef, pauseMod)) {
                 syncAStarFairness.addLast(job);
                 continue;
             }
-            int used;
-            try {
-                used = job.step(job.worldRef, globalStepBudget);
-            } catch (StackOverflowError e) {
-                logStackOverflowContext("tickSyncAStarJobs job.step", "clamId=" + job.clamId, "phase=" + job.phase);
-                throw e;
-            }
+            int used = job.step(job.worldRef, globalStepBudget);
             globalStepBudget -= used;
             if (job.isFinished()) {
                 syncAStarJobs.remove(job);
@@ -245,7 +225,7 @@ public final class Pathfinder {
 
         /** @return prepass or A* expansions consumed */
         int step(ServerWorld world, int budget) {
-            Module modForFlag = VoidClamMod.getModuleById(clamId);
+            Clam modForFlag = VoidClamMod.getClamById(clamId);
             if (modForFlag == null) {
                 finishFail(null);
                 return 0;
@@ -270,14 +250,9 @@ public final class Pathfinder {
             return 0;
         }
 
-        private int stepPrepass(ServerWorld world, Module modForFlag, int budget) {
+        private int stepPrepass(ServerWorld world, Clam modForFlag, int budget) {
             if (prepassBfs == null) {
                 if (sx == gx && sy == gy && sz == gz) {
-                    if (pathfindingTraceEnabled()) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] prepass(sync-batched) SKIP (start==goal) clamId={} ({}, {}, {})",
-                            clamId, sx, sy, sz);
-                    }
                     beginAstarPhase();
                     return 1;
                 }
@@ -300,49 +275,22 @@ public final class Pathfinder {
                     asyncPathfindingAbortChecker(world, modForFlag.x, modForFlag.z, clamId),
                     goalLong
                 );
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] prepass(sync-batched) START clamId={} ({} {} {}) -> ({} {} {}) maxVisited={} sliceBudget={}",
-                        clamId, sx, sy, sz, gx, gy, gz, jobExpCap == Long.MAX_VALUE ? "uncapped" : jobExpCap, budget);
-                }
             }
             int used = 0;
             long expandCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
             while (used < budget && !prepassBfs.isFinished()) {
                 if (totalSyncExpansions >= expandCap) {
-                    if (pathfindingTraceEnabled()) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] prepass(sync-batched) CAP/ABORT clamId={} totalSyncExp={} visited={} finished={}",
-                            clamId, totalSyncExpansions, prepassBfs.visitedCount(), prepassBfs.isFinished());
-                    }
                     finishFail(modForFlag);
                     return used;
                 }
                 prepassBfs.step(1);
                 totalSyncExpansions++;
                 used++;
-                if (pathfindingTraceEnabled() && totalSyncExpansions > 0
-                    && (totalSyncExpansions % TRACE_PREPASS_EVERY_EXPANSIONS) == 0) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] prepass(sync-batched) RUNNING clamId={} expansions={} visited={} bfsFinished={}",
-                        clamId, totalSyncExpansions, prepassBfs.visitedCount(), prepassBfs.isFinished());
-                }
             }
             if (!prepassBfs.isFinished()) {
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] prepass(sync-batched) YIELD (tick slice) clamId={} expansions={} visited={} — still running",
-                        clamId, totalSyncExpansions, prepassBfs.visitedCount());
-                }
                 return used;
             }
             boolean reachable = prepassBfs.isEarlyGoalNeighborHit();
-            int prepassVisited = prepassBfs.visitedCount();
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] prepass(sync-batched) DONE clamId={} visited={} goalNeighborHit={} reachableForAstar={}",
-                    clamId, prepassVisited, prepassBfs.isEarlyGoalNeighborHit(), reachable);
-            }
             prepassBfs = null;
             if (!reachable) {
                 VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
@@ -355,11 +303,6 @@ public final class Pathfinder {
         }
 
         private void beginAstarPhase() {
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] astar(sync-batched) START clamId={} ({} {}) -> ({} {} {}) totalSyncExpSoFar={}",
-                    clamId, sx, sy, sz, gx, gy, gz, totalSyncExpansions);
-            }
             astarFrontier = new AStarFrontier();
             Node firstNode = new Node(sx, sy, sz, null, clamId);
             firstNode.g = 0;
@@ -370,16 +313,11 @@ public final class Pathfinder {
             phase = AStarPhase.ASTAR;
         }
 
-        private int stepAstar(ServerWorld world, Module modForFlag, int budget) {
+        private int stepAstar(ServerWorld world, Clam modForFlag, int budget) {
             int used = 0;
             long expandCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
             while (used < budget) {
                 if (totalSyncExpansions >= expandCap) {
-                    if (pathfindingTraceEnabled()) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] astar(sync-batched) CAP clamId={} astarIter={} open={} closed={} totalSyncExp={}",
-                            clamId, astarIterations, astarFrontier.openSize(), astarFrontier.closedSize(), totalSyncExpansions);
-                    }
                     finishFail(modForFlag);
                     return used;
                 }
@@ -387,50 +325,24 @@ public final class Pathfinder {
                     world, clamId, gx, gy, gz, modForFlag, astarFrontier, astarIterations, activePathChunkCache);
                 astarIterations++;
                 totalSyncExpansions++;
-                if (pathfindingTraceEnabled() && astarIterations > 0
-                    && (astarIterations % TRACE_ASTAR_SYNC_EVERY_ITERATIONS) == 0) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] astar(sync-batched) RUNNING clamId={} astarIter={} open={} closed={} totalSyncExp={} goal=({}, {}, {})",
-                            clamId, astarIterations, astarFrontier.openSize(), astarFrontier.closedSize(), totalSyncExpansions, gx, gy, gz);
-                }
                 if (r == AStarExpandResult.ABORT) {
-                    if (pathfindingTraceEnabled()) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] astar(sync-batched) ABORT clamId={} after {} iterations open={} closed={}",
-                            clamId, astarIterations, astarFrontier.openSize(), astarFrontier.closedSize());
-                    }
                     finishFail(modForFlag);
                     return used + 1;
                 }
                 if (r == AStarExpandResult.SUCCESS) {
-                    if (pathfindingTraceEnabled()) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] astar(sync-batched) SUCCESS clamId={} astarIter={} open={} closed={} goal=({}, {}, {})",
-                            clamId, astarIterations, astarFrontier.openSize(), astarFrontier.closedSize(), gx, gy, gz);
-                    }
                     phase = AStarPhase.DONE;
                     return used + 1;
                 }
                 if (r == AStarExpandResult.NO_PATH) {
-                    if (pathfindingTraceEnabled()) {
-                        LOGGER.info(
-                            "[voidclam/Pathfinder][trace] astar(sync-batched) NO_PATH clamId={} astarIter={} open exhausted",
-                            clamId, astarIterations);
-                    }
                     finishFail(modForFlag);
                     return used + 1;
                 }
                 used++;
             }
-            if (pathfindingTraceEnabled() && used > 0) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] astar(sync-batched) YIELD (tick slice) clamId={} astarIter={} open={} closed={} — still running",
-                    clamId, astarIterations, astarFrontier.openSize(), astarFrontier.closedSize());
-            }
             return used;
         }
 
-        private void finishFail(Module modForFlag) {
+        private void finishFail(Clam modForFlag) {
             phase = AStarPhase.DONE;
             if (modForFlag != null) {
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
@@ -634,7 +546,7 @@ public final class Pathfinder {
         ServerWorld world,
         UUID pathClamId,
         int gx, int gy, int gz,
-        Module modForFlag,
+        Clam modForFlag,
         AStarFrontier frontier,
         long astarIterationsBeforeStep,
         PathfindChunkCache pathChunkCache
@@ -642,16 +554,6 @@ public final class Pathfinder {
         UUID effectiveClamId = pathClamId != null ? pathClamId : modForFlag.clamId;
         if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
             return AStarExpandResult.ABORT;
-        }
-        if (tickCrashCrumbsEnabled() && astarIterationsBeforeStep > 0L && (astarIterationsBeforeStep & 16383L) == 0L) {
-            LOGGER.info(
-                "[voidclam/crash-crumbs] expandOneAStarIteration clamId={} astarIter={} goal=({},{},{}) open={} closed={} approxFrames={}",
-                effectiveClamId,
-                astarIterationsBeforeStep,
-                gx, gy, gz,
-                frontier.openSize(),
-                frontier.closedSize(),
-                approxJavaStackDepth());
         }
         if (frontier.isOpenEmpty()) {
             return AStarExpandResult.NO_PATH;
@@ -675,7 +577,7 @@ public final class Pathfinder {
                 continue;
             }
 
-            Module pathMod = modForFlag;
+            Clam pathMod = modForFlag;
             // Prepass can mark the goal reachable via a 6-neighbor adjacent to the goal even when the goal cell lies
             // just outside the pathfinding AABB (common for a torch one block past the Y cap). A* must allow that final
             // step; otherwise we exhaust the open set after a long search (async "stuck") or return NO_PATH.
@@ -777,7 +679,7 @@ public final class Pathfinder {
     }
 
     /**
-     * Half-extents for A* expansion, reachability prepass, and container BFS, in block units from module center.
+     * Half-extents for A* expansion, reachability prepass, and container BFS, in block units from clam center.
      * Must match {@link #calculatePath} bounds: ±4×{@code cSize} on X, ±5×{@code cSize} on Y and Z.
      */
     static final int PATHFINDING_RANGE_XZ_HALF = 4;
@@ -818,7 +720,7 @@ public final class Pathfinder {
         return h > 5 || h < 0;
     }
 
-    private static boolean inPathfindSearchBounds(Module mod, int x, int y, int z) {
+    private static boolean inPathfindSearchBounds(Clam mod, int x, int y, int z) {
         return isWithinPathfindingRange(x, y, z, mod.x, mod.y, mod.z, mod.currentSize);
     }
 
@@ -835,15 +737,10 @@ public final class Pathfinder {
         ServerWorld world,
         int sx, int sy, int sz,
         int gx, int gy, int gz,
-        Module mod,
+        Clam mod,
         PathfindChunkCache pathChunkCache
     ) {
         if (sx == gx && sy == gy && sz == gz) {
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] prepass(async-pathworker) SKIP (start==goal) clamId={} ({}, {}, {})",
-                    mod.clamId, sx, sy, sz);
-            }
             return true;
         }
         if (mod == null) {
@@ -858,11 +755,6 @@ public final class Pathfinder {
         };
         long jobExpCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
         int prepassCap = blockBfsMaxVisited(jobExpCap);
-        if (pathfindingTraceEnabled()) {
-            LOGGER.info(
-                "[voidclam/Pathfinder][trace] prepass(async-pathworker) START run-to-completion clamId={} ({} {} {}) -> ({} {} {}) maxVisited={}",
-                mod.clamId, sx, sy, sz, gx, gy, gz, jobExpCap == Long.MAX_VALUE ? "uncapped" : prepassCap);
-        }
         BlockBfs bfs = BlockBfs.start(
             world,
             startLong,
@@ -876,47 +768,12 @@ public final class Pathfinder {
         );
         bfs.runToCompletionOnCurrentThread();
         boolean hit = bfs.isEarlyGoalNeighborHit();
-        if (pathfindingTraceEnabled()) {
-            LOGGER.info(
-                "[voidclam/Pathfinder][trace] prepass(async-pathworker) DONE clamId={} visited={} goalNeighborHit={} bfsFinished={}",
-                mod.clamId, bfs.visitedCount(), hit, bfs.isFinished());
-        }
         return hit;
     }
 
     /** Cheaper than Euclidean: no sqrt, O(1). Not admissible when edge costs can be 0 (e.g. wart). */
     private static double manhattanH(int x, int y, int z, int gx, int gy, int gz) {
         return Math.abs(x - gx) + Math.abs(y - gy) + Math.abs(z - gz);
-    }
-
-    /** SLF4J debug: enable {@code voidclam/Pathfinder} or parent logger at DEBUG (e.g. in log4j2.xml). */
-    private static void logPathfindingStartDebug(UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
-        if (!LOGGER.isDebugEnabled()) {
-            return;
-        }
-        VoidClamConfig cfg = VoidClamConfig.get();
-        String from = "(" + sx + "," + sy + "," + sz + ")";
-        String goal = "(" + gx + "," + gy + "," + gz + ")";
-        if (cfg.astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
-            int raw = cfg.astar_sync_global_max_steps_per_tick;
-            int perTick = cfg.effectiveSyncMaxStepsPerTick();
-            if (raw == 0) {
-                LOGGER.debug(
-                    "[VoidClam] pathfinding start sync_batched clamId={} {} -> {} expansionsPerTick={} (astar_sync_global_max_steps_per_tick=0 guessedBase={} cpuMHz={})",
-                    clamId, from, goal, perTick, cfg.syncBudgetBaseBeforeQuarter(), VoidClamConfig.syncBudgetResolvedCpuMhz()
-                );
-            } else {
-                LOGGER.debug(
-                    "[VoidClam] pathfinding start sync_batched clamId={} {} -> {} expansionsPerTick={} (astar_sync_global_max_steps_per_tick={})",
-                    clamId, from, goal, perTick, raw
-                );
-            }
-        } else {
-            LOGGER.debug(
-                "[VoidClam] pathfinding start async clamId={} {} -> {} threadPoolSize={}",
-                clamId, from, goal, cfg.effectiveAsyncThreadPoolSize()
-            );
-        }
     }
 
     /**
@@ -926,13 +783,13 @@ public final class Pathfinder {
      */
     public static boolean calculatePath(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) {
-            Module early = VoidClamMod.getModuleById(clamId);
+            Clam early = VoidClamMod.getClamById(clamId);
             if (early != null) {
                 VoidClamMod.releasePathfindingMainCycle(early);
             }
             return false;
         }
-        Module modForFlag = VoidClamMod.getModuleById(clamId);
+        Clam modForFlag = VoidClamMod.getClamById(clamId);
         if (modForFlag == null) return false;
         if (modForFlag.status != 1) {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
@@ -943,18 +800,12 @@ public final class Pathfinder {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
         }
-        logPathfindingStartDebug(clamId, sx, sy, sz, gx, gy, gz);
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
             return true;
         }
         PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag);
         if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag, asyncPathCache)) {
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] prepass unreachable — skipping A* clamId={} goal=({}, {}, {})",
-                    clamId, gx, gy, gz);
-            }
             VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.removeOreGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
@@ -970,22 +821,12 @@ public final class Pathfinder {
 
         long astarIterations = 0;
         long maxAstarExpansions = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
-        if (pathfindingTraceEnabled()) {
-            LOGGER.info(
-                "[voidclam/Pathfinder][trace] astar(async-pathworker) START clamId={} ({} {}) -> ({} {} {}) maxIter={}",
-                clamId, sx, sy, sz, gx, gy, gz, maxAstarExpansions);
-        }
         while (!af.isOpenEmpty()) {
             if (astarIterations >= maxAstarExpansions) {
                 LOGGER.warn(
                     "[voidclam/Pathfinder] async A* exceeded expansion cap {} clamId={} goal=({},{},{}) open={} closed={}",
                     maxAstarExpansions, clamId, gx, gy, gz,
                     af.openSize(), af.closedSize());
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] astar(async-pathworker) CAP clamId={} astarIter={} open={} closed={}",
-                        clamId, astarIterations, af.openSize(), af.closedSize());
-                }
                 VoidClamMod.removeSeekGoalFromCachesAfterFailedPath(world, clamId, gx, gy, gz);
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return false;
@@ -993,43 +834,17 @@ public final class Pathfinder {
             AStarExpandResult r = expandOneAStarIteration(
                 world, pathCid, gx, gy, gz, modForFlag, af, astarIterations, asyncPathCache);
             astarIterations++;
-            if (pathfindingTraceEnabled() && astarIterations > 0
-                && (astarIterations % TRACE_ASTAR_ASYNC_EVERY_ITERATIONS) == 0) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] astar(async-pathworker) RUNNING clamId={} astarIter={} open={} closed={} goal=({}, {}, {})",
-                    clamId, astarIterations, af.openSize(), af.closedSize(), gx, gy, gz);
-            }
             if (r == AStarExpandResult.ABORT) {
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] astar(async-pathworker) ABORT clamId={} astarIter={} open={} closed={}",
-                        clamId, astarIterations, af.openSize(), af.closedSize());
-                }
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return false;
             }
             if (r == AStarExpandResult.SUCCESS) {
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] astar(async-pathworker) SUCCESS clamId={} astarIter={} open={} closed={} goal=({}, {}, {})",
-                        clamId, astarIterations, af.openSize(), af.closedSize(), gx, gy, gz);
-                }
                 return true;
             }
             if (r == AStarExpandResult.NO_PATH) {
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] astar(async-pathworker) NO_PATH clamId={} astarIter={} open exhausted",
-                        clamId, astarIterations);
-                }
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return false;
             }
-        }
-        if (pathfindingTraceEnabled()) {
-            LOGGER.info(
-                "[voidclam/Pathfinder][trace] astar(async-pathworker) END empty open clamId={} astarIter={}",
-                clamId, astarIterations);
         }
         VoidClamMod.releasePathfindingMainCycle(modForFlag);
         return false;
@@ -1039,17 +854,12 @@ public final class Pathfinder {
      * @return number of edges from {@code gnode} toward the start (legacy {@code pathSteps}), or {@code -1} if the
      * parent chain cycles (releases pathfinding main cycle).
      */
-    private static int countPathStepsSanityOrRelease(Node gnode, Module modForFlag) {
+    private static int countPathStepsSanityOrRelease(Node gnode, Clam modForFlag) {
         HashSet<Long> seen = new HashSet<>();
         int steps = 0;
         for (Node c = gnode; c.parent != null; c = c.parent) {
             long pk = BlockPos.asLong(c.x, c.y, c.z);
             if (!seen.add(pk)) {
-                if (pathfindingTraceEnabled()) {
-                    LOGGER.info(
-                        "[voidclam/Pathfinder][trace] A* parent chain cycle detected for clam {} at ({}, {}, {}) packed={} stepsBeforeCycle={}",
-                        modForFlag.clamId, c.x, c.y, c.z, pk, steps);
-                }
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
                 return -1;
             }
@@ -1059,19 +869,11 @@ public final class Pathfinder {
     }
 
     private static float getHardness(World world, BlockPos pos, BlockState state) {
-        try {
-            return state.getHardness(world, pos);
-        } catch (Exception e) {
-            return 0;
-        }
+        return state.getHardness(world, pos);
     }
 
     private static float getBlastResistance(BlockState state) {
-        try {
-            return state.getBlock().getBlastResistance();
-        } catch (Exception e) {
-            return 0;
-        }
+        return state.getBlock().getBlastResistance();
     }
 
     /** True if block at pos is "solid" for tendril stickiness (not air/fluid/soft/wart). */
@@ -1174,7 +976,7 @@ public final class Pathfinder {
      * within the same axis bounds as pathfinding container BFS ({@link #runContainerBfsOnWorld}).
      * Runs synchronously on the calling thread (intended: server thread).
      */
-    public static int countConnectedStorageBlocks(ServerWorld world, Module mod) {
+    public static int countConnectedStorageBlocks(ServerWorld world, Clam mod) {
         if (mod == null || world == null) {
             return 0;
         }
@@ -1233,183 +1035,75 @@ public final class Pathfinder {
 
     /** Main thread: try insert into containers; if none, create barrel at breakPos. Replaces breakPos with wart when stored in existing container. */
     private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, ItemStack toStore) {
-        if (tickCrashCrumbsEnabled()) {
-            LOGGER.info(
-                "[voidclam/crash-crumbs] applyContainerResult(single) wt={} dim={} containers={} break=({},{},{}) item={} x{} approxFrames={}",
-                world.getTime(),
-                world.getRegistryKey().getValue(),
-                containerPositions.size(),
-                breakPos.getX(), breakPos.getY(), breakPos.getZ(),
-                itemIdForCrumb(toStore),
-                toStore.getCount(),
-                approxJavaStackDepth());
+        for (long l : containerPositions) {
+            if (toStore.isEmpty()) break;
+            tryInsertInto(world, BlockPos.fromLong(l), toStore);
         }
-        try {
-            for (long l : containerPositions) {
-                if (toStore.isEmpty()) break;
-                tryInsertInto(world, BlockPos.fromLong(l), toStore);
-            }
-            if (!toStore.isEmpty()) {
-                createBarrelAndInsert(world, breakPos, toStore);
-            } else {
-                replaceWithWartAndPulse(world, breakPos);
-            }
-        } catch (StackOverflowError e) {
-            logStackOverflowContext(
-                "applyContainerResult single",
-                "containers=" + containerPositions.size(),
-                "break=(" + breakPos.getX() + "," + breakPos.getY() + "," + breakPos.getZ() + ")",
-                "item=" + itemIdForCrumb(toStore));
-            throw e;
+        if (!toStore.isEmpty()) {
+            createBarrelAndInsert(world, breakPos, toStore);
+        } else {
+            replaceWithWartAndPulse(world, breakPos);
         }
     }
 
     /** Main thread: insert multiple stacks into containers; remainder goes to barrel. Replaces breakPos with wart when all stored. */
     private static void applyContainerResult(ServerWorld world, List<Long> containerPositions, BlockPos breakPos, List<ItemStack> toStoreList) {
-        if (tickCrashCrumbsEnabled()) {
-            int nonEmpty = 0;
-            int totalItems = 0;
-            for (ItemStack s : toStoreList) {
-                if (!s.isEmpty()) {
-                    nonEmpty++;
-                    totalItems += s.getCount();
-                }
-            }
-            LOGGER.info(
-                "[voidclam/crash-crumbs] applyContainerResult(multi) wt={} dim={} containers={} break=({},{},{}) nonEmptyStacks={} totalItemCount={} approxFrames={}",
-                world.getTime(),
-                world.getRegistryKey().getValue(),
-                containerPositions.size(),
-                breakPos.getX(), breakPos.getY(), breakPos.getZ(),
-                nonEmpty,
-                totalItems,
-                approxJavaStackDepth());
-        }
-        try {
-            for (long l : containerPositions) {
-                boolean anyLeft = false;
-                for (ItemStack stack : toStoreList) {
-                    if (stack.isEmpty()) continue;
-                    tryInsertInto(world, BlockPos.fromLong(l), stack);
-                    anyLeft = anyLeft || !stack.isEmpty();
-                }
-                if (!anyLeft) break;
-            }
-            List<ItemStack> remainder = new ArrayList<>();
+        for (long l : containerPositions) {
+            boolean anyLeft = false;
             for (ItemStack stack : toStoreList) {
-                if (!stack.isEmpty()) remainder.add(stack);
+                if (stack.isEmpty()) continue;
+                tryInsertInto(world, BlockPos.fromLong(l), stack);
+                anyLeft = anyLeft || !stack.isEmpty();
             }
-            if (remainder.isEmpty()) {
-                replaceWithWartAndPulse(world, breakPos);
-            } else {
-                createBarrelAndInsert(world, breakPos, remainder);
-            }
-        } catch (StackOverflowError e) {
-            logStackOverflowContext(
-                "applyContainerResult multi",
-                "containers=" + containerPositions.size(),
-                "break=(" + breakPos.getX() + "," + breakPos.getY() + "," + breakPos.getZ() + ")");
-            throw e;
+            if (!anyLeft) break;
+        }
+        List<ItemStack> remainder = new ArrayList<>();
+        for (ItemStack stack : toStoreList) {
+            if (!stack.isEmpty()) remainder.add(stack);
+        }
+        if (remainder.isEmpty()) {
+            replaceWithWartAndPulse(world, breakPos);
+        } else {
+            createBarrelAndInsert(world, breakPos, remainder);
         }
     }
 
     private static boolean tryInsertInto(ServerWorld world, BlockPos pos, ItemStack stack) {
         if (stack.isEmpty()) return true;
-        int incoming = stack.getCount();
-        if (tickCrashCrumbsEnabled()) {
-            LOGGER.info(
-                "[voidclam/crash-crumbs] tryInsertInto enter wt={} dim={} pos=({},{},{}) item={} x{} approxFrames={}",
-                world.getTime(),
-                world.getRegistryKey().getValue(),
-                pos.getX(), pos.getY(), pos.getZ(),
-                itemIdForCrumb(stack),
-                incoming,
-                approxJavaStackDepth());
-        }
         BlockEntity be = world.getBlockEntity(pos);
         if (be == null) {
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] tryInsertInto no block entity at ({}, {}, {}) stack={} x{}",
-                    pos.getX(), pos.getY(), pos.getZ(), stack.getItem(), incoming);
-            }
             return false;
         }
         if (!(be instanceof Inventory inv)) {
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] tryInsertInto not Inventory at ({}, {}, {}) be={} stack={} x{}",
-                    pos.getX(), pos.getY(), pos.getZ(), be.getClass().getName(), stack.getItem(), incoming);
-            }
             return false;
         }
-        if (pathfindingTraceEnabled()) {
-            LOGGER.info(
-                "[voidclam/Pathfinder][trace] tryInsertInto start ({}, {}, {}) inv={} slots={} stack={} x{}",
-                pos.getX(), pos.getY(), pos.getZ(), inv.getClass().getName(), inv.size(), stack.getItem(), incoming);
-        }
-        try {
-            int size = inv.size();
-            int emptySlotPuts = 0;
-            int mergeAdds = 0;
-            for (int i = 0; i < size && !stack.isEmpty(); i++) {
-                ItemStack inSlot = inv.getStack(i);
-                if (tickCrashCrumbsEnabled() && size > 16 && (i == 0 || i == size / 2 || i == size - 1)) {
-                    LOGGER.info(
-                        "[voidclam/crash-crumbs] tryInsertInto slot scan i={}/{} inv={} pos=({},{},{}) approxFrames={}",
-                        i,
-                        size,
-                        inv.getClass().getSimpleName(),
-                        pos.getX(), pos.getY(), pos.getZ(),
-                        approxJavaStackDepth());
+        int size = inv.size();
+        for (int i = 0; i < size && !stack.isEmpty(); i++) {
+            ItemStack inSlot = inv.getStack(i);
+            if (inSlot.isEmpty()) {
+                int toPut = Math.min(stack.getCount(), inv.getMaxCountPerStack());
+                if (toPut <= 0) {
+                    continue;
                 }
-                if (inSlot.isEmpty()) {
-                    int toPut = Math.min(stack.getCount(), inv.getMaxCountPerStack());
-                    if (toPut <= 0) {
-                        continue;
-                    }
-                    // split: move a portion off the stack without ItemStack.copy() (avoids deep component cloning / Guava SO on nested items).
-                    ItemStack put = stack.split(toPut);
-                    inv.setStack(i, put);
-                    emptySlotPuts++;
-                } else if (ItemStack.areItemsEqual(inSlot, stack)) {
-                    int max = Math.min(inv.getMaxCountPerStack(), inSlot.getMaxCount());
-                    int canAdd = max - inSlot.getCount();
-                    if (canAdd > 0) {
-                        int toAdd = Math.min(canAdd, stack.getCount());
-                        inSlot.increment(toAdd);
-                        stack.decrement(toAdd);
-                        mergeAdds++;
-                    }
+                // split: move a portion off the stack without ItemStack.copy() (avoids deep component cloning / Guava SO on nested items).
+                ItemStack put = stack.split(toPut);
+                inv.setStack(i, put);
+            } else if (ItemStack.areItemsEqual(inSlot, stack)) {
+                int max = Math.min(inv.getMaxCountPerStack(), inSlot.getMaxCount());
+                int canAdd = max - inSlot.getCount();
+                if (canAdd > 0) {
+                    int toAdd = Math.min(canAdd, stack.getCount());
+                    inSlot.increment(toAdd);
+                    stack.decrement(toAdd);
                 }
             }
-            be.markDirty();
-            if (pathfindingTraceEnabled()) {
-                LOGGER.info(
-                    "[voidclam/Pathfinder][trace] tryInsertInto end ({}, {}, {}) remaining={} drained={} emptySlotsUsed={} merges={}",
-                    pos.getX(), pos.getY(), pos.getZ(), stack.getCount(), incoming - stack.getCount(), emptySlotPuts, mergeAdds);
-            }
-            return stack.isEmpty();
-        } catch (StackOverflowError e) {
-            logStackOverflowContext(
-                "tryInsertInto loop/markDirty",
-                "pos=(" + pos.getX() + "," + pos.getY() + "," + pos.getZ() + ")",
-                "inv=" + inv.getClass().getName(),
-                "slots=" + inv.size(),
-                "item=" + itemIdForCrumb(stack));
-            throw e;
         }
+        be.markDirty();
+        return stack.isEmpty();
     }
 
     private static void createBarrelAndInsert(ServerWorld world, BlockPos pos, ItemStack stack) {
-        BlockState barrelState = Blocks.BARREL.getDefaultState().with(BarrelBlock.FACING, Direction.NORTH);
-        world.setBlockState(pos, barrelState);
-        BlockEntity be = world.getBlockEntity(pos);
-        if (be instanceof BarrelBlockEntity) {
-            tryInsertInto(world, pos, stack);
-        } else {
-            net.minecraft.block.Block.dropStack(world, pos, stack);
-        }
+        createBarrelAndInsert(world, pos, Collections.singletonList(stack));
     }
 
     private static void createBarrelAndInsert(ServerWorld world, BlockPos pos, List<ItemStack> stacks) {
@@ -1427,9 +1121,47 @@ public final class Pathfinder {
         }
     }
 
+    /**
+     * Off-thread container discovery from the clam heart, then main-thread {@link #applyContainerResult}
+     * and {@code onAfterStore} (typically energy + {@link VoidClamMod#completeOnePathApplyStep}).
+     */
+    private static void enqueueGoalLootContainerRouting(
+        ServerWorld world,
+        Clam mod,
+        Clam modForFlag,
+        int cSize,
+        UUID pathClamId,
+        BlockPos breakPos,
+        List<ItemStack> loot,
+        Runnable onAfterStore
+    ) {
+        int mx = mod.x, my = mod.y, mz = mod.z;
+        long clamCenterLong = BlockPos.asLong(mx, my, mz);
+        CommandToolbox.submitPathfinding(
+            world,
+            mx,
+            mz,
+            pathClamId,
+            () -> VoidClamMod.completeOnePathApplyStep(modForFlag),
+            () -> {
+                List<Long> containers = Collections.synchronizedList(new ArrayList<>());
+                runContainerBfsOnWorld(
+                    world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
+                    () -> {
+                        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
+                            VoidClamMod.completeOnePathApplyStep(modForFlag);
+                            return;
+                        }
+                        applyContainerResult(world, containers, breakPos, loot);
+                        onAfterStore.run();
+                    });
+            }
+        );
+    }
+
     public static void buildPath(ServerWorld world, Node gnode) {
         if (gnode.clamId == null) return;
-        Module mod = VoidClamMod.getModuleById(gnode.clamId);
+        Clam mod = VoidClamMod.getClamById(gnode.clamId);
         if (mod == null) {
             return;
         }
@@ -1438,7 +1170,7 @@ public final class Pathfinder {
         final int pathOriginX = mod.x;
         final int pathOriginY = mod.y;
         final int pathOriginZ = mod.z;
-        final Module modForFlag = mod;
+        final Clam modForFlag = mod;
         if (modForFlag.busyFlagMainCycle == 0) {
             return;
         }
@@ -1471,30 +1203,27 @@ public final class Pathfinder {
         long timer = 2 + 2L * pathSteps;
 
         VoidClamMod.scheduleDelayed(world, timer, () -> {
-            if (!VoidClamMod.moduleMatchesClamAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
+            if (!VoidClamMod.clamMatchesAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
                 return;
             }
             VoidClamMod.removeOresBlackList(pathClamId, goalPos);
         });
 
-        int[] stamina = new int[]{modForFlag.currentSize};
-        int[] blocked = new int[1];
-        int[] pathStopped = new int[1]; // set when block-to-break: path stops, no energy, resume next attempt
-        int[] pathStoppedAwaitingContainer = new int[1]; // 1 while off-thread container BFS + apply not finished; keeps busy, suppresses stale path steps
+        PathApplySliceState sliceState = new PathApplySliceState(modForFlag.currentSize);
 
-        while (firstNode.parent != null && blocked[0] == 0) {
+        while (firstNode.parent != null && !sliceState.blocked) {
             final Node refNode = firstNode;
             final long runAt = timer;
             final int cSize = modForFlag.currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
-                if (!VoidClamMod.moduleMatchesClamAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
+                if (!VoidClamMod.clamMatchesAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
                     VoidClamMod.releasePathfindingMainCycle(modForFlag);
                     return;
                 }
-                if (pathStopped[0] != 0 && pathStoppedAwaitingContainer[0] != 0) {
+                if (sliceState.pathStopped && sliceState.pathStoppedAwaitingContainer) {
                     return;
                 }
-                if (blocked[0] != 0 || pathStopped[0] != 0) {
+                if (sliceState.blocked || sliceState.pathStopped) {
                     VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
@@ -1523,29 +1252,13 @@ public final class Pathfinder {
                 if (refNode == gnode && mat.isOf(Blocks.BEACON)) {
                     ItemStack starDrop = new ItemStack(Items.NETHER_STAR, 1);
                     BlockPos breakPos = pos.toImmutable();
-                    long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
-                    int mx = mod.x, my = mod.y, mz = mod.z;
-                    CommandToolbox.submitPathfinding(
-                        world,
-                        mx,
-                        mz,
-                        pathClamId,
-                        () -> VoidClamMod.completeOnePathApplyStep(modForFlag),
+                    enqueueGoalLootContainerRouting(
+                        world, mod, modForFlag, cSize, pathClamId, breakPos,
+                        Collections.singletonList(starDrop),
                         () -> {
-                            List<Long> containers = Collections.synchronizedList(new ArrayList<>());
-                            runContainerBfsOnWorld(
-                                world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
-                                () -> {
-                                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
-                                        VoidClamMod.completeOnePathApplyStep(modForFlag);
-                                        return;
-                                    }
-                                    applyContainerResult(world, containers, breakPos, starDrop);
-                                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(Blocks.BEACON));
-                                    VoidClamMod.completeOnePathApplyStep(modForFlag);
-                                });
-                        }
-                    );
+                            VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(Blocks.BEACON));
+                            VoidClamMod.completeOnePathApplyStep(modForFlag);
+                        });
                     return;
                 }
 
@@ -1562,28 +1275,9 @@ public final class Pathfinder {
                     List<ItemStack> drops = getFortune3Drops(mat.getBlock());
                     if (!drops.isEmpty()) {
                         BlockPos breakPos = pos.toImmutable();
-                        long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
-                        int mx = mod.x, my = mod.y, mz = mod.z;
-                        CommandToolbox.submitPathfinding(
-                            world,
-                            mx,
-                            mz,
-                            pathClamId,
-                            () -> VoidClamMod.completeOnePathApplyStep(modForFlag),
-                            () -> {
-                                List<Long> containers = Collections.synchronizedList(new ArrayList<>());
-                                runContainerBfsOnWorld(
-                                    world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
-                                    () -> {
-                                        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
-                                            VoidClamMod.completeOnePathApplyStep(modForFlag);
-                                            return;
-                                        }
-                                        applyContainerResult(world, containers, breakPos, drops);
-                                        VoidClamMod.completeOnePathApplyStep(modForFlag);
-                                    });
-                            }
-                        );
+                        enqueueGoalLootContainerRouting(
+                            world, mod, modForFlag, cSize, pathClamId, breakPos, drops,
+                            () -> VoidClamMod.completeOnePathApplyStep(modForFlag));
                     } else {
                         replaceWithWartAndPulse(world, pos);
                         VoidClamMod.completeOnePathApplyStep(modForFlag);
@@ -1591,8 +1285,8 @@ public final class Pathfinder {
                     return;
                 }
 
-                if (stamina[0] - cst < 0) {
-                    blocked[0] = 1;
+                if (sliceState.stamina - cst < 0) {
+                    sliceState.blocked = true;
                     if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA))) {
                         BlockState goalState = world.getBlockState(goalPos);
                         if (VoidClamMod.isLight(goalState.getBlock())) {
@@ -1604,13 +1298,13 @@ public final class Pathfinder {
                     }
                     VoidClamMod.addEnergy(pathClamId, -1);
                 } else {
-                    stamina[0] -= cst;
+                    sliceState.stamina -= cst;
                 }
 
                 boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat));
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
-                    pathStopped[0] = 1; // path stops; clam does not get energy; resume next attempt
-                    pathStoppedAwaitingContainer[0] = 1;
+                    sliceState.pathStopped = true;
+                    sliceState.pathStoppedAwaitingContainer = true;
                     ItemStack toStore = new ItemStack(mat.getBlock().asItem(), 1);
                     BlockPos breakPos = pos.toImmutable();
                     long clamCenterLong = BlockPos.asLong(mod.x, mod.y, mod.z);
@@ -1621,7 +1315,7 @@ public final class Pathfinder {
                         mz,
                         pathClamId,
                         () -> {
-                            pathStoppedAwaitingContainer[0] = 0;
+                            sliceState.pathStoppedAwaitingContainer = false;
                             VoidClamMod.completeOnePathApplyStep(modForFlag);
                         },
                         () -> {
@@ -1630,12 +1324,12 @@ public final class Pathfinder {
                                 world, mx, my, mz, cSize, clamCenterLong, containers, pathClamId,
                                 () -> {
                                     if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, mod.x, mod.z, pathClamId)) {
-                                        pathStoppedAwaitingContainer[0] = 0;
+                                        sliceState.pathStoppedAwaitingContainer = false;
                                         VoidClamMod.completeOnePathApplyStep(modForFlag);
                                         return;
                                     }
                                     applyContainerResult(world, containers, breakPos, toStore);
-                                    pathStoppedAwaitingContainer[0] = 0;
+                                    sliceState.pathStoppedAwaitingContainer = false;
                                     VoidClamMod.completeOnePathApplyStep(modForFlag);
                                 });
                         }

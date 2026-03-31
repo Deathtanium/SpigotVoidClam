@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Server config at {@code config/voidclam.json}. Created with defaults if missing.
+ * Field names use {@code snake_case} to match Gson JSON keys in that file.
  */
 public final class VoidClamConfig {
     public enum NaturalSpawnMethod {
@@ -80,7 +81,7 @@ public final class VoidClamConfig {
     public Boolean pathfind_chunk_cache;
 
     /**
-     * Light + ore seek caches: when {@code true} (default), {@link Module#lightsCache}/{@link Module#oresCache} are
+     * Light + ore seek caches: when {@code true} (default), {@link Clam#lightsCache}/{@link Clam#oresCache} are
      * maintained (tick rebuild + block deltas) and {@link CommandToolbox#clamReach} reads them; cache and blacklist
      * positions stay in server memory only (see {@link VoidClamMod#tickSeekEphemeralExpiry}). When {@code false}
      * (“live”), caches are not maintained and clamReach rescans the full seek box each run; threading follows
@@ -411,21 +412,6 @@ public final class VoidClamConfig {
     public int defenseDetectionIntervalTicks() {
         return Math.max(20, clam_defense_detection_interval_seconds * 20);
     }
-
-    /**
-     * When {@code true}, {@link Pathfinder} logs {@code [voidclam/Pathfinder][trace]} INFO lines to the server log (console)
-     * for BFS prepass progress (sync-batched slices and async full runs), A* iterations (open/closed sizes, running vs done),
-     * detected {@link Node#parent} cycles during path apply, and {@code tryInsertInto} (container storage after mining).
-     * Default off.
-     */
-    public boolean pathfinding_trace = false;
-
-    /**
-     * When {@code true}, logs {@code [voidclam/crash-crumbs]} INFO lines before sync A* slices and container/inventory work,
-     * and on {@link StackOverflowError} in those voidclam hotspots logs extra context then rethrows (best-effort—deep SO may skip).
-     * Enable while hunting server tick {@code Sets$1$1} / Guava iterator overflows. Default off.
-     */
-    public boolean tick_crash_crumbs = false;
 
     public int effectiveAsyncThreadPoolSize() {
         return effectiveAsyncThreadPoolSize(astar_async_global_max_threads);

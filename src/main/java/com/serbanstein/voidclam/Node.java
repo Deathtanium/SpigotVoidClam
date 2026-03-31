@@ -12,7 +12,7 @@ public class Node {
     public double f;
     public double g;
     public double h;
-    /** Stable clam identity (matches {@link Module#clamId}); path build and kill barrier use this only. */
+    /** Stable clam identity (matches {@link Clam#clamId}); path build and kill barrier use this only. */
     public final UUID clamId;
     public Node parent;
 

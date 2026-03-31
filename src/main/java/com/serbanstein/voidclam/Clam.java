@@ -9,9 +9,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * One VoidClam module (SIVA node). Types: 0 stub, 1 teen, 2 broadcast, 3 arming, 4 complex, -1 lightning rod.
+ * One VoidClam instance: a block-made creature that consumes energy and materials from the world to repair and grow. Types: 0 stub, 1 teen, 2 broadcast, 3 arming, 4 complex, -1 lightning rod.
  */
-public class Module {
+public class Clam {
     /** Stable identity for pathfinding/kill matching. */
     public UUID clamId;
     /**
@@ -36,9 +36,9 @@ public class Module {
     public int energy;
     /** Age since last phase change / startpassive */
     public int age;
-    /** Whether this module seeks light sources */
+    /** Whether this clam seeks light sources */
     public boolean seekLights = false;
-    /** Whether this module seeks ores */
+    /** Whether this clam seeks ores */
     public boolean seekOres = false;
     /** Encase intruders and apply defense effects when large enough */
     public boolean protectItself = true;

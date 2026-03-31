@@ -30,9 +30,9 @@ public abstract class AbstractFurnaceBlockEntityMixin {
             return;
         }
         VoidClamMod.tryRegisterFromClamCoreBlockEntity(world, pos, blockEntity);
-        var module = VoidClamMod.findModuleAt(world, pos);
-        if (module == null) return;
-        boolean wantLit = module.status == 1;
+        var clam = VoidClamMod.findClamAt(world, pos);
+        if (clam == null) return;
+        boolean wantLit = clam.status == 1;
         if (state.get(AbstractFurnaceBlock.LIT) != wantLit) {
             world.setBlockState(pos, state.with(AbstractFurnaceBlock.LIT, wantLit), Block.NOTIFY_LISTENERS);
         }

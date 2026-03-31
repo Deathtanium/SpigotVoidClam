@@ -236,7 +236,7 @@ public final class BlockBfs {
     }
 
     /**
-     * Multiple simultaneous BFS sources (e.g. one per module), one merged distance map (shortest wins),
+     * Multiple simultaneous BFS sources (e.g. one per clam), one merged distance map (shortest wins),
      * per-source visit caps, and global merged size cap. Same edge rule as omni pulse: only nether wart, chunk loaded.
      */
     public static final class MergedOmniBfsJob {
@@ -270,8 +270,8 @@ public final class BlockBfs {
             int remaining = maxNodes;
             for (SingleSource s : sources) {
                 if (remaining <= 0 || mergedResult.size() >= totalMergedLimit) break;
-                if (s.queue.isEmpty() || s.resultCount >= s.perModuleLimit) continue;
-                while (remaining > 0 && !s.queue.isEmpty() && s.resultCount < s.perModuleLimit && mergedResult.size() < totalMergedLimit) {
+                if (s.queue.isEmpty() || s.resultCount >= s.perClamLimit) continue;
+                while (remaining > 0 && !s.queue.isEmpty() && s.resultCount < s.perClamLimit && mergedResult.size() < totalMergedLimit) {
                     BlockPos pos = s.queue.poll();
                     int d = s.dist.get(pos);
                     for (Direction dir : Direction.values()) {
@@ -296,7 +296,7 @@ public final class BlockBfs {
                 }
             }
             boolean allDone = mergedResult.size() >= totalMergedLimit || sources.stream().allMatch(s ->
-                s.queue.isEmpty() || s.resultCount >= s.perModuleLimit);
+                s.queue.isEmpty() || s.resultCount >= s.perClamLimit);
             if (allDone) done = true;
             return maxNodes - remaining;
         }
@@ -311,14 +311,14 @@ public final class BlockBfs {
 
         public static final class SingleSource {
             final long seedLong;
-            final int perModuleLimit;
+            final int perClamLimit;
             final Queue<BlockPos> queue = new ArrayDeque<>();
             final Map<BlockPos, Integer> dist = new HashMap<>();
             int resultCount;
 
-            public SingleSource(long seedLong, int perModuleLimit) {
+            public SingleSource(long seedLong, int perClamLimit) {
                 this.seedLong = seedLong;
-                this.perModuleLimit = perModuleLimit;
+                this.perClamLimit = perClamLimit;
             }
         }
     }

@@ -4,7 +4,7 @@ This file orients tools and contributors who edit the repository without deep pr
 
 ## Project
 
-**VoidClam** is a **server-side Fabric mod** for **Minecraft 1.21.x**. It implements SIVA-like organisms that spread, consume light sources, seek ores, and convert blocks.
+**VoidClam** is a **server-side Fabric mod** for **Minecraft 1.21.x**. **Clams** are creatures made of blocks that consume energy and materials from their environment to repair and grow. They spread, consume light sources, seek ores, and convert terrain.
 
 ## Stack and layout
 
@@ -27,14 +27,14 @@ Requires a JDK **17+** on `PATH`.
 ## Architecture notes (high level)
 
 - **Entry**: `VoidClamModEntry` — Fabric lifecycle, tick hooks, Brigadier commands (`/voidclam`, OP level 2).
-- **Core state / logic**: `VoidClamMod`, `Module`, `Pathfinder`, `Cursor`, `Node`.
+- **Core state / logic**: `VoidClamMod`, `Clam`, `Pathfinder`, `Cursor`, `Node`.
 - **Threading**: Pathfinding runs off-thread; results are queued and applied on the **server main thread**. Respect `busyFlagMainCycle` (and any future use of `busyFlagPlaceEvent`) when changing concurrency.
 - **Scheduling**: `VoidClamModScheduler` — delayed runnables keyed off **world time** (`world.getTime()`).
-- **Persistence**: Heart block entities hold authoritative clam data in chunk NBT. Optional legacy CSV `modules.siva` at the save root (loaded if present; written on `/voidclam save` or when the file already exists). See `docs/logic/State-and-save.md`.
+- **Persistence**: Heart block entities (clam-core blast furnaces) hold authoritative clam data in chunk save via `SearingHeartItems` / `CUSTOM_DATA`. See `docs/logic/State-and-save.md`.
 
 ## Logic documentation (porting / behavior)
 
-See **`docs/logic/README.md`** — Obsidian-style graph of notes on tick order, locks, queues, pathfinding, grow/repair, and key functions.
+See **`docs/logic/README.md`** — Obsidian-style graph of notes on tick order, locks, queues, pathfinding, grow/repair, and key functions. **Implementer-level detail** (persistence keys, Fabric mixins/events, seek-cache mechanics, smoke tests): **`docs/logic/Technical-documentation.md`**.
 
 ## Editing principles
 

@@ -28,11 +28,11 @@ VoidClam/
 ├── src/main/
 │   ├── java/.../voidclam/
 │   │   ├── VoidClamModEntry.java   # ★ Entrypoint: init, commands, tick hook
-│   │   ├── VoidClamMod.java        # ★ Core state, save/load, module helpers
+│   │   ├── VoidClamMod.java        # ★ Core state, save/load, clam helpers
 │   │   ├── VoidClamModScheduler.java  # Delayed “run later” on main thread
 │   │   ├── CommandToolbox.java     # Building shells, stub, pathfinding trigger
 │   │   ├── Pathfinder.java         # A* pathfinding + applying path (blocks)
-│   │   ├── Module.java             # Data: one VoidClam node
+│   │   ├── Clam.java               # Data: one VoidClam organism
 │   │   ├── Node.java               # A* node
 │   │   ├── Cursor.java             # 6-direction offset for A*
 │   │   └── mixin/                  # Mixin classes (when registered in voidclam.mixins.json)
@@ -52,14 +52,14 @@ VoidClam/
 |------|------|
 | **`fabric.mod.json`** | Mod id, version, entrypoint, mixins, dependencies. Change mod id/version here. |
 | **`VoidClamModEntry.java`** | Entrypoint: `onInitialize()` registers server start/stop, **every-tick** callback, and all commands. Start here to see “when” things run. |
-| **`VoidClamMod.java`** | Global state (modules array, targets queue), save/load (CSV in world folder), and helpers called by Pathfinder/CommandToolbox/scheduler. |
+| **`VoidClamMod.java`** | Global state (clam map by UUID, targets queue), optional CSV mirror, helpers called by Pathfinder/CommandToolbox/scheduler. |
 | **`voidclam.mixins.json`** | Tells Mixin which package/classes to load. Add new mixins here and in the `mixins` array. |
 
 ### Core logic
 
 | File | Role |
 |------|------|
-| **`Pathfinder.java`** | A* from a module to a target block; enqueues result for main thread; `buildPath` applies the path (place blocks + sounds). |
+| **`Pathfinder.java`** | A* from a clam center to a target block; enqueues result for main thread; `buildPath` applies the path (place blocks + sounds). |
 | **`CommandToolbox.java`** | Builds stub/shells in the world, triggers pathfinding (via executor), resize/repair. Uses `VoidClamMod.scheduleDelayed` for delayed block placement. |
 | **`VoidClamModScheduler.java`** | “Run this runnable on the main thread after N game ticks.” Used for staggered path application and stub building. |
 
@@ -67,8 +67,8 @@ VoidClam/
 
 | File | Role |
 |------|------|
-| **`Module.java`** | One VoidClam: position, size, energy, type, blacklists, busy flags. |
-| **`Node.java`** | One A* node (position, f/g/h, parent, module index). |
+| **`Clam.java`** | One VoidClam: position, size, energy, type, blacklists, busy flags. |
+| **`Node.java`** | One A* node (position, f/g/h, parent, clam id). |
 
 ### Build / config (change when upgrading or tweaking)
 
@@ -81,13 +81,8 @@ VoidClam/
 
 ## 4. How the main systems interact
 
-- **Server start**: `ServerLifecycleEvents.SERVER_STARTED` → `VoidClamMod.load(server)` (read `modules.siva` from world save path).
-- **Every tick**: `ServerTickEvents.END_SERVER_TICK` →  
-  - Drain path queue and apply paths (`tickTargets` → `Pathfinder.buildPath`).  
-  - Run due delayed tasks (`VoidClamModScheduler.tick`).  
-  - Every 20 ticks: trigger reach for all modules (overworld), core integrity check.  
-  - Every 4s: heartbeat sound.  
-  - Every 5 min: auto-repair/grow, then save.
+- **Server start**: `ServerLifecycleEvents.SERVER_STARTED` → load config, pathfinding session start, optional heart migration, `seedAutoGrowScheduleForAllClams` per world; legacy CSV may fill the registry if `modules.siva` exists.
+- **Every tick**: `ServerTickEvents.END_SERVER_TICK` → seek ephemeral expiry, light-cache deltas, per-world `tickLoadedClamCores` (reach, core check, heartbeat, defense, auto-grow deadlines), grow-pending check, pulses, scheduler, omni job, then global `tickTargets` → `Pathfinder.buildPath`. Periodic omni pulse and cleanup use overworld time as clock.
 - **Commands**: Registered in `VoidClamModEntry.registerCommands` (Brigadier). All require op level 2.
 
 So: **entrypoint** wires **lifecycle + tick + commands**; **state and save/load** live in **VoidClamMod**; **world changes** go through **Pathfinder** and **CommandToolbox**.
@@ -112,25 +107,24 @@ For exact order and intervals, see **`docs/logic/Tick-order-and-intervals.md`**.
 
 ### Concurrency / thread safety
 
-- **Pathfinding runs off the main thread** (`CommandToolbox.pathfinderExecutor`). It calls `world.getBlockState()` from that thread. In vanilla, the world is not guaranteed thread-safe; this can theoretically cause rare bugs or crashes if the world changes during pathfinding. If you see weird behaviour, consider moving pathfinding to the main thread (e.g. one module per tick) or copying chunk data for the search.
-- **`VoidClamMod` state** (modules array, `moduleNumber`) is mutated from both main thread and executor. Index checks (e.g. `tno <= moduleNumber && modules[tno] != null`) reduce the risk but are not a full concurrency design; a stricter approach would be to confine all module mutations to the main thread and have the executor only produce path results.
+- **Pathfinding runs off the main thread** (`CommandToolbox.pathfinderExecutor`). It calls `world.getBlockState()` from that thread. In vanilla, the world is not guaranteed thread-safe; this can theoretically cause rare bugs or crashes if the world changes during pathfinding. If you see weird behaviour, consider moving pathfinding to the main thread (e.g. one clam per tick) or copying chunk data for the search.
+- **`VoidClamMod` state** (`clamsById`, queues) is mutated from both main thread and executor. Clams are keyed by stable **`clamId`**; busy flags and barriers coordinate access, but this is not a formally verified concurrency model.
 
 ### Design / structure
 
-- **Global static state** in `VoidClamMod` (modules, queue, lights/baseCost sets) makes testing and “multiple worlds” harder. A cleaner design would be a per-server or per-world object holding modules and queue, injected or accessed from the server context.
-- **Module array + index shifting**: Killing a module shifts indices and can make stored indices stale. The code tries to mitigate (e.g. core check iterates backwards). A list or map keyed by a stable id would avoid index invalidation.
+- **Global static state** in `VoidClamMod` (clam map, queue, lights/baseCost sets) makes testing and “multiple worlds” harder. A cleaner design would be a per-server or per-world object holding clams and queue, injected or accessed from the server context.
 - **`CommandToolbox`** both builds blocks and triggers pathfinding; splitting “world building” and “pathfinding trigger” could make the flow clearer.
 
 ### Minor / cleanup
 
 - **Unused**: `VoidClamModEntry.TICK_REACH` is defined but the tick divisor used for reach is `TICK_TARGETS` (20). Either use `TICK_REACH` in the tick callback or remove it.
-- **`busyFlagPlaceEvent`** on `Module` is not referenced in current sources.
+- **`busyFlagPlaceEvent`** on `Clam` is not referenced in current sources.
 - **Delayed tasks**: `VoidClamModScheduler.tick` matches `ServerWorld` by reference; `hasPendingTasks` uses dimension key — see `docs/logic/Threading-queues-locks.md`.
 
 ### Robustness
 
-- **CSV save**: No validation of parsed numbers; malformed lines are skipped but bad data could leave `moduleNumber` or indices inconsistent. Adding basic validation or a single checksum line would help.
-- **Executor**: The pathfinding executor is never shut down. On server stop you could add a shutdown step (e.g. in `ServerLifecycleEvents.SERVER_STOPPING`) to avoid “thread pool still running” warnings.
+- **CSV save**: No validation of parsed numbers; malformed lines are skipped but bad data could leave the registry inconsistent. Adding basic validation or a single checksum line would help.
+- **Executor**: The pathfinding executor is shut down and replaced in `VoidClamMod.onAsyncPathfindingSessionStop()` (server stop and coordinated kills); behavior is still worth watching under heavy load.
 - **Delayed tasks**: `VoidClamModScheduler` never removes tasks for worlds that unload. If you add world unload handling, consider draining or cancelling pending tasks for that world.
 
 ---
@@ -142,7 +136,7 @@ For exact order and intervals, see **`docs/logic/Tick-order-and-intervals.md`**.
 | Change mod id / version | `fabric.mod.json`, `gradle.properties` |
 | Add a command | `VoidClamModEntry.registerCommands` |
 | Change when things tick | `VoidClamModEntry.onServerTick` (and constants) |
-| Change save format or path | `VoidClamMod.load/save`, `getModulesPath` |
+| Change heart NBT layout | `SearingHeartItems`, `VoidClamMod.syncClamCoreBlockEntityFromClam` |
 | Add another vanilla hook | New mixin class + entry in `voidclam.mixins.json` |
 | Change which blocks are “light” or “base cost” | `VoidClamMod` static blocks (lights, baseCost) |
 | Tweak A* or path application | `Pathfinder` |

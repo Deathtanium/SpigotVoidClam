@@ -20,10 +20,10 @@ public final class VoidClamCommandArgs {
     private VoidClamCommandArgs() {
     }
 
-    public static Module parseTarget(String raw, ServerCommandSource source) throws CommandSyntaxException {
+    public static Clam parseTarget(String raw, ServerCommandSource source) throws CommandSyntaxException {
         String s = raw.trim();
         if (s.isEmpty()) throw BAD_TARGET.create();
-        Module         m = tryUuid(s);
+        Clam m = tryUuid(s);
         if (m != null) return m;
         m = tryBlockPos(s, source);
         if (m != null) return m;
@@ -41,7 +41,7 @@ public final class VoidClamCommandArgs {
         return s.matches("-?\\d+\\s+-?\\d+\\s+-?\\d+");
     }
 
-    private static @org.jetbrains.annotations.Nullable Module tryUuid(String s) {
+    private static @org.jetbrains.annotations.Nullable Clam tryUuid(String s) {
         try {
             UUID id;
             if (s.length() == 32 && !s.contains("-")) {
@@ -49,7 +49,7 @@ public final class VoidClamCommandArgs {
             } else {
                 id = UUID.fromString(s);
             }
-            return VoidClamMod.getModuleById(id);
+            return VoidClamMod.getClamById(id);
         } catch (IllegalArgumentException e) {
             return null;
         }
@@ -60,7 +60,7 @@ public final class VoidClamCommandArgs {
             + "-" + hex32.substring(16, 20) + "-" + hex32.substring(20, 32);
     }
 
-    private static @org.jetbrains.annotations.Nullable Module tryBlockPos(String s, ServerCommandSource source) {
+    private static @org.jetbrains.annotations.Nullable Clam tryBlockPos(String s, ServerCommandSource source) {
         try {
             StringReader reader = new StringReader(s);
             int x = reader.readInt();
@@ -71,7 +71,7 @@ public final class VoidClamCommandArgs {
             reader.skipWhitespace();
             if (reader.canRead()) return null;
             ServerWorld world = source.getWorld();
-            return VoidClamMod.findModuleAt(world, new BlockPos(x, y, z));
+            return VoidClamMod.findClamAt(world, new BlockPos(x, y, z));
         } catch (CommandSyntaxException e) {
             return null;
         }

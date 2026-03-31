@@ -3,7 +3,7 @@
   "id": "voidclam",
   "version": "${version}",
   "name": "VoidClam",
-  "description": "Server-side mod: spreading SIVA-like organisms that feed on light and convert blocks.",
+  "description": "Server-side mod: block creatures that consume energy and materials to repair and grow; they feed on light and convert blocks.",
   "authors": ["serbanstein"],
   "contact": {},
   "license": "MIT",

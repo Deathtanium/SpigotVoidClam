@@ -1,16 +1,16 @@
 # VoidClam (Fabric)
 
-Server-side Fabric mod for **Minecraft 1.21.x**. Spreading SIVA-like organisms that feed on light sources, seek ores, and convert blocks.
+Server-side Fabric mod for **Minecraft 1.21.x**. **Clams** are creatures made of blocks that consume energy and materials from their environment to repair and grow. They feed on light sources, seek ores, and convert blocks as they spread.
 
 ## Behavior and porting
 
-Loader-specific wiring (Fabric entrypoint, tick events, commands) lives in code under `src/`. **Loader-agnostic rules** — ticks, locks, queues, pathfinding, grow/repair, persistence — are documented in [`docs/logic/README.md`](docs/logic/README.md) (Obsidian-friendly `[[wikilinks]]` between notes).
+Loader-specific wiring (Fabric entrypoint, tick events, commands) lives in code under `src/`. **Loader-agnostic rules** — ticks, locks, queues, pathfinding, grow/repair, persistence — are documented in [`docs/logic/README.md`](docs/logic/README.md) (Obsidian-friendly `[[wikilinks]]` between notes). **Full technical reference** (save schema, mixins, cache algorithm, verification): [`docs/logic/Technical-documentation.md`](docs/logic/Technical-documentation.md).
 
 ## Features (summary)
 
-- **Logic**: Module types, energy, growth, A* pathfinding, shell building, light “food” list, base cost, blast resistance checks.
+- **Logic**: Clam types, energy, growth, A* pathfinding, shell building, light “food” list, base cost, blast resistance checks.
 - **Concurrency**: `busyFlagMainCycle` (reach/path lifecycle); path results queued for the main thread; staggered placement via `VoidClamModScheduler` (world-time delayed runnables).
-- **Persistence**: Each clam’s **heart block** stores state in the world (block entity / data component). Optional CSV `modules.siva` at the world save root for legacy import/export — see `docs/logic/State-and-save.md`.
+- **Persistence**: Each clam’s **heart block** (searing blast furnace) stores authoritative state in chunk save via `CUSTOM_DATA` (`SearingHeartItems`). See `docs/logic/State-and-save.md`.
 
 ## Build
 
@@ -49,11 +49,11 @@ All commands are under `/voidclam`. Run **`/voidclam`** or **`/voidclam help`** 
 | `seek ores\|lights\|protect get <target>` | Read flag |
 | `info` | Nearest clam (player) or list all (console) |
 | `info <target>` | Detail for one clam |
-| `save` | Write `modules.siva` (**creates** file if missing) |
-| `ingestlegacy` | Read `modules.siva` and spawn hearts + stubs for new rows |
+| `status <target>` | Flags, grow/async, pools, scheduler (debug) |
+| `storage <target>` | Count storage blocks reachable via wart from heart |
+| `dumpnbt <target>` | Write searing heart block-entity NBT under `run/voidclam-nbt-dumps/` |
 | `cleanup` / `roughcleanup` | Tendril display cleanup |
 | `ping` | World name + registered clam count |
-| `testfile` | Print `modules.siva` lines if present |
 
 ## Implementation notes
 

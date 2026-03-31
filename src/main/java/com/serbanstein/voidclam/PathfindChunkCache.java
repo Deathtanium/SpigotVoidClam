@@ -12,7 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Snapshot of {@link WorldChunk} columns overlapping the pathfinding AABB for one module, built once per
+ * Snapshot of {@link WorldChunk} columns overlapping the pathfinding AABB for one clam, built once per
  * {@link Pathfinder.AStarJob#step} / async {@link Pathfinder#calculatePath} prepass so A* avoids repeated
  * {@link ServerWorld#getChunk} work when {@link VoidClamConfig#pathfind_chunk_cache} is {@code true}.
  * Missing snapshot columns use bedrock placeholders so async workers never need a live world read for those cells.
@@ -24,7 +24,7 @@ public final class PathfindChunkCache {
     private final boolean useColumnSnapshot;
     private final Map<Long, WorldChunk> columns;
 
-    public PathfindChunkCache(ServerWorld world, Module mod) {
+    public PathfindChunkCache(ServerWorld world, Clam mod) {
         this.world = world;
         this.useColumnSnapshot = VoidClamConfig.get().pathfindChunkCacheEnabled();
         if (!useColumnSnapshot) {

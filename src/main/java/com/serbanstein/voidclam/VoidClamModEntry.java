@@ -4,7 +4,6 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
-import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
@@ -28,17 +27,33 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /** Fabric mod entrypoint: lifecycle, server tick hook, and commands. */
 public class VoidClamModEntry implements ModInitializer {
     private static final int TICK_OMNI_PULSE = 5 * 20;     // omnidirectional pulse every ~5s
     private static final int TICK_CLEANUP = 60 * 20;       // stray tendril display cleanup every 1 min
-    private static final int OP_LEVEL = 2;                 // commands hidden unless player has this OP level
+    /** Players who may use /voidclam without gamemaster permission (case-insensitive name match). */
+    private static final Set<String> VOIDCLAM_TRUSTED_PLAYER_NAMES_LOWER = Set.of("serbanstein");
+
+    private static boolean canUseVoidclamCommands(ServerCommandSource source) {
+        if (source.getPermissions().hasPermission(new Permission.Level(PermissionLevel.GAMEMASTERS))) {
+            return true;
+        }
+        if (!(source.getEntity() instanceof ServerPlayerEntity player)) {
+            return false;
+        }
+        String name = player.getName().getString();
+        return VOIDCLAM_TRUSTED_PLAYER_NAMES_LOWER.contains(name.toLowerCase(Locale.ROOT));
+    }
 
     @Override
     public void onInitialize() {
@@ -58,7 +73,7 @@ public class VoidClamModEntry implements ModInitializer {
             if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return ActionResult.PASS;
             BlockPos pos = hitResult.getBlockPos();
             if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return ActionResult.PASS;
-            if (VoidClamMod.findModuleAt(serverWorld, pos) == null) return ActionResult.PASS;
+            if (VoidClamMod.findClamAt(serverWorld, pos) == null) return ActionResult.PASS;
             VoidClamMod.applySearingHeartBlockLabel(serverWorld, pos);
             return ActionResult.PASS;
         });
@@ -73,9 +88,9 @@ public class VoidClamModEntry implements ModInitializer {
     private void onServerStarted(MinecraftServer server) {
         VoidClamConfig.loadFromDisk();
         VoidClamMod.onAsyncPathfindingSessionStart();
-        VoidClamMod.migrateLoadedModulesToHeartBlocks(server);
+        VoidClamMod.migrateLoadedClamsToHeartBlocks(server);
         for (ServerWorld w : server.getWorlds()) {
-            VoidClamMod.seedAutoGrowScheduleForAllModules(w);
+            VoidClamMod.seedAutoGrowScheduleForAllClams(w);
         }
     }
 
@@ -97,6 +112,7 @@ public class VoidClamModEntry implements ModInitializer {
             TendrilPulseManager.tickOmniPulseJob(w);
         }
         VoidClamMod.tickTargets(server);
+        VoidClamMod.tickOrphanedClamActivityWarnings(server);
 
         ServerWorld clockWorld = server.getOverworld();
         if (clockWorld == null) {
@@ -118,10 +134,23 @@ public class VoidClamModEntry implements ModInitializer {
         }
     }
 
+    private static @Nullable ServerWorld resolveHeartWorldForCommands(ServerCommandSource src, Clam m) {
+        ServerWorld modWorld = VoidClamMod.getWorldForClam(src.getServer(), m);
+        if (modWorld == null) {
+            src.sendError(Text.literal("Dimension for this voidclam is not loaded."));
+            return null;
+        }
+        if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            src.sendError(Text.literal("Heart chunk is not loaded."));
+            return null;
+        }
+        return modWorld;
+    }
+
     private void registerCommands(CommandDispatcher<ServerCommandSource> dispatcher, CommandRegistryAccess registryAccess, CommandManager.RegistrationEnvironment environment) {
         dispatcher.register(
             CommandManager.literal("voidclam")
-                .requires(s -> s.getPermissions().hasPermission(new Permission.Level(PermissionLevel.GAMEMASTERS)))
+                .requires(VoidClamModEntry::canUseVoidclamCommands)
                 .executes(ctx -> {
                     ctx.getSource().sendFeedback(() -> Text.literal("Use /voidclam help for syntax. Target = UUID (dashed or 32 hex) or three integers x y z (heart center)."), false);
                     return 1;
@@ -129,7 +158,7 @@ public class VoidClamModEntry implements ModInitializer {
                 .then(CommandManager.literal("help")
                     .executes(ctx -> {
                         ServerCommandSource s = ctx.getSource();
-                        s.sendFeedback(() -> Text.literal("Voidclam commands (OP 2). Target = UUID or x y z at heart."), false);
+                        s.sendFeedback(() -> Text.literal("Voidclam commands (gamemaster or trusted player). Target = UUID or x y z at heart."), false);
                         s.sendFeedback(() -> Text.literal("make <x> <y> <z> — new clam"), false);
                         s.sendFeedback(() -> Text.literal("kill <target>"), false);
                         s.sendFeedback(() -> Text.literal("resize <size> <target> — size first"), false);
@@ -137,12 +166,10 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect set <true|false> <target> — bool before target"), false);
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect get <target>"), false);
                         s.sendFeedback(() -> Text.literal("info [target] — list all (console) or nearest (player)"), false);
-                        s.sendFeedback(() -> Text.literal("debug <target> — flags, grow/async globals, sync A*, executor + scheduler stats"), false);
-                        s.sendFeedback(() -> Text.literal("heartcachedebug <target> — seek cache stats, sync heart NBT, flush chunk save for this world"), false);
-                        s.sendFeedback(() -> Text.literal("chunkactivitydebug <target> — unload pause/expiry status for cache+blacklist lifecycle"), false);
+                        s.sendFeedback(() -> Text.literal("status <target> — flags, grow/async, sync A* queue, path pool, scheduler"), false);
                         s.sendFeedback(() -> Text.literal("dumpnbt <target> — write searing heart block-entity NBT to run/voidclam-nbt-dumps/<UUID>.nbt"), false);
                         s.sendFeedback(() -> Text.literal("cleanup | roughcleanup | ping — state lives in searing heart blocks"), false);
-                        s.sendFeedback(() -> Text.literal("Config: seek_target_cache; clam_repair_grow_cycle_interval_seconds; clam_seek_attempt_interval_seconds; clam_defense_detection_interval_seconds; clam_material_seek_threshold; astar_mode, bfs_mode; pathfind_chunk_cache; pathfinding_trace; tick_crash_crumbs"), false);
+                        s.sendFeedback(() -> Text.literal("Server config: config/voidclam.json — see docs/logic/Configuration.md"), false);
                         return 1;
                     }))
                 .then(CommandManager.literal("make")
@@ -165,174 +192,85 @@ public class VoidClamModEntry implements ModInitializer {
                 .then(CommandManager.literal("kill")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                VoidClamMod.clamKill(ctx.getSource().getServer(), m.clamId, true);
-                                ctx.getSource().sendMessage(Text.literal("Killed voidclam " + m.clamId));
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            VoidClamMod.clamKill(ctx.getSource().getServer(), m.clamId, true);
+                            ctx.getSource().sendMessage(Text.literal("Killed voidclam " + m.clamId));
+                            return 1;
                         })))
                 .then(CommandManager.literal("resize")
                     .then(CommandManager.argument("size", IntegerArgumentType.integer(1))
                         .then(CommandManager.argument("target", StringArgumentType.greedyString())
                             .executes(ctx -> {
-                                try {
-                                    Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                    int tsize = IntegerArgumentType.getInteger(ctx, "size");
-                                    int csize = m.currentSize;
-                                    if (csize > tsize) {
-                                        ctx.getSource().sendError(Text.literal("target size cannot be smaller than current size"));
-                                        return 0;
-                                    }
-                                    int maxSize = VoidClamConfig.get().clam_size_max;
-                                    if (tsize > maxSize) {
-                                        ctx.getSource().sendError(Text.literal("target size cannot exceed config clam_size_max (" + maxSize + ")"));
-                                        return 0;
-                                    }
-                                    CommandToolbox.clamReSize(ctx.getSource().getWorld(), m.clamId, tsize);
-                                    return 1;
-                                } catch (CommandSyntaxException e) {
-                                    ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                                Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                int tsize = IntegerArgumentType.getInteger(ctx, "size");
+                                int csize = m.currentSize;
+                                if (csize > tsize) {
+                                    ctx.getSource().sendError(Text.literal("target size cannot be smaller than current size"));
                                     return 0;
                                 }
+                                int maxSize = VoidClamConfig.get().clam_size_max;
+                                if (tsize > maxSize) {
+                                    ctx.getSource().sendError(Text.literal("target size cannot exceed config clam_size_max (" + maxSize + ")"));
+                                    return 0;
+                                }
+                                CommandToolbox.clamReSize(ctx.getSource().getWorld(), m.clamId, tsize);
+                                return 1;
                             }))))
                 .then(CommandManager.literal("repair")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                ServerWorld modWorld = VoidClamMod.getWorldForModule(ctx.getSource().getServer(), m);
-                                if (modWorld == null) {
-                                    ctx.getSource().sendError(Text.literal("Dimension for this voidclam is not loaded."));
-                                    return 0;
-                                }
-                                if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
-                                    ctx.getSource().sendError(Text.literal("Heart chunk is not loaded."));
-                                    return 0;
-                                }
-                                VoidClamMod.ShellDamageStats stats = VoidClamMod.inspectObsidianShellDamage(modWorld, m);
-                                int material = Math.max(0, m.material);
-                                int budgetFill = Math.min(stats.shellMissing(), material);
-                                int remaining = Math.max(0, stats.shellMissing() - budgetFill);
-                                ctx.getSource().sendFeedback(
-                                    () -> Text.literal("Repair stats: shellTotal=" + stats.shellTotal()
-                                        + " obsidianPresent=" + stats.obsidianPresent()
-                                        + " missing=" + stats.shellMissing()),
-                                    false);
-                                ctx.getSource().sendFeedback(
-                                    () -> Text.literal("Material budget: material=" + material
-                                        + " canFillNow=" + budgetFill
-                                        + " missingAfterPass=" + remaining),
-                                    false);
-                                VoidClamMod.requestRepairCommand(modWorld, m.clamId);
-                                ctx.getSource().sendFeedback(() -> Text.literal("Repair scheduled; will run once pathfinding is idle."), false);
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            ServerWorld modWorld = resolveHeartWorldForCommands(ctx.getSource(), m);
+                            if (modWorld == null) return 0;
+                            VoidClamMod.ShellDamageStats stats = VoidClamMod.inspectObsidianShellDamage(modWorld, m);
+                            int material = Math.max(0, m.material);
+                            int budgetFill = Math.min(stats.shellMissing(), material);
+                            int remaining = Math.max(0, stats.shellMissing() - budgetFill);
+                            ctx.getSource().sendFeedback(
+                                () -> Text.literal("Repair stats: shellTotal=" + stats.shellTotal()
+                                    + " obsidianPresent=" + stats.obsidianPresent()
+                                    + " missing=" + stats.shellMissing()),
+                                false);
+                            ctx.getSource().sendFeedback(
+                                () -> Text.literal("Material budget: material=" + material
+                                    + " canFillNow=" + budgetFill
+                                    + " missingAfterPass=" + remaining),
+                                false);
+                            VoidClamMod.requestRepairCommand(modWorld, m.clamId);
+                            ctx.getSource().sendFeedback(() -> Text.literal("Repair scheduled; will run once pathfinding is idle."), false);
+                            return 1;
                         })))
                 .then(CommandManager.literal("reach")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                CommandToolbox.clamReach(ctx.getSource().getWorld(), m.clamId);
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            CommandToolbox.clamReach(ctx.getSource().getWorld(), m.clamId);
+                            return 1;
                         })))
                 .then(CommandManager.literal("storage")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                m.ensureClamId();
-                                ServerWorld modWorld = VoidClamMod.getWorldForModule(ctx.getSource().getServer(), m);
-                                if (modWorld == null) {
-                                    ctx.getSource().sendError(Text.literal("Dimension for this voidclam is not loaded."));
-                                    return 0;
-                                }
-                                if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
-                                    ctx.getSource().sendError(Text.literal("Heart chunk is not loaded; cannot count storage."));
-                                    return 0;
-                                }
-                                int n = Pathfinder.countConnectedStorageBlocks(modWorld, m);
-                                ctx.getSource().sendFeedback(
-                                    () -> Text.literal("Voidclam " + m.clamId + ": " + n
-                                        + " storage block(s) (chest / trapped chest / barrel) reachable via wart from heart."),
-                                    false);
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
-                        })))
-                .then(CommandManager.literal("heartcachedebug")
-                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
-                        .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                ServerWorld modWorld = VoidClamMod.getWorldForModule(ctx.getSource().getServer(), m);
-                                if (modWorld == null) {
-                                    ctx.getSource().sendError(Text.literal("Dimension for this voidclam is not loaded."));
-                                    return 0;
-                                }
-                                if (!modWorld.isChunkLoaded(m.x >> 4, m.z >> 4)) {
-                                    ctx.getSource().sendError(Text.literal("Heart chunk is not loaded."));
-                                    return 0;
-                                }
-                                ServerCommandSource src = ctx.getSource();
-                                src.sendFeedback(() -> Text.literal("--- voidclam heartcachedebug " + m.clamId + " ---"), false);
-                                for (String line : CommandToolbox.buildHeartSeekCacheDebugLines(modWorld, m)) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
-                                }
-                                CommandToolbox.flushPendingChunkIoForWorld(modWorld);
-                                src.sendFeedback(
-                                    () -> Text.literal("Chunk I/O: ServerChunkManager.save(false) on " + modWorld.getRegistryKey().getValue()),
-                                    false);
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
-                        })))
-                .then(CommandManager.literal("chunkactivitydebug")
-                    .then(CommandManager.argument("target", StringArgumentType.greedyString())
-                        .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                ServerCommandSource src = ctx.getSource();
-                                src.sendFeedback(() -> Text.literal("--- voidclam chunkactivitydebug " + m.clamId + " ---"), false);
-                                for (String line : VoidClamMod.debugChunkUnloadPauseLines(ctx.getSource().getServer(), m)) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
-                                }
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            m.ensureClamId();
+                            ServerWorld modWorld = resolveHeartWorldForCommands(ctx.getSource(), m);
+                            if (modWorld == null) return 0;
+                            int n = Pathfinder.countConnectedStorageBlocks(modWorld, m);
+                            ctx.getSource().sendFeedback(
+                                () -> Text.literal("Voidclam " + m.clamId + ": " + n
+                                    + " storage block(s) (chest / trapped chest / barrel) reachable via wart from heart."),
+                                false);
+                            return 1;
                         })))
                 .then(CommandManager.literal("dumpnbt")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                 var path = CommandToolbox.writeClamHeartNbtDumpFile(ctx.getSource().getServer(), m);
                                 ctx.getSource().sendFeedback(
                                     () -> Text.literal("Wrote heart NBT to " + path.toAbsolutePath()),
                                     false);
                                 return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
                             } catch (IOException e) {
                                 String msg = e.getMessage();
                                 ctx.getSource().sendError(Text.literal(msg != null ? msg : e.toString()));
@@ -345,129 +283,94 @@ public class VoidClamModEntry implements ModInitializer {
                             .then(CommandManager.argument("value", BoolArgumentType.bool())
                                 .then(CommandManager.argument("target", StringArgumentType.greedyString())
                                     .executes(ctx -> {
-                                        try {
-                                            Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                            boolean val = BoolArgumentType.getBool(ctx, "value");
-                                            m.seekOres = val;
-                                            ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek ores = " + val));
-                                            return 1;
-                                        } catch (CommandSyntaxException e) {
-                                            ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                            return 0;
-                                        }
+                                        Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                        boolean val = BoolArgumentType.getBool(ctx, "value");
+                                        m.seekOres = val;
+                                        ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek ores = " + val));
+                                        return 1;
                                     }))))
                         .then(CommandManager.literal("get")
                             .then(CommandManager.argument("target", StringArgumentType.greedyString())
                                 .executes(ctx -> {
-                                    try {
-                                        Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                        ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek ores = " + m.seekOres));
-                                        return 1;
-                                    } catch (CommandSyntaxException e) {
-                                        ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                        return 0;
-                                    }
+                                    Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                    ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek ores = " + m.seekOres));
+                                    return 1;
                                 }))))
                     .then(CommandManager.literal("protect")
                         .then(CommandManager.literal("set")
                             .then(CommandManager.argument("value", BoolArgumentType.bool())
                                 .then(CommandManager.argument("target", StringArgumentType.greedyString())
                                     .executes(ctx -> {
-                                        try {
-                                            Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                            boolean val = BoolArgumentType.getBool(ctx, "value");
-                                            m.protectItself = val;
-                                            ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " protect itself = " + val));
-                                            return 1;
-                                        } catch (CommandSyntaxException e) {
-                                            ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                            return 0;
-                                        }
+                                        Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                        boolean val = BoolArgumentType.getBool(ctx, "value");
+                                        m.protectItself = val;
+                                        ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " protect itself = " + val));
+                                        return 1;
                                     }))))
                         .then(CommandManager.literal("get")
                             .then(CommandManager.argument("target", StringArgumentType.greedyString())
                                 .executes(ctx -> {
-                                    try {
-                                        Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                        ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " protect itself = " + m.protectItself));
-                                        return 1;
-                                    } catch (CommandSyntaxException e) {
-                                        ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                        return 0;
-                                    }
+                                    Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                    ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " protect itself = " + m.protectItself));
+                                    return 1;
                                 }))))
                     .then(CommandManager.literal("lights")
                         .then(CommandManager.literal("set")
                             .then(CommandManager.argument("value", BoolArgumentType.bool())
                                 .then(CommandManager.argument("target", StringArgumentType.greedyString())
                                     .executes(ctx -> {
-                                        try {
-                                            Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                            boolean val = BoolArgumentType.getBool(ctx, "value");
-                                            m.seekLights = val;
-                                            ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek lights = " + val));
-                                            return 1;
-                                        } catch (CommandSyntaxException e) {
-                                            ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                            return 0;
-                                        }
+                                        Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                        boolean val = BoolArgumentType.getBool(ctx, "value");
+                                        m.seekLights = val;
+                                        ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek lights = " + val));
+                                        return 1;
                                     }))))
                         .then(CommandManager.literal("get")
                             .then(CommandManager.argument("target", StringArgumentType.greedyString())
                                 .executes(ctx -> {
-                                    try {
-                                        Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                        ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek lights = " + m.seekLights));
-                                        return 1;
-                                    } catch (CommandSyntaxException e) {
-                                        ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                        return 0;
-                                    }
+                                    Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                                    ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek lights = " + m.seekLights));
+                                    return 1;
                                 })))))
-                    .then(CommandManager.literal("debug")
+                .then(CommandManager.literal("status")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                MinecraftServer server = ctx.getSource().getServer();
-                                ServerWorld modWorld = VoidClamMod.getWorldForModule(server, m);
-                                ServerCommandSource src = ctx.getSource();
-                                src.sendFeedback(() -> Text.literal("--- voidclam debug " + m.clamId + " ---"), false);
-                                for (String line : VoidClamMod.debugModuleFlagLines(server, m)) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
-                                }
-                                for (String line : VoidClamMod.debugGrowAndAsyncLinesForClam(m.clamId)) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
-                                }
-                                for (String line : Pathfinder.debugSyncAStarJobsForClam(m.clamId)) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
-                                }
-                                for (String line : CommandToolbox.debugPathfinderExecutorLines()) {
-                                    final String l = line;
-                                    src.sendFeedback(() -> Text.literal(l), false);
-                                }
-                                if (modWorld != null) {
-                                    for (String line : VoidClamModScheduler.debugSchedulerLinesForWorld(modWorld)) {
-                                        final String l = line;
-                                        src.sendFeedback(() -> Text.literal(l), false);
-                                    }
-                                }
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            MinecraftServer server = ctx.getSource().getServer();
+                            ServerWorld modWorld = VoidClamMod.getWorldForClam(server, m);
+                            ServerCommandSource src = ctx.getSource();
+                            src.sendFeedback(() -> Text.literal("--- voidclam status " + m.clamId + " ---"), false);
+                            for (String line : VoidClamMod.debugClamFlagLines(server, m)) {
+                                final String l = line;
+                                src.sendFeedback(() -> Text.literal(l), false);
                             }
+                            for (String line : VoidClamMod.debugGrowAndAsyncLinesForClam(m.clamId)) {
+                                final String l = line;
+                                src.sendFeedback(() -> Text.literal(l), false);
+                            }
+                            for (String line : Pathfinder.debugSyncAStarJobsForClam(m.clamId)) {
+                                final String l = line;
+                                src.sendFeedback(() -> Text.literal(l), false);
+                            }
+                            for (String line : CommandToolbox.pathfindingExecutorStatusLines()) {
+                                final String l = line;
+                                src.sendFeedback(() -> Text.literal(l), false);
+                            }
+                            if (modWorld != null) {
+                                for (String line : VoidClamModScheduler.debugSchedulerLinesForWorld(modWorld)) {
+                                    final String l = line;
+                                    src.sendFeedback(() -> Text.literal(l), false);
+                                }
+                            }
+                            return 1;
                         })))
                 .then(CommandManager.literal("info")
                     .executes(ctx -> {
                         if (ctx.getSource().getEntity() instanceof ServerPlayerEntity player) {
                             Vec3d pos = player.getEntityPos();
-                            Module closest = null;
+                            Clam closest = null;
                             double best = Double.MAX_VALUE;
-                            for (Module m : VoidClamMod.getAllModules()) {
+                            for (Clam m : VoidClamMod.getAllClams()) {
                                 if (m == null) continue;
                                 double d = pos.squaredDistanceTo(m.x + 0.5, m.y + 0.5, m.z + 0.5);
                                 if (d < best) {
@@ -476,15 +379,15 @@ public class VoidClamModEntry implements ModInitializer {
                                 }
                             }
                             if (closest != null) {
-                                Module m = closest;
+                                Clam m = closest;
                                 ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
                                 ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
                             }
                         } else {
-                            List<Module> list = new ArrayList<>(VoidClamMod.getAllModules());
+                            List<Clam> list = new ArrayList<>(VoidClamMod.getAllClams());
                             list.sort(Comparator.comparing(mm -> mm.clamId.toString()));
                             ctx.getSource().sendMessage(Text.literal("Voidclam count: " + list.size()));
-                            for (Module m : list) {
+                            for (Clam m : list) {
                                 if (m == null) continue;
                                 ctx.getSource().sendMessage(Text.literal(m.clamId + " @ " + m.x + " " + m.y + " " + m.z + " size " + m.currentSize + " material " + m.material));
                             }
@@ -493,36 +396,26 @@ public class VoidClamModEntry implements ModInitializer {
                     })
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
-                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
-                                ctx.getSource().sendMessage(Text.literal("Seek lights: " + m.seekLights + "  Seek ores: " + m.seekOres + "  Protect: " + m.protectItself));
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
-                                return 0;
-                            }
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
+                            ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
+                            ctx.getSource().sendMessage(Text.literal("Seek lights: " + m.seekLights + "  Seek ores: " + m.seekOres + "  Protect: " + m.protectItself));
+                            return 1;
                         })))
                 .then(CommandManager.literal("grow")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            try {
-                                Module m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                int maxSize = VoidClamConfig.get().clam_size_max;
-                                int cur = m.currentSize;
-                                int cSize = Math.min(cur + 1, maxSize);
-                                if (cSize <= cur) {
-                                    ctx.getSource().sendError(Text.literal("Already at max size (" + maxSize + ")"));
-                                    return 0;
-                                }
-                                VoidClamMod.requestGrowCommand(ctx.getSource().getWorld(), m.clamId, cSize);
-                                ctx.getSource().sendFeedback(() -> Text.literal("Grow scheduled; will run once pathfinding is idle."), false);
-                                return 1;
-                            } catch (CommandSyntaxException e) {
-                                ctx.getSource().sendError(Text.literal(e.getRawMessage().getString()));
+                            Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
+                            int maxSize = VoidClamConfig.get().clam_size_max;
+                            int cur = m.currentSize;
+                            int cSize = Math.min(cur + 1, maxSize);
+                            if (cSize <= cur) {
+                                ctx.getSource().sendError(Text.literal("Already at max size (" + maxSize + ")"));
                                 return 0;
                             }
+                            VoidClamMod.requestGrowCommand(ctx.getSource().getWorld(), m.clamId, cSize);
+                            ctx.getSource().sendFeedback(() -> Text.literal("Grow scheduled; will run once pathfinding is idle."), false);
+                            return 1;
                         })))
                 .then(CommandManager.literal("cleanup")
                     .executes(ctx -> {
@@ -570,12 +463,12 @@ public class VoidClamModEntry implements ModInitializer {
                 .then(CommandManager.literal("ping")
                     .executes(ctx -> {
                         String worldName = ctx.getSource().getWorld().getRegistryKey().getValue().getPath();
-                        int count = VoidClamMod.getModuleCount();
+                        int count = VoidClamMod.getClamCount();
                         ctx.getSource().sendMessage(Text.literal(worldName + " " + count));
                         Vec3d pos = ctx.getSource().getPosition();
-                        Module closest = null;
+                        Clam closest = null;
                         double best = Double.MAX_VALUE;
-                        for (Module m : VoidClamMod.getAllModules()) {
+                        for (Clam m : VoidClamMod.getAllClams()) {
                             if (m == null) continue;
                             double d = pos.squaredDistanceTo(m.x + 0.5, m.y + 0.5, m.z + 0.5);
                             if (d < best) {

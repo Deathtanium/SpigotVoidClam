@@ -2,39 +2,58 @@
 
 All intervals below are expressed in **server ticks** (20 ticks ≈ 1 second). Constants live in `VoidClamModEntry` or `VoidClamMod` unless noted.
 
-## Single `END_SERVER_TICK` callback (overworld-driven)
+## `END_SERVER_TICK` callback (`VoidClamModEntry.onServerTick`)
 
-Each server tick, **in order**:
+Strict **phase order** on every server tick (earlier phases always complete before later ones on the same tick):
 
-1. **`VoidClamMod.tickTargets(overworld)`** — Drain the `targets` queue and run `Pathfinder.buildPath` for each node (may schedule more delayed work).
-2. **`VoidClamModScheduler.tick(overworld)`** — Run delayed tasks whose `runAtTick <= overworld.getTime()` **for the overworld instance only** (reference equality on `ServerWorld`).
-3. **For each `ServerWorld` `w`**: `VoidClamMod.tickGrowPendingCheck(w)` — May complete a pending grow/repair when idle.
-4. **For each world `w`**: `TendrilPulseManager.tick(w)` — Advances in-world pulse jobs.
-5. **`TendrilPulseManager.tickOmniPulseJob(overworld)`** — Omnidirectional pulse BFS batching (uses overworld time/tick context).
+1. **`VoidClamMod.tickSeekEphemeralExpiry(server)`** — Per-clam unload timers that eventually clear in-memory seek caches / path bookmarks when the **heart chunk stays unloaded** (all dimensions).
+2. **`VoidClamMod.drainPendingLightCacheDeltas()`** — Apply batched light-cache updates queued from block changes (must run before per-world clam logic that reads caches).
+3. **Optional — sync A***: **`Pathfinder.tickSyncAStarJobs(...)`** when config `astar_mode` is `sync_batched`. Runs **before** per-world clam ticks so stepped jobs make progress in a fixed place in the frame.
+4. **For each `ServerWorld` `w`** (iteration order follows `server.getWorlds()`):
+   - **`VoidClamMod.tickLoadedClamCores(w)`** — Only clams whose **heart chunk is loaded**. Registry link via mixin on furnace tick; sync heart NBT; cache rebuild slices; fuel wake; auto-grow schedule; phased **`clamReach`**, core check, heartbeat, defense.
+   - **`VoidClamMod.tickGrowPendingCheck(w)`** — May complete a pending grow/repair when **idle** (see locks below).
+   - **`TendrilPulseManager.tick(w)`** — In-world pulse display jobs for that world.
+   - **`VoidClamModScheduler.tick(w)`** — Due delayed tasks scheduled with **this** `ServerWorld` reference (`runAtTick <= world.getTime()`).
+   - **`TendrilPulseManager.tickOmniPulseJob(w)`** — Incremental omnidirectional pulse BFS batching for that world.
+5. **`VoidClamMod.tickTargets(server)`** — Drain the global **`targets`** queue (FIFO) and run **`Pathfinder.buildPath`** for each node (may enqueue delayed steps on specific worlds).
+6. **`VoidClamMod.tickOrphanedClamActivityWarnings(server)`** — Throttled **author-facing `WARN` log** if a registered clam still has path/grow/cache activity while its heart is **not tickable** (dimension unloaded, heart chunk unloaded, or core block missing/wrong at the recorded center).
 
-Then **gated** by `overworld.getTime()`:
+Then **gated** by overworld time (`ServerWorld` overworld, or first world as fallback):
 
 | Interval constant | Ticks | What runs |
 |-------------------|-------|-----------|
-| `TICK_OMNI_PULSE` (100) | 5 s | `TendrilPulseManager.runOmnidirectionalPulse(overworld)` |
+| `TICK_OMNI_PULSE` (100) | 5 s | `TendrilPulseManager.runOmnidirectionalPulse(w)` for **each** world |
 | `TICK_CLEANUP` (1200) | 1 min | `TendrilPulseManager.cleanupStrayDisplays(w)` for every world |
 
-## Per–block-entity tick (heart)
+**Why order matters:** `tickLoadedClamCores` can enqueue scheduler work and path targets; **`tickTargets` runs after all worlds** have advanced pulse/scheduler state for that tick, so path consumption is **global per tick**, not interleaved per world. **`tickGrowPendingCheck`** runs **before** `tickTargets`, so it sees **`targets`** and **`busyFlagMainCycle`** as left by the *previous* tick’s drain (this tick’s `tickTargets` has not run yet).
 
-Registered via `VoidClamHeartBlock.getTicker`: each loaded heart runs **`VoidClamHeartBlockEntity.tick`** every game tick (when the chunk ticks). That drives:
+## Priority and locks (behavioral deadlocks)
 
-- First-load **registry link** (`ensureRuntimeModuleForHeart`)
-- **Auto grow/repair** scheduling (overworld only; see [[Grow-repair-and-energy]])
-- Staggered **reach** + core check, **heartbeat**, **defense**
+There is **no cross-clam priority queue**. Ordering within a tick is **phase order** (above) plus **FIFO** `targets` and **time-ordered** `VoidClamModScheduler` tasks. The main **per-clam lock** is **`busyFlagMainCycle`**: while non-zero, **`clamReach` / `calculatePath`** will not start another cycle for that clam.
 
-So reach/core/heartbeat/defense are **not** driven by the global server tick table in `VoidClamModEntry`; they are **heart-local** intervals.
+| Mechanism | What it blocks |
+|-----------|----------------|
+| **`busyFlagMainCycle`** | New reach/path cycle; held from reach through path apply (and container routing / path-stopped waits — see [[Pathfinding-and-reach]]). |
+| **`targets` non-empty** (for the pending grow/repair clam id) | **`tickGrowPendingCheck`** will not finish grow/repair until that clam has no queued path ends. |
+| **`VoidClamMod.isResizeShellAnimationPending(world)`** | Grow/repair waits for **`clamReSize`** shell steps scheduled via **`scheduleResizeShellDelayed`**, not all scheduler tasks. |
+| **Coordinated kill barrier** | **`CommandToolbox.submitPathfinding`** rejects; workers abort via `shouldAbortAsyncPathfindingWork`. |
+
+**Idle before grow/repair** (`tickGrowPendingCheck`, same dimension as `growPendingWorld`): **`busyFlagMainCycle == 0`** for the command target (or clam removed), **`countTargetsQueuedForClam(cmdId) == 0`**, **`!isResizeShellAnimationPending(world)`**, and **`!asyncPathfindingKillBarrierInEffect`**. It does **not** consult **`VoidClamModScheduler.hasPendingTasks`**. See [[Threading-queues-locks]] for **`busyFlagMainCycle`** transitions and [[Grow-repair-and-energy]] for the user-visible grow/repair pipeline.
+
+## Heart block entity (clam core)
+
+The clam **heart** is a **blast furnace** block (`VoidClamCoreBlocks.CORE_BLOCK`). **`AbstractFurnaceBlockEntityMixin`** runs at the end of the vanilla furnace **`tick`** when the block is the clam core: it calls **`tryRegisterFromClamCoreBlockEntity`** and keeps **`LIT`** in sync with **`Clam#status`**. Reach, defense, heartbeat, and auto-grow deadlines are driven from **`tickLoadedClamCores`**, not from a custom block entity class.
 
 ## Design notes for ports
 
-- **Delayed tasks** are ticked with the **overworld** reference; tasks scheduled with a different `ServerWorld` instance may not fire until `VoidClamModScheduler` is extended to match by dimension key (see [[Threading-queues-locks]]).
+- **`VoidClamModScheduler`** tasks are matched by **`ServerWorld` reference** in `tick(world)`. Schedule and tick with the same world instance for a dimension.
+- **`tickTargets`** uses the **`MinecraftServer`** to run `buildPath`; path steps may schedule work on specific worlds.
 
 ## Related notes
 
+- [[Technical-documentation]]
+- [[Configuration]] — `astar_mode`, `bfs_mode`, intervals, caches.
+- [[Seek-caches-and-block-deltas]] — delta drain phase relative to cores.
 - [[Threading-queues-locks]]
 - [[Pathfinding-and-reach]]
 - [[Grow-repair-and-energy]]
