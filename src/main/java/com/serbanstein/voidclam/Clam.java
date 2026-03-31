@@ -100,6 +100,20 @@ public class Clam {
     public long nextAutoGrowRepairWorldTime;
     /** {@code false} until {@link com.serbanstein.voidclam.CommandToolbox#buildStub} has run (searing-heart placements defer until first fuel). */
     public boolean stubBuilt = true;
+    /**
+     * Searing hearts need this many completed {@code clamReSize} chains (repair/grow animation finished) before {@link #status}
+     * becomes {@code 1}. Set to {@link VoidClamMod#SEARING_WAKE_REPAIR_CYCLES} on item placement and when exiting full ice encasement;
+     * {@code 0} means fuel may wake the clam normally.
+     */
+    public int repairWakeCyclesRemaining;
+    /**
+     * Runtime: previous tick had all six heart neighbors as ice (see {@link VoidClamMod#isHeartFullyIceEncased}).
+     */
+    public boolean iceEncasedLastTick;
+    /**
+     * Runtime: set when {@link VoidClamMod#prepareClamForResizeShell} runs; cleared when the resize delayed-task chain has finished.
+     */
+    public boolean repairResizeChainAwaitingCompletion;
 
     /**
      * When the heart chunk is unloaded, {@link VoidClamMod#tickSeekEphemeralExpiry} sets this to overworld-equivalent world time

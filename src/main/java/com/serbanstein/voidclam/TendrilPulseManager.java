@@ -147,7 +147,7 @@ public final class TendrilPulseManager {
         if (omniPulseJob != null || omniAsyncRunning) return;
         List<BlockBfs.MergedOmniBfsJob.SingleSource> bfsList = new ArrayList<>();
         for (Clam m : VoidClamMod.getAllClams()) {
-            if (m == null || m.status != 1) continue;
+            if (m == null || !VoidClamMod.isSearingHeartThermallyActive(world, m)) continue;
             if (!m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             BlockPos center = new BlockPos(m.x, m.y, m.z);
             if (!world.isChunkLoaded(center)) continue;

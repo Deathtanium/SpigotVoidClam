@@ -62,6 +62,7 @@ public final class SearingHeartItems {
         template.seekOres = cfg.clam_ores_flag_default;
         template.protectItself = cfg.clam_protect_itself_default;
         template.stubBuilt = false;
+        template.repairWakeCyclesRemaining = VoidClamMod.SEARING_WAKE_REPAIR_CYCLES;
         return createDropFromBreak(template, null);
     }
 
@@ -98,6 +99,7 @@ public final class SearingHeartItems {
         n.putBoolean("seekOres", m.seekOres);
         n.putBoolean("protectItself", m.protectItself);
         n.putBoolean("stubBuilt", m.stubBuilt);
+        n.putInt("repairWakeCyclesRemaining", m.repairWakeCyclesRemaining);
         if (m.worldKey != null) {
             n.putString("dimension", m.worldKey.getValue().toString());
         }
@@ -144,6 +146,14 @@ public final class SearingHeartItems {
         m.seekOres = n.getBoolean("seekOres").orElse(false);
         m.protectItself = n.getBoolean("protectItself").orElse(true);
         m.stubBuilt = n.getBoolean("stubBuilt").orElse(true);
+        int rwRemaining = n.getInt("repairWakeCyclesRemaining").orElse(-1);
+        if (rwRemaining >= 0) {
+            m.repairWakeCyclesRemaining = rwRemaining;
+        } else if (n.getBoolean("needsFirstRepairWake").orElse(false)) {
+            m.repairWakeCyclesRemaining = VoidClamMod.SEARING_WAKE_REPAIR_CYCLES;
+        } else {
+            m.repairWakeCyclesRemaining = 0;
+        }
         n.getString("dimension").ifPresent(str -> {
             Identifier id = Identifier.tryParse(str);
             if (id != null) {
@@ -168,6 +178,7 @@ public final class SearingHeartItems {
         into.seekOres = snapshot.seekOres;
         into.protectItself = snapshot.protectItself;
         into.stubBuilt = snapshot.stubBuilt;
+        into.repairWakeCyclesRemaining = snapshot.repairWakeCyclesRemaining;
         into.worldKey = snapshot.worldKey;
         into.lightsCache.clear();
         into.oresCache.clear();
@@ -185,6 +196,7 @@ public final class SearingHeartItems {
         into.pathfindingResumeWorldTime = 0;
         into.prioritizeRepairOreSeek = false;
         into.orePathForMaterialHunger = false;
+        into.repairResizeChainAwaitingCompletion = false;
     }
 
     public static boolean isPlainBlastFurnaceDrop(ItemStack stack) {

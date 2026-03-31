@@ -791,7 +791,7 @@ public final class Pathfinder {
         }
         Clam modForFlag = VoidClamMod.getClamById(clamId);
         if (modForFlag == null) return false;
-        if (modForFlag.status != 1) {
+        if (!VoidClamMod.isSearingHeartThermallyActive(world, modForFlag)) {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return false;
         }

@@ -59,6 +59,9 @@ public class VoidClamModEntry implements ModInitializer {
     public void onInitialize() {
         PlayerBlockBreakEvents.BEFORE.register((world, player, pos, state, blockEntity) -> {
             VoidClamMod.captureClamCoreComponentsBeforeBreak(world, pos, state);
+            if (world instanceof ServerWorld serverWorld && VoidClamMod.shouldCancelBreakingSearingHeart(serverWorld, player, pos, state)) {
+                return false;
+            }
             return true;
         });
         PlayerBlockBreakEvents.CANCELED.register((world, player, pos, state, blockEntity) -> {
@@ -74,6 +77,9 @@ public class VoidClamModEntry implements ModInitializer {
             BlockPos pos = hitResult.getBlockPos();
             if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return ActionResult.PASS;
             if (VoidClamMod.findClamAt(serverWorld, pos) == null) return ActionResult.PASS;
+            if (VoidClamMod.shouldCancelUsingSearingHeart(serverWorld, pos)) {
+                return ActionResult.FAIL;
+            }
             VoidClamMod.applySearingHeartBlockLabel(serverWorld, pos);
             return ActionResult.PASS;
         });
