@@ -80,6 +80,7 @@ public class VoidClamModEntry implements ModInitializer {
             if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return ActionResult.PASS;
             if (VoidClamMod.findClamAt(serverWorld, pos) == null) return ActionResult.PASS;
             if (VoidClamMod.shouldCancelUsingSearingHeart(serverWorld, pos)) {
+                player.setFireTicks(Math.max(player.getFireTicks(), 100));
                 return ActionResult.FAIL;
             }
             VoidClamMod.applySearingHeartBlockLabel(serverWorld, pos);
