@@ -1805,8 +1805,7 @@ public final class VoidClamMod {
     }
 
     /**
-     * Octahedron interior (excluding the heart block) must be only air, water, or nether wart — same constraint as
-     * manual shell placement before autogrow.
+     * Octahedron interior (excluding the heart block): air, water, wart, or natural terrain ({@link #isNaturalTerrainBlock}).
      */
     private static boolean isPrebuiltShellInteriorClear(ServerWorld world, int cx, int cy, int cz, int t) {
         int horiz = Math.max(0, t - 1);
