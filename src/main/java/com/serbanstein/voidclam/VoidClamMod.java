@@ -12,6 +12,7 @@ import net.minecraft.registry.Registries;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -28,6 +29,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
 import net.minecraft.world.World;
+import net.minecraft.world.biome.Biome;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.RegistryKeys;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
@@ -301,6 +303,13 @@ public final class VoidClamMod {
         return isSearingHeartThermallyActive(world, m);
     }
 
+    private static void tryAutogrowOrSeekAfterWake(ServerWorld world, Clam m) {
+        if (m == null) return;
+        if (!tryAutogrowIntoPrebuiltShell(world, m)) {
+            startSeekCachesRebuild(m);
+        }
+    }
+
     private static void finishSearingWakeAfterRepairCycles(ServerWorld world, Clam m) {
         m.status = 1;
         if (!m.stubBuilt) {
@@ -308,8 +317,8 @@ public final class VoidClamMod {
             m.stubBuilt = true;
         }
         ensureAutoGrowScheduled(world, m);
-        startSeekCachesRebuild(m);
         placeHeartBlockForClam(world, new BlockPos(m.x, m.y, m.z), m);
+        tryAutogrowOrSeekAfterWake(world, m);
     }
 
     /** Called when a {@code clamReSize} delayed shell chain has fully finished (pathidle gate). */
@@ -722,9 +731,7 @@ public final class VoidClamMod {
         m.stubBuilt = false;
         m.repairWakeCyclesRemaining = SEARING_WAKE_REPAIR_CYCLES;
         syncClamCoreBlockEntityFromClam(world, m);
-        if (!tryAutogrowIntoPrebuiltShell(world, m)) {
-            startSeekCachesRebuild(m);
-        }
+        startSeekCachesRebuild(m);
     }
 
     /**
@@ -1228,9 +1235,6 @@ public final class VoidClamMod {
      */
     public static void tryConsumeFuelAndWakeClam(ServerWorld world, Clam m) {
         if (m == null || m.status != 0) return;
-        if (m.repairWakeCyclesRemaining > 0) {
-            return;
-        }
         BlockPos pos = new BlockPos(m.x, m.y, m.z);
         if (isHeartFullyIceEncased(world, pos)) {
             return;
@@ -1243,13 +1247,16 @@ public final class VoidClamMod {
         fuel.decrement(1);
         furnace.setStack(CLAM_CORE_FUEL_SLOT, fuel);
         furnace.markDirty();
+        m.repairWakeCyclesRemaining = 0;
+        m.repairResizeChainAwaitingCompletion = false;
         m.status = 1;
         if (!m.stubBuilt) {
             CommandToolbox.buildStub(world, m.x, m.y, m.z);
             m.stubBuilt = true;
         }
         ensureAutoGrowScheduled(world, m);
-        startSeekCachesRebuild(m);
+        placeHeartBlockForClam(world, pos, m);
+        tryAutogrowOrSeekAfterWake(world, m);
     }
     public static boolean isOre(Block block) { return ores.contains(block); }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
@@ -1917,6 +1924,32 @@ public final class VoidClamMod {
         }
     }
 
+    private static boolean shouldApproachDefenseAffect(Entity e) {
+        if (e == null || !e.isAlive()) return false;
+        if (e instanceof PlayerEntity p) {
+            return !p.isSpectator() && !p.isCreative();
+        }
+        return true;
+    }
+
+    private static void playApproachDefenseSizzle(ServerWorld world, Entity entity, Random random) {
+        float pitch = 0.85f + random.nextFloat() * 0.28f;
+        world.playSound(null, entity.getX(), entity.getY(), entity.getZ(), SoundEvents.BLOCK_FIRE_EXTINGUISH, SoundCategory.BLOCKS, 0.55f, pitch);
+    }
+
+    private static void spawnApproachDefenseTorchParticles(ServerWorld world, Entity entity, Random random, int count) {
+        double ex = entity.getX();
+        double ey = entity.getY() + entity.getHeight() * (0.35 + random.nextDouble() * 0.5);
+        double ez = entity.getZ();
+        double w = Math.max(0.25, entity.getWidth() * 0.55);
+        for (int i = 0; i < count; i++) {
+            double ox = (random.nextDouble() - 0.5) * 2.0 * w;
+            double oy = random.nextDouble() * Math.max(0.15, entity.getHeight() * 0.5);
+            double oz = (random.nextDouble() - 0.5) * 2.0 * w;
+            world.spawnParticles(ParticleTypes.FLAME, ex + ox, ey + oy, ez + oz, 1, 0.03, 0.06, 0.03, 0.015);
+        }
+    }
+
     public static void tickApproachDefenseForClam(ServerWorld world, Clam m, long worldTime) {
         if (m == null || !m.protectItself || m.currentSize <= 3) return;
         if (!isSearingHeartThermallyActive(world, m)) return;
@@ -1926,15 +1959,18 @@ public final class VoidClamMod {
         double cx = m.x + 0.5, cy = m.y + 0.5, cz = m.z + 0.5;
         Box heartBox = new Box(m.x, m.y, m.z, m.x + 1.0, m.y + 1.0, m.z + 1.0);
         double r2 = rField * rField;
-        for (ServerPlayerEntity player : world.getPlayers()) {
-            if (player.isSpectator() || player.isCreative()) continue;
-            Vec3d ppos = player.getEntityPos();
+        Box fieldBox = new Box(cx - rField, cy - rField, cz - rField, cx + rField, cy + rField, cz + rField);
+        Random random = world.getRandom();
+        for (Entity entity : world.getOtherEntities(null, fieldBox, VoidClamMod::shouldApproachDefenseAffect)) {
+            Vec3d ppos = entity.getEntityPos();
             double dx = ppos.x - cx, dy = ppos.y - cy, dz = ppos.z - cz;
             double d2 = dx * dx + dy * dy + dz * dz;
             if (d2 >= r2) continue;
             double dist = Math.sqrt(d2);
-            if (player.getBoundingBox().intersects(heartBox)) {
-                player.setFireTicks(Math.max(player.getFireTicks(), 100));
+            if (entity instanceof LivingEntity living) {
+                if (living.getBoundingBox().intersects(heartBox)) {
+                    living.setFireTicks(Math.max(living.getFireTicks(), 100));
+                }
             }
             double inward = 1.0 - dist / rField;
             double push = 0.05 + 0.14 * inward * inward;
@@ -1942,12 +1978,20 @@ public final class VoidClamMod {
                 dx /= dist;
                 dy /= dist;
                 dz /= dist;
-                player.addVelocity(dx * push, Math.max(0.04, dy * push + 0.025 * inward), dz * push);
+                entity.addVelocity(dx * push, Math.max(0.04, dy * push + 0.025 * inward), dz * push);
             }
-            int dmgInterval = Math.max(4, (int) (4 + 15 * (dist / rField)));
-            if ((worldTime + player.getId()) % dmgInterval == 0) {
-                float amount = 0.5f + 3.5f * (float) inward;
-                player.damage(world, world.getDamageSources().magic(), amount);
+            if ((worldTime + entity.getId()) % 3 == 0) {
+                spawnApproachDefenseTorchParticles(world, entity, random, 1 + random.nextInt(2));
+            }
+            if (entity instanceof LivingEntity living) {
+                int dmgInterval = Math.max(4, (int) (4 + 15 * (dist / rField)));
+                if ((worldTime + entity.getId()) % dmgInterval == 0) {
+                    float amount = 0.5f + 3.5f * (float) inward;
+                    if (living.damage(world, world.getDamageSources().magic(), amount)) {
+                        playApproachDefenseSizzle(world, entity, random);
+                        spawnApproachDefenseTorchParticles(world, entity, random, 2 + random.nextInt(2));
+                    }
+                }
             }
         }
     }
@@ -1971,6 +2015,7 @@ public final class VoidClamMod {
     private static boolean blockSeesPrecipitatingWeather(ServerWorld world, BlockPos pos) {
         if (!world.isSkyVisible(pos)) return false;
         if (!world.getBiome(pos).value().hasPrecipitation()) return false;
+        if (!world.getDimensionEntry().value().hasSkyLight()) return false;
         return world.hasRain(pos);
     }
 
@@ -2004,14 +2049,34 @@ public final class VoidClamMod {
             st = world.getBlockState(pos);
             if (st.isAir() || !st.getFluidState().isEmpty()) continue;
             if (!blockSeesPrecipitatingWeather(world, pos)) continue;
-            if (random.nextFloat() > 0.14f) continue;
-            world.spawnParticles(
-                ParticleTypes.CAMPFIRE_SIGNAL_SMOKE,
-                pos.getX() + 0.5, pos.getY() + 0.65, pos.getZ() + 0.5,
-                1,
-                0.02, 0.06, 0.02,
-                0.004
-            );
+            Biome biome = world.getBiome(pos).value();
+            boolean snowBiome = biome.getPrecipitation(pos, world.getSeaLevel()) == Biome.Precipitation.SNOW;
+            float passProb = snowBiome ? 0.32f : 0.14f;
+            if (random.nextFloat() > passProb) continue;
+            double px = pos.getX() + 0.5, py = pos.getY() + 0.65, pz = pos.getZ() + 0.5;
+            int puffs = snowBiome ? 2 : 1;
+            for (int pi = 0; pi < puffs; pi++) {
+                world.spawnParticles(
+                    ParticleTypes.CAMPFIRE_SIGNAL_SMOKE,
+                    px + (random.nextDouble() - 0.5) * 0.35,
+                    py + random.nextDouble() * 0.15,
+                    pz + (random.nextDouble() - 0.5) * 0.35,
+                    1,
+                    0.05, 0.12, 0.05,
+                    snowBiome ? 0.012 : 0.004
+                );
+            }
+            if (snowBiome && random.nextFloat() < 0.45f) {
+                world.spawnParticles(
+                    ParticleTypes.SMOKE,
+                    px + (random.nextDouble() - 0.5) * 0.4,
+                    py + 0.1,
+                    pz + (random.nextDouble() - 0.5) * 0.4,
+                    1,
+                    0.02, 0.08, 0.02,
+                    0.02
+                );
+            }
         }
     }
 
