@@ -33,7 +33,7 @@ public abstract class AbstractFurnaceBlockEntityMixin {
         VoidClamMod.tryRegisterFromClamCoreBlockEntity(world, pos, blockEntity);
         com.serbanstein.voidclam.Clam clam = VoidClamMod.findClamAt(world, pos);
         if (clam == null) return;
-        boolean wantLit = clam.status == 1;
+        boolean wantLit = VoidClamMod.isSearingHeartThermallyActive(world, clam);
         if (state.get(AbstractFurnaceBlock.LIT) != wantLit) {
             world.setBlockState(pos, state.with(AbstractFurnaceBlock.LIT, wantLit), 2);
         }

@@ -252,6 +252,28 @@ public final class CommandToolbox {
     }
 
     /**
+     * Smallest sphere centered on the heart that contains all expected obsidian shell block centers (~circumscribed to the shell).
+     * Used for thermal melt / weather particle sampling around clams.
+     */
+    public static double clamOctahedronCircumsphereRadius(int tsize) {
+        int t = Math.max(1, tsize);
+        double maxR = 0.0;
+        int yMin = -t / 2 + 1;
+        int yMax = t - 1;
+        int horiz = Math.max(0, t - 1);
+        for (int dy = yMin; dy <= yMax; dy++) {
+            for (int dx = -horiz; dx <= horiz; dx++) {
+                for (int dz = -horiz; dz <= horiz; dz++) {
+                    if (!VoidClamMod.isExpectedObsidianShellBlock(dx, dy, dz, t)) continue;
+                    double r = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.5 * Math.sqrt(3.0);
+                    if (r > maxR) maxR = r;
+                }
+            }
+        }
+        return Math.max(1.0, maxR);
+    }
+
+    /**
      * True if any corner of the player's bounding box lies inside the defense sphere: inscribed in the shell
      * octahedron interior, then shrunk by one block, centered on the heart block.
      */
@@ -492,7 +514,7 @@ public final class CommandToolbox {
     /** Start light/ore search for a clam. Scans box off-thread, pathfinds to closest target. */
     public static void clamReach(ServerWorld world, UUID clamId) {
         Clam m = VoidClamMod.getClamById(clamId);
-        if (m == null || m.status != 1) return;
+        if (m == null || !VoidClamMod.isSearingHeartThermallyActive(world, m)) return;
         if (!world.getRegistryKey().equals(m.dimensionWorldKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         m.ensureClamId();

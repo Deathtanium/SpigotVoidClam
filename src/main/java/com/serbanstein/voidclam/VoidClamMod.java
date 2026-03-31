@@ -4,11 +4,13 @@ import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.SnowBlock;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.registry.Registry;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.MinecraftServer;
@@ -19,11 +21,14 @@ import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.particle.ParticleTypes;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.minecraft.world.biome.Biome;
 import net.minecraft.util.registry.RegistryKey;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
@@ -111,6 +116,8 @@ public final class VoidClamMod {
     public static final int LIGHT_CACHE_REBUILD_TICKS = 100;
     /** No reach/pathfind until this many ticks after obsidian shell from {@link CommandToolbox#clamReSize}. */
     public static final int POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS = 20;
+    /** Completed {@code clamReSize} chains required before a placed heart (or one that left ice encasement) becomes {@link Clam#status} {@code 1} without relying on this count for {@link #makeStub}. */
+    public static final int SEARING_WAKE_REPAIR_CYCLES = 2;
     private static final int DEFENSE_MIN_SIZE = 11;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
@@ -271,6 +278,73 @@ public final class VoidClamMod {
         m.seekEphemeralNeedSeekDataRefresh = false;
         purgeTargetsForClam(m.clamId);
         Pathfinder.clearSyncAStarJobsForClam(m.clamId);
+        m.repairResizeChainAwaitingCompletion = true;
+    }
+
+    public static boolean isIceVariant(Block block) {
+        return block == Blocks.ICE || block == Blocks.PACKED_ICE || block == Blocks.BLUE_ICE || block == Blocks.FROSTED_ICE;
+    }
+
+    /** True when the six face-adjacent blocks around the heart are all ice variants (any mix). */
+    public static boolean isHeartFullyIceEncased(ServerWorld world, BlockPos heart) {
+        for (Direction d : Direction.values()) {
+            BlockPos n = heart.offset(d);
+            if (!world.isChunkLoaded(n.getX() >> 4, n.getZ() >> 4)) {
+                return false;
+            }
+            if (!isIceVariant(world.getBlockState(n).getBlock())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** {@link Clam#status} {@code 1} and not in full ice dormancy — lit furnace, pathing, aura, and break protection apply. */
+    public static boolean isSearingHeartThermallyActive(ServerWorld world, Clam m) {
+        if (m == null || m.status != 1) return false;
+        return !isHeartFullyIceEncased(world, new BlockPos(m.x, m.y, m.z));
+    }
+
+    /** Survival: cancel breaking the searing heart while thermally active unless ice-frozen (then it can be mined). */
+    public static boolean shouldCancelBreakingSearingHeart(ServerWorld world, @Nullable PlayerEntity player, BlockPos pos, BlockState state) {
+        if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return false;
+        if (player != null && player.isCreative()) return false;
+        Clam m = findClamAt(world, pos);
+        if (m == null) return false;
+        if (isHeartFullyIceEncased(world, pos)) return false;
+        return isSearingHeartThermallyActive(world, m);
+    }
+
+    /** Cancel opening the blast-furnace UI on an active searing heart. */
+    public static boolean shouldCancelUsingSearingHeart(ServerWorld world, BlockPos pos) {
+        Clam m = findClamAt(world, pos);
+        if (m == null) return false;
+        if (isHeartFullyIceEncased(world, pos)) return false;
+        return isSearingHeartThermallyActive(world, m);
+    }
+
+    private static void finishSearingWakeAfterRepairCycles(ServerWorld world, Clam m) {
+        m.status = 1;
+        if (!m.stubBuilt) {
+            CommandToolbox.buildStub(world, m.x, m.y, m.z);
+            m.stubBuilt = true;
+        }
+        ensureAutoGrowScheduled(world, m);
+        startSeekCachesRebuild(m);
+        placeHeartBlockForClam(world, new BlockPos(m.x, m.y, m.z), m);
+    }
+
+    /** Called when a {@code clamReSize} delayed shell chain has fully finished (pathidle gate). */
+    private static void onRepairResizeChainCompleted(ServerWorld world, Clam m) {
+        if (m.repairWakeCyclesRemaining <= 0) {
+            return;
+        }
+        m.repairWakeCyclesRemaining--;
+        if (m.repairWakeCyclesRemaining == 0) {
+            finishSearingWakeAfterRepairCycles(world, m);
+        } else {
+            syncClamCoreBlockEntityFromClam(world, m);
+        }
     }
 
     /** Whether {@code clamReach}, path enqueues, and sync A* may run (after obsidian + grace when resizing). */
@@ -597,7 +671,7 @@ public final class VoidClamMod {
 
     /** Place or replace the block at {@code pos} with the vanilla clam core block (blast furnace). */
     public static void placeHeartBlockForClam(ServerWorld world, BlockPos pos, Clam m) {
-        boolean lit = m != null && m.status == 1;
+        boolean lit = m != null && isSearingHeartThermallyActive(world, m);
         BlockState state = VoidClamCoreBlocks.CORE_BLOCK.getDefaultState().with(AbstractFurnaceBlock.LIT, lit);
         world.setBlockState(pos, state);
         BlockEntity be = world.getBlockEntity(pos);
@@ -656,6 +730,7 @@ public final class VoidClamMod {
         }
         m.status = 0;
         m.stubBuilt = false;
+        m.repairWakeCyclesRemaining = SEARING_WAKE_REPAIR_CYCLES;
         syncClamCoreBlockEntityFromClam(world, m);
         if (!tryAutogrowIntoPrebuiltShell(world, m)) {
             startSeekCachesRebuild(m);
@@ -670,6 +745,22 @@ public final class VoidClamMod {
         for (Clam m : clamsById.values()) {
             if (m == null || !m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            BlockPos heartPos = new BlockPos(m.x, m.y, m.z);
+            boolean iceEncased = isHeartFullyIceEncased(world, heartPos);
+            if (m.iceEncasedLastTick && !iceEncased) {
+                m.repairWakeCyclesRemaining = SEARING_WAKE_REPAIR_CYCLES;
+                m.status = 0;
+                syncClamCoreBlockEntityFromClam(world, m);
+                placeHeartBlockForClam(world, heartPos, m);
+            }
+            m.iceEncasedLastTick = iceEncased;
+            if (m.repairResizeChainAwaitingCompletion
+                && m.pathfindingResumeWorldTime > 0
+                && t >= m.pathfindingResumeWorldTime
+                && !isResizeShellAnimationPending(world)) {
+                m.repairResizeChainAwaitingCompletion = false;
+                onRepairResizeChainCompleted(world, m);
+            }
             if (m.seekEphemeralNeedSeekDataRefresh) {
                 m.seekEphemeralNeedSeekDataRefresh = false;
                 VoidClamConfig rcfg0 = VoidClamConfig.get();
@@ -690,10 +781,10 @@ public final class VoidClamMod {
                 && (m.lightPathGoalPacked != null || m.orePathGoalPacked != null)) {
                 releasePathfindingMainCycle(m);
             }
-            BlockPos pos = new BlockPos(m.x, m.y, m.z);
+            BlockPos pos = heartPos;
             tryConsumeFuelAndWakeClam(world, m);
             ensureAutoGrowScheduled(world, m);
-            if (m.status == 1) {
+            if (isSearingHeartThermallyActive(world, m)) {
                 long due = m.nextAutoGrowRepairWorldTime;
                 if (due > 0 && t >= due) {
                     if (tryScheduleAutoGrowRepairForClam(world, m.clamId)) {
@@ -710,7 +801,7 @@ public final class VoidClamMod {
             if ((t + phase) % 20 == 0) {
                 tickCoreCheckAtHeart(world, pos, clamId);
             }
-            if (m.status != 1) continue;
+            if (!isSearingHeartThermallyActive(world, m)) continue;
             if ((t + seekPhase) % seekIntervalTicks == 0) {
                 CommandToolbox.clamReach(world, clamId);
             }
@@ -720,6 +811,8 @@ public final class VoidClamMod {
             if ((t + defensePhase) % defenseIntervalTicks == 0) {
                 tickDefenseForClam(world, getClamByClamId(clamId));
             }
+            tickApproachDefenseForClam(world, m, t);
+            tickThermalAmbienceForClam(world, m, t);
         }
     }
     private static boolean isCopperTorchOrLantern(Block block) {
@@ -1146,7 +1239,13 @@ public final class VoidClamMod {
      */
     public static void tryConsumeFuelAndWakeClam(ServerWorld world, Clam m) {
         if (m == null || m.status != 0) return;
+        if (m.repairWakeCyclesRemaining > 0) {
+            return;
+        }
         BlockPos pos = new BlockPos(m.x, m.y, m.z);
+        if (isHeartFullyIceEncased(world, pos)) {
+            return;
+        }
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
         BlockEntity be = world.getBlockEntity(pos);
         if (!(be instanceof AbstractFurnaceBlockEntity)) return;
@@ -1513,6 +1612,7 @@ public final class VoidClamMod {
         m.seekLights = cfg.clam_light_flag_default;
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
+        m.repairWakeCyclesRemaining = 0;
         if (!registerClam(m)) {
             return null;
         }
@@ -1829,16 +1929,117 @@ public final class VoidClamMod {
         }
     }
 
+    public static void tickApproachDefenseForClam(ServerWorld world, Clam m, long worldTime) {
+        if (m == null || !m.protectItself || m.currentSize <= 3) return;
+        if (!isSearingHeartThermallyActive(world, m)) return;
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        double rField = m.currentSize / 4.0;
+        if (rField < 0.3) return;
+        double cx = m.x + 0.5, cy = m.y + 0.5, cz = m.z + 0.5;
+        Box heartBox = new Box(m.x, m.y, m.z, m.x + 1.0, m.y + 1.0, m.z + 1.0);
+        double r2 = rField * rField;
+        for (ServerPlayerEntity player : world.getPlayers()) {
+            if (player.isSpectator() || player.isCreative()) continue;
+            Vec3d ppos = player.getPos();
+            double dx = ppos.x - cx, dy = ppos.y - cy, dz = ppos.z - cz;
+            double d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 >= r2) continue;
+            double dist = Math.sqrt(d2);
+            if (player.getBoundingBox().intersects(heartBox)) {
+                player.setFireTicks(Math.max(player.getFireTicks(), 100));
+            }
+            double inward = 1.0 - dist / rField;
+            double push = 0.05 + 0.14 * inward * inward;
+            if (dist > 1e-3) {
+                dx /= dist;
+                dy /= dist;
+                dz /= dist;
+                player.addVelocity(dx * push, Math.max(0.04, dy * push + 0.025 * inward), dz * push);
+                player.velocityModified = true;
+            }
+            int dmgInterval = Math.max(4, (int) (4 + 15 * (dist / rField)));
+            if ((worldTime + player.getEntityId()) % dmgInterval == 0) {
+                float amount = 0.5f + 3.5f * (float) inward;
+                player.damage(DamageSource.MAGIC, amount);
+            }
+        }
+    }
+
+    private static BlockPos randomBlockInThermalSphere(Random random, double cx, double cy, double cz, double radius) {
+        if (radius <= 0.0) {
+            return new BlockPos(MathHelper.floor(cx), MathHelper.floor(cy), MathHelper.floor(cz));
+        }
+        double u = random.nextDouble();
+        double v = random.nextDouble();
+        double theta = 2.0 * Math.PI * u;
+        double phi = Math.acos(2.0 * v - 1.0);
+        double r = radius * Math.cbrt(random.nextDouble());
+        double sinPhi = Math.sin(phi);
+        double x = cx + r * sinPhi * Math.cos(theta);
+        double y = cy + r * Math.cos(phi);
+        double z = cz + r * sinPhi * Math.sin(theta);
+        return new BlockPos(MathHelper.floor(x), MathHelper.floor(y), MathHelper.floor(z));
+    }
+
+    private static boolean blockSeesPrecipitatingWeather(ServerWorld world, BlockPos pos) {
+        if (!world.isSkyVisible(pos)) return false;
+        Biome biome = world.getBiome(pos);
+        if (biome.getPrecipitation() == Biome.Precipitation.NONE) return false;
+        return world.isRaining();
+    }
+
+    private static void tryMeltSnowOrIce(ServerWorld world, BlockPos pos, BlockState state) {
+        if (state.isOf(Blocks.SNOW)) {
+            int layers = state.get(SnowBlock.LAYERS);
+            if (layers <= 1) {
+                world.setBlockState(pos, Blocks.AIR.getDefaultState(), 3);
+            } else {
+                world.setBlockState(pos, state.with(SnowBlock.LAYERS, layers - 1), 3);
+            }
+        } else if (state.isOf(Blocks.ICE) || state.isOf(Blocks.FROSTED_ICE)) {
+            world.setBlockState(pos, Blocks.WATER.getDefaultState(), 3);
+        }
+    }
+
+    public static void tickThermalAmbienceForClam(ServerWorld world, Clam m, long worldTime) {
+        if (!isSearingHeartThermallyActive(world, m)) return;
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        int ambPhase = Math.floorMod(m.x * 29 + m.y * 13 + m.z * 19, 5);
+        if ((worldTime + ambPhase) % 5 != 0) return;
+        double rad = CommandToolbox.clamOctahedronCircumsphereRadius(m.currentSize);
+        double cx = m.x + 0.5, cy = m.y + 0.5, cz = m.z + 0.5;
+        int samples = 4 + m.currentSize * 2;
+        Random random = world.random;
+        for (int i = 0; i < samples; i++) {
+            BlockPos pos = randomBlockInThermalSphere(random, cx, cy, cz, rad);
+            if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+            BlockState st = world.getBlockState(pos);
+            tryMeltSnowOrIce(world, pos, st);
+            st = world.getBlockState(pos);
+            if (st.isAir() || !st.getFluidState().isEmpty()) continue;
+            if (!blockSeesPrecipitatingWeather(world, pos)) continue;
+            if (random.nextFloat() > 0.14f) continue;
+            world.spawnParticles(
+                ParticleTypes.CAMPFIRE_SIGNAL_SMOKE,
+                pos.getX() + 0.5, pos.getY() + 0.65, pos.getZ() + 0.5,
+                1,
+                0.02, 0.06, 0.02,
+                0.004
+            );
+        }
+    }
+
     /** Defense for one clam (from {@link #tickLoadedClamCores} when interval matches). */
     public static void tickDefenseForClam(ServerWorld world, Clam m) {
-        if (m == null || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE) return;
+        if (m == null || !isSearingHeartThermallyActive(world, m) || !m.protectItself || m.currentSize < DEFENSE_MIN_SIZE) {
+            return;
+        }
         if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         float volume = Math.min(3f, (float) m.currentSize / 4f);
         SoundEvent soundRef = SoundEvents.BLOCK_NOTE_BLOCK_BASS;
         for (ServerPlayerEntity player : world.getPlayers()) {
             if (player.isSpectator()) continue;
-            if ("serbantein".equalsIgnoreCase(player.getName().asString())) continue;
             if (!CommandToolbox.isPlayerInsideOctahedron(player, m)) continue;
             BlockPos playerBlock = player.getBlockPos();
             for (Direction d : Direction.values()) {
