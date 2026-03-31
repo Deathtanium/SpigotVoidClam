@@ -55,7 +55,7 @@ public final class SearingHeartItems {
     public static ItemStack createFreshHeartStack() {
         Clam template = new Clam();
         template.type = 1;
-        template.currentSize = 1;
+        template.currentSize = 3;
         template.status = 0;
         template.energy = 0;
         template.age = 0;
@@ -133,8 +133,8 @@ public final class SearingHeartItems {
             }
         }
         m.type = n.contains("type") ? n.getInt("type") : 0;
-        m.currentSize = n.contains("currentSize") ? n.getInt("currentSize") : 1;
-        if (m.currentSize < 1) m.currentSize = 1;
+        m.currentSize = n.contains("currentSize") ? n.getInt("currentSize") : 3;
+        if (m.currentSize < 3) m.currentSize = 3;
         m.status = n.contains("status") ? n.getInt("status") : 0;
         m.material = Math.max(0, n.contains("material") ? n.getInt("material") : 0);
         m.energy = n.contains("energy") ? n.getInt("energy") : 0;

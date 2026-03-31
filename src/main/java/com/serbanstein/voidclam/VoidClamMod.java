@@ -3,6 +3,7 @@ package com.serbanstein.voidclam;
 import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Material;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.SnowBlock;
 import net.minecraft.entity.effect.StatusEffectInstance;
@@ -119,7 +120,8 @@ public final class VoidClamMod {
     public static final int POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS = 20;
     /** Completed {@code clamReSize} chains required before a placed heart (or one that left ice encasement) becomes {@link Clam#status} {@code 1} without relying on this count for {@link #makeStub}. */
     public static final int SEARING_WAKE_REPAIR_CYCLES = 2;
-    private static final int DEFENSE_MIN_SIZE = 11;
+    /** Legacy wart/horn defense (annulus) only runs when {@link Clam#currentSize} is at least this. */
+    private static final int DEFENSE_MIN_SIZE = 3;
     private static final int DEFENSE_EFFECT_TICKS = 6 * 20; // 6 seconds
     private static final float DEFENSE_HORN_PITCH = 0.5f;
     /** Blocks that count as light-source "food" (energy) for clams. */
@@ -751,6 +753,10 @@ public final class VoidClamMod {
         for (Clam m : clamsById.values()) {
             if (m == null || !m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
             if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            if (m.clamId == null) {
+                m.ensureClamId();
+                syncClamCoreBlockEntityFromClam(world, m);
+            }
             BlockPos heartPos = new BlockPos(m.x, m.y, m.z);
             boolean iceEncased = isHeartFullyIceEncased(world, heartPos);
             if (m.iceEncasedLastTick && !iceEncased) {
@@ -1610,7 +1616,7 @@ public final class VoidClamMod {
         m.y = y;
         m.z = z;
         m.worldKey = world.getRegistryKey();
-        m.currentSize = 1;
+        m.currentSize = 3;
         m.status = 0;
         m.energy = 0;
         m.age = 0;
@@ -1772,8 +1778,30 @@ public final class VoidClamMod {
         return true;
     }
 
+    private static boolean isNaturalTerrainBlock(BlockState st) {
+        Material mat = st.getMaterial();
+        if (mat == Material.STONE || mat == Material.SOIL || mat == Material.SOLID_ORGANIC
+            || mat == Material.PLANT || mat == Material.ORGANIC_PRODUCT
+            || mat == Material.AGGREGATE || mat == Material.SNOW_BLOCK || mat == Material.SNOW_LAYER
+            || mat == Material.ICE || mat == Material.DENSE_ICE
+            || mat == Material.WOOD || mat == Material.NETHER_WOOD || mat == Material.LEAVES
+            || mat == Material.CACTUS || mat == Material.GOURD || mat == Material.SPONGE
+            || mat == Material.MOSS_BLOCK || mat == Material.UNDERWATER_PLANT
+            || mat == Material.REPLACEABLE_PLANT || mat == Material.REPLACEABLE_UNDERWATER_PLANT
+            || mat == Material.NETHER_SHOOTS) {
+            return true;
+        }
+        if (mat.isReplaceable() && mat != Material.REDSTONE_LAMP && mat != Material.DECORATION) {
+            return true;
+        }
+        return false;
+    }
+
     private static boolean isAllowedPrebuiltShellInteriorBlock(BlockState st) {
-        return st.isAir() || st.isOf(Blocks.WATER) || st.isOf(Blocks.NETHER_WART_BLOCK);
+        if (st.isAir() || st.isOf(Blocks.WATER) || st.isOf(Blocks.NETHER_WART_BLOCK)) {
+            return true;
+        }
+        return isNaturalTerrainBlock(st) && !st.isOf(VoidClamCoreBlocks.CORE_BLOCK);
     }
 
     /**
@@ -1963,7 +1991,7 @@ public final class VoidClamMod {
     }
 
     public static void tickApproachDefenseForClam(ServerWorld world, Clam m, long worldTime) {
-        if (m == null || !m.protectItself || m.currentSize <= 3) return;
+        if (m == null || !m.protectItself || m.currentSize < 3) return;
         if (!isSearingHeartThermallyActive(world, m)) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         double rField = m.currentSize / 4.0;
@@ -2093,7 +2121,67 @@ public final class VoidClamMod {
                     0.02
                 );
             }
+            if (snowBiome) {
+                world.spawnParticles(
+                    ParticleTypes.CAMPFIRE_COSY_SMOKE,
+                    px + (random.nextDouble() - 0.5) * 0.5,
+                    py + 0.25 + random.nextDouble() * 0.2,
+                    pz + (random.nextDouble() - 0.5) * 0.5,
+                    1,
+                    0.06, 0.18, 0.06,
+                    0.018
+                );
+                if (random.nextFloat() < 0.55f) {
+                    world.spawnParticles(
+                        ParticleTypes.LARGE_SMOKE,
+                        px + (random.nextDouble() - 0.5) * 0.45,
+                        py + 0.35,
+                        pz + (random.nextDouble() - 0.5) * 0.45,
+                        1,
+                        0.04, 0.14, 0.04,
+                        0.015
+                    );
+                }
+                if (random.nextFloat() < 0.35f) {
+                    world.spawnParticles(
+                        ParticleTypes.FLAME,
+                        px + (random.nextDouble() - 0.5) * 0.25,
+                        py + 0.2,
+                        pz + (random.nextDouble() - 0.5) * 0.25,
+                        1,
+                        0.01, 0.05, 0.01,
+                        0.008
+                    );
+                }
+            }
         }
+    }
+
+    /**
+     * Legacy wart/horn/hunger defense: player has at least one AABB corner in the open spherical shell
+     * strictly outside the approach push radius ({@code currentSize/4}) and inside the octahedron interior
+     * inscribed sphere (see {@link CommandToolbox#octahedronInteriorInscribedSphereRadius}).
+     */
+    private static boolean isPlayerInLegacyDefenseAnnulus(ServerPlayerEntity player, Clam m) {
+        double rPush = m.currentSize / 4.0;
+        double rIn = CommandToolbox.octahedronInteriorInscribedSphereRadius(m.currentSize);
+        if (rIn <= rPush) {
+            return false;
+        }
+        double cx = m.x + 0.5, cy = m.y + 0.5, cz = m.z + 0.5;
+        Box box = player.getBoundingBox();
+        for (double x : new double[]{box.minX, box.maxX}) {
+            for (double y : new double[]{box.minY, box.maxY}) {
+                for (double z : new double[]{box.minZ, box.maxZ}) {
+                    double dx = x - cx, dy = y - cy, dz = z - cz;
+                    double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (d > rPush && d <= rIn) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /** Defense for one clam (from {@link #tickLoadedClamCores} when interval matches). */
@@ -2107,7 +2195,7 @@ public final class VoidClamMod {
         SoundEvent soundRef = SoundEvents.BLOCK_NOTE_BLOCK_BASS;
         for (ServerPlayerEntity player : world.getPlayers()) {
             if (player.isSpectator()) continue;
-            if (!CommandToolbox.isPlayerInsideOctahedron(player, m)) continue;
+            if (!isPlayerInLegacyDefenseAnnulus(player, m)) continue;
             BlockPos playerBlock = player.getBlockPos();
             for (Direction d : Direction.values()) {
                 BlockPos adj = playerBlock.offset(d);
