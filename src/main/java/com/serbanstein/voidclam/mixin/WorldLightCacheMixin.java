@@ -39,9 +39,10 @@ public abstract class WorldLightCacheMixin {
             return;
         }
         World self = (World) (Object) this;
-        if (self.isClient() || !(self instanceof ServerWorld sw)) {
+        if (self.isClient() || !(self instanceof ServerWorld)) {
             return;
         }
+        ServerWorld sw = (ServerWorld) self;
         // Use requested `state` (successful apply) — avoid getBlockState here (heavy for beacon pyramids).
         VoidClamMod.enqueueLightCacheDeltaFromBlockChange(sw, pos, oldState, state);
     }

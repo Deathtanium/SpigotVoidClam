@@ -46,7 +46,8 @@ public final class CommandToolbox {
     public static List<String> pathfindingExecutorStatusLines() {
         List<String> lines = new ArrayList<>(3);
         ExecutorService ex = pathfindingExecutor;
-        if (ex instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
+        if (ex instanceof java.util.concurrent.ThreadPoolExecutor) {
+            java.util.concurrent.ThreadPoolExecutor tpe = (java.util.concurrent.ThreadPoolExecutor) ex;
             lines.add("pathfindingExecutor: poolSize=" + tpe.getPoolSize()
                 + " active=" + tpe.getActiveCount()
                 + " queue=" + tpe.getQueue().size()
@@ -62,7 +63,8 @@ public final class CommandToolbox {
 
     public static void configurePathfinderExecutorSize(int poolSize) {
         int n = Math.max(1, poolSize);
-        if (pathfindingExecutor instanceof java.util.concurrent.ThreadPoolExecutor tpe) {
+        if (pathfindingExecutor instanceof java.util.concurrent.ThreadPoolExecutor) {
+            java.util.concurrent.ThreadPoolExecutor tpe = (java.util.concurrent.ThreadPoolExecutor) pathfindingExecutor;
             tpe.setMaximumPoolSize(n);
             tpe.setCorePoolSize(n);
             return;

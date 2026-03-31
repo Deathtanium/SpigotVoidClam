@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -642,7 +643,7 @@ public final class Pathfinder {
 
     static List<ItemStack> getFortune3Drops(net.minecraft.block.Block block) {
         List<ItemStack> list = FORTUNE3_DROPS.get(block);
-        return list != null ? list.stream().map(ItemStack::copy).toList() : new ArrayList<>();
+        return list != null ? list.stream().map(ItemStack::copy).collect(Collectors.toList()) : new ArrayList<>();
     }
 
     static {
@@ -1065,9 +1066,10 @@ public final class Pathfinder {
         if (be == null) {
             return false;
         }
-        if (!(be instanceof Inventory inv)) {
+        if (!(be instanceof Inventory)) {
             return false;
         }
+        Inventory inv = (Inventory) be;
         int size = inv.size();
         for (int i = 0; i < size && !stack.isEmpty(); i++) {
             ItemStack inSlot = inv.getStack(i);

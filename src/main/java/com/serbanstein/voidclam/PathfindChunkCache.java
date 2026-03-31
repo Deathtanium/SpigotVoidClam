@@ -51,8 +51,8 @@ public final class PathfindChunkCache {
                     continue;
                 }
                 Chunk ch = world.getChunk(icx, icz);
-                if (ch instanceof WorldChunk wc) {
-                    m.put(columnKey(icx, icz), wc);
+                if (ch instanceof WorldChunk) {
+                    m.put(columnKey(icx, icz), (WorldChunk) ch);
                 }
             }
         }

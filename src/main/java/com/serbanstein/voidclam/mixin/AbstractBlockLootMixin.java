@@ -33,7 +33,8 @@ public abstract class AbstractBlockLootMixin {
         if (!((Object) this instanceof AbstractFurnaceBlock)) return;
         BlockEntity be = builder.get(LootContextParameters.BLOCK_ENTITY);
         if (!(be instanceof net.minecraft.block.entity.AbstractFurnaceBlockEntity)) return;
-        if (!(be.getWorld() instanceof ServerWorld sw)) return;
+        if (!(be.getWorld() instanceof ServerWorld)) return;
+        ServerWorld sw = (ServerWorld) be.getWorld();
         if (VoidClamMod.findClamAt(sw, be.getPos()) != null) {
             cir.setReturnValue(Collections.emptyList());
         }

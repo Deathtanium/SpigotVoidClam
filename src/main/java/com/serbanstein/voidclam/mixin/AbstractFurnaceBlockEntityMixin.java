@@ -14,17 +14,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Keep the blast furnace {@code lit} visuals in sync with clam wake state (vanilla smelting otherwise overwrites {@link AbstractFurnaceBlock#LIT}).
+ * 1.16 uses instance {@code tick()} — not the static {@code tick(World, BlockPos, ...)} from 1.18+.
  */
 @Mixin(AbstractFurnaceBlockEntity.class)
 public abstract class AbstractFurnaceBlockEntityMixin {
     @Inject(method = "tick", at = @At("TAIL"))
-    private static void voidclam$forceLitForClamCore(
-        ServerWorld world,
-        BlockPos pos,
-        BlockState state,
-        AbstractFurnaceBlockEntity blockEntity,
-        CallbackInfo ci
-    ) {
+    private void voidclam$forceLitForClamCore(CallbackInfo ci) {
+        AbstractFurnaceBlockEntity blockEntity = (AbstractFurnaceBlockEntity) (Object) this;
+        if (!(blockEntity.getWorld() instanceof ServerWorld)) {
+            return;
+        }
+        ServerWorld world = (ServerWorld) blockEntity.getWorld();
+        BlockPos pos = blockEntity.getPos();
+        BlockState state = blockEntity.getCachedState();
         if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
             return;
         }

@@ -11,6 +11,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -272,7 +273,7 @@ public final class VoidClamConfig {
 
     private static Double tryReadLinuxCpufreqKhzToMhz(String sysfsPath) {
         try {
-            String s = Files.readString(Path.of(sysfsPath)).trim();
+            String s = new String(Files.readAllBytes(Paths.get(sysfsPath)), StandardCharsets.UTF_8).trim();
             long khz = Long.parseLong(s);
             if (khz <= 0L) {
                 return null;
@@ -286,7 +287,7 @@ public final class VoidClamConfig {
     private static Double tryReadLinuxProcCpuinfoMaxMhz() {
         try {
             double max = -1.0;
-            for (String line : Files.readAllLines(Path.of("/proc/cpuinfo"))) {
+            for (String line : Files.readAllLines(Paths.get("/proc/cpuinfo"), StandardCharsets.UTF_8)) {
                 line = line.trim();
                 if (line.startsWith("cpu MHz")) {
                     int c = line.indexOf(':');

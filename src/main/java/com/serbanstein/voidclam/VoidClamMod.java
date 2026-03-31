@@ -50,7 +50,19 @@ public final class VoidClamMod {
 
     private static final Map<UUID, Clam> clamsById = new ConcurrentHashMap<>();
 
-    private record PendingLightCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {}
+    private static final class PendingLightCacheDelta {
+        final ServerWorld world;
+        final BlockPos pos;
+        final BlockState oldState;
+        final BlockState newState;
+
+        PendingLightCacheDelta(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
+            this.world = world;
+            this.pos = pos;
+            this.oldState = oldState;
+            this.newState = newState;
+        }
+    }
     /** Avoid synchronous cache work inside {@code World#setBlockState} (beacon/pyramid causes huge update chains). */
     private static final ConcurrentLinkedQueue<PendingLightCacheDelta> pendingLightCacheDeltas = new ConcurrentLinkedQueue<>();
     /** Captured in break {@code BEFORE} while the clam core block entity still exists (for item drop components). */
@@ -70,7 +82,15 @@ public final class VoidClamMod {
     private static final Queue<KillRequest> pendingClamKills = new ConcurrentLinkedQueue<>();
     private static MinecraftServer pendingKillDrainServer;
 
-    private record KillRequest(UUID victimId, boolean saveAfter) {}
+    private static final class KillRequest {
+        final UUID victimId;
+        final boolean saveAfter;
+
+        KillRequest(UUID victimId, boolean saveAfter) {
+            this.victimId = victimId;
+            this.saveAfter = saveAfter;
+        }
+    }
     /** When non-null, grow is pending: seeks are false, waiting for paths to finish before running grow. */
     private static ServerWorld growPendingWorld = null;
     /** When non-null, single-clam grow/repair pending for this id. */
@@ -100,9 +120,25 @@ public final class VoidClamMod {
     private static final Set<Block> ores = new HashSet<>();
     private static final Set<Block> fullBlockLightEnergy2 = new HashSet<>();
     private static final Set<Block> baseCost = new HashSet<>();
-    public record ShellDamageStats(int obsidianPresent, int shellMissing) {
+    public static final class ShellDamageStats {
+        public final int obsidianPresent;
+        public final int shellMissing;
+
+        public ShellDamageStats(int obsidianPresent, int shellMissing) {
+            this.obsidianPresent = obsidianPresent;
+            this.shellMissing = shellMissing;
+        }
+
         public int shellTotal() {
             return obsidianPresent + shellMissing;
+        }
+
+        public int obsidianPresent() {
+            return obsidianPresent;
+        }
+
+        public int shellMissing() {
+            return shellMissing;
         }
     }
 
@@ -266,7 +302,7 @@ public final class VoidClamMod {
         if (next == null) {
             return;
         }
-        UUID victimId = next.victimId();
+        UUID victimId = next.victimId;
         Clam victim = clamsById.get(victimId);
         if (victim == null) {
             tryStartNextClamKillDrainLocked();
@@ -488,8 +524,8 @@ public final class VoidClamMod {
         BlockPos pos = new BlockPos(m.x, m.y, m.z);
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
         BlockEntity be = world.getBlockEntity(pos);
-        if (be instanceof AbstractFurnaceBlockEntity furnace) {
-            SearingHeartItems.syncClamToBlockEntity(furnace, m);
+        if (be instanceof AbstractFurnaceBlockEntity) {
+            SearingHeartItems.syncClamToBlockEntity((AbstractFurnaceBlockEntity) be, m);
         }
     }
 
@@ -550,7 +586,8 @@ public final class VoidClamMod {
 
     public static void applySearingHeartBlockLabel(ServerWorld world, BlockPos pos) {
         BlockEntity be = world.getBlockEntity(pos);
-        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return;
+        if (!(be instanceof AbstractFurnaceBlockEntity)) return;
+        AbstractFurnaceBlockEntity furnace = (AbstractFurnaceBlockEntity) be;
         if (SearingHeartItems.SEARING_NAME.equals(furnace.getCustomName())) {
             return;
         }
@@ -564,8 +601,8 @@ public final class VoidClamMod {
         BlockState state = VoidClamCoreBlocks.CORE_BLOCK.getDefaultState().with(AbstractFurnaceBlock.LIT, lit);
         world.setBlockState(pos, state);
         BlockEntity be = world.getBlockEntity(pos);
-        if (m != null && be instanceof AbstractFurnaceBlockEntity furnace) {
-            SearingHeartItems.syncClamToBlockEntity(furnace, m);
+        if (m != null && be instanceof AbstractFurnaceBlockEntity) {
+            SearingHeartItems.syncClamToBlockEntity((AbstractFurnaceBlockEntity) be, m);
         } else {
             applySearingHeartBlockLabel(world, pos);
         }
@@ -1094,8 +1131,10 @@ public final class VoidClamMod {
     /** Fuel-slot items that can wake a dormant clam: edible light blocks (as items) or anything the fuel registry accepts. */
     public static boolean isClamWakeFuel(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) return false;
-        if (stack.getItem() instanceof BlockItem bi && isLight(bi.getBlock())) {
-            return true;
+        if (stack.getItem() instanceof BlockItem) {
+            if (isLight(((BlockItem) stack.getItem()).getBlock())) {
+                return true;
+            }
         }
         return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
     }
@@ -1108,7 +1147,8 @@ public final class VoidClamMod {
         BlockPos pos = new BlockPos(m.x, m.y, m.z);
         if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
         BlockEntity be = world.getBlockEntity(pos);
-        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return;
+        if (!(be instanceof AbstractFurnaceBlockEntity)) return;
+        AbstractFurnaceBlockEntity furnace = (AbstractFurnaceBlockEntity) be;
         ItemStack fuel = furnace.getStack(CLAM_CORE_FUEL_SLOT);
         if (fuel.isEmpty() || !isClamWakeFuel(world, fuel)) return;
         fuel.setCount(fuel.getCount() - 1);

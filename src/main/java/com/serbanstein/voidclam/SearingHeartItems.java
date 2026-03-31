@@ -26,7 +26,18 @@ public final class SearingHeartItems {
     private static final String ROOT_KEY = "voidclam";
     private static final String CLAM_NBT_SUBKEY = "module";
 
-    public record PersistedSeekCacheSnapshot(int lightsC, int oresC, int oresBL, boolean hadVoidclamClamNbt) {
+    public static final class PersistedSeekCacheSnapshot {
+        public final int lightsC;
+        public final int oresC;
+        public final int oresBL;
+        public final boolean hadVoidclamClamNbt;
+
+        public PersistedSeekCacheSnapshot(int lightsC, int oresC, int oresBL, boolean hadVoidclamClamNbt) {
+            this.lightsC = lightsC;
+            this.oresC = oresC;
+            this.oresBL = oresBL;
+            this.hadVoidclamClamNbt = hadVoidclamClamNbt;
+        }
     }
 
     private SearingHeartItems() {

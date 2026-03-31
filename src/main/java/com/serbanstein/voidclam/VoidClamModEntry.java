@@ -24,19 +24,22 @@ import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 
 /** Fabric mod entrypoint: lifecycle, server tick hook, and commands. */
 public class VoidClamModEntry implements ModInitializer {
     private static final int TICK_OMNI_PULSE = 5 * 20;     // omnidirectional pulse every ~5s
     private static final int TICK_CLEANUP = 60 * 20;       // stray tendril display cleanup every 1 min
     /** Players who may use /voidclam without gamemaster permission (case-insensitive name match). */
-    private static final Set<String> VOIDCLAM_TRUSTED_PLAYER_NAMES_LOWER = Set.of("serbanstein");
+    private static final Set<String> VOIDCLAM_TRUSTED_PLAYER_NAMES_LOWER = Collections.singleton("serbanstein");
 
     private static boolean canUseVoidclamCommands(ServerCommandSource source) {
         if (source.hasPermissionLevel(2)) {
@@ -60,12 +63,13 @@ public class VoidClamModEntry implements ModInitializer {
             VoidClamMod.clearBreakingClamFurnaceComponentsCapture();
         });
         PlayerBlockBreakEvents.AFTER.register((world, player, pos, state, blockEntity) -> {
-            if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return;
+            if (world.isClient() || !(world instanceof ServerWorld)) return;
             if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
-            VoidClamMod.onClamCoreBroken(serverWorld, player, pos, state);
+            VoidClamMod.onClamCoreBroken((ServerWorld) world, player, pos, state);
         });
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-            if (world.isClient() || !(world instanceof ServerWorld serverWorld)) return ActionResult.PASS;
+            if (world.isClient() || !(world instanceof ServerWorld)) return ActionResult.PASS;
+            ServerWorld serverWorld = (ServerWorld) world;
             BlockPos pos = hitResult.getBlockPos();
             if (!world.getBlockState(pos).isOf(VoidClamCoreBlocks.CORE_BLOCK)) return ActionResult.PASS;
             if (VoidClamMod.findClamAt(serverWorld, pos) == null) return ActionResult.PASS;
@@ -176,7 +180,7 @@ public class VoidClamModEntry implements ModInitializer {
                                     int y = IntegerArgumentType.getInteger(ctx, "y");
                                     int z = IntegerArgumentType.getInteger(ctx, "z");
                                     ServerWorld world = ctx.getSource().getWorld();
-                                    var id = VoidClamMod.makeStub(world, x, y, z);
+                                    UUID id = VoidClamMod.makeStub(world, x, y, z);
                                     if (id == null) {
                                         ctx.getSource().sendError(new LiteralText("Could not create voidclam (limit reached?)"));
                                         return 0;
@@ -261,7 +265,7 @@ public class VoidClamModEntry implements ModInitializer {
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             try {
-                                var path = CommandToolbox.writeClamHeartNbtDumpFile(ctx.getSource().getMinecraftServer(), m);
+                                Path path = CommandToolbox.writeClamHeartNbtDumpFile(ctx.getSource().getMinecraftServer(), m);
                                 ctx.getSource().sendFeedback(
                                     new LiteralText("Wrote heart NBT to " + path.toAbsolutePath()),
                                     false);
@@ -361,7 +365,8 @@ public class VoidClamModEntry implements ModInitializer {
                         })))
                 .then(CommandManager.literal("info")
                     .executes(ctx -> {
-                        if (ctx.getSource().getEntity() instanceof ServerPlayerEntity player) {
+                        if (ctx.getSource().getEntity() instanceof ServerPlayerEntity) {
+                            ServerPlayerEntity player = (ServerPlayerEntity) ctx.getSource().getEntity();
                             Vec3d pos = player.getPos();
                             Clam closest = null;
                             double best = Double.MAX_VALUE;
@@ -433,20 +438,22 @@ public class VoidClamModEntry implements ModInitializer {
                     }))
                 .then(CommandManager.literal("giveheart")
                     .executes(ctx -> {
-                        if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
+                        if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity)) {
                             ctx.getSource().sendError(new LiteralText("giveheart must be run by a player"));
                             return 0;
                         }
+                        ServerPlayerEntity player = (ServerPlayerEntity) ctx.getSource().getEntity();
                         player.inventory.offerOrDrop(player.world, SearingHeartItems.createFreshHeartStack());
                         ctx.getSource().sendFeedback( new LiteralText("Gave Searing Heart."), true);
                         return 1;
                     })
                     .then(CommandManager.argument("count", IntegerArgumentType.integer(1, 64))
                         .executes(ctx -> {
-                            if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
+                            if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity)) {
                                 ctx.getSource().sendError(new LiteralText("giveheart must be run by a player"));
                                 return 0;
                             }
+                            ServerPlayerEntity player = (ServerPlayerEntity) ctx.getSource().getEntity();
                             int count = IntegerArgumentType.getInteger(ctx, "count");
                             for (int i = 0; i < count; i++) {
                                 player.inventory.offerOrDrop(player.world, SearingHeartItems.createFreshHeartStack());

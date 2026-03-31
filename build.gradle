@@ -23,6 +23,7 @@ dependencies {
     implementation "com.google.code.gson:gson:2.10.1"
     include "com.google.code.gson:gson:2.10.1"
     implementation "org.slf4j:slf4j-api:1.7.36"
+    include "org.slf4j:slf4j-api:1.7.36"
 }
 
 processResources {
@@ -34,8 +35,8 @@ processResources {
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
     withSourcesJar()
 }
 
