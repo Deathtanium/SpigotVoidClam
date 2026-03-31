@@ -22,7 +22,7 @@ public abstract class BlockItemPlaceMixin {
     @Inject(method = "place(Lnet/minecraft/item/ItemPlacementContext;Lnet/minecraft/block/BlockState;)Z", at = @At("HEAD"))
     private void voidclam$captureSearing(ItemPlacementContext context, BlockState state, CallbackInfoReturnable<Boolean> cir) {
         ItemStack stack = context.getStack();
-        if (stack.isOf(Items.BLAST_FURNACE) && SearingHeartItems.isSearingHeartStack(stack)) {
+        if (stack.getItem() == Items.BLAST_FURNACE && SearingHeartItems.isSearingHeartStack(stack)) {
             VOIDCLAM_SEARING_CAPTURE.set(stack.copy());
         }
     }
@@ -33,8 +33,8 @@ public abstract class BlockItemPlaceMixin {
         VOIDCLAM_SEARING_CAPTURE.remove();
         if (!Boolean.TRUE.equals(cir.getReturnValue()) || captured == null) return;
         World world = context.getWorld();
-        if (world.isClient() || !(world instanceof ServerWorld sw)) return;
-        if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
-        VoidClamMod.onSearingHeartItemPlaced(sw, context.getBlockPos(), captured);
+        if (world.isClient() || !(world instanceof ServerWorld)) return;
+        if (state.getBlock() != VoidClamCoreBlocks.CORE_BLOCK) return;
+        VoidClamMod.onSearingHeartItemPlaced((ServerWorld) world, context.getBlockPos(), captured);
     }
 }

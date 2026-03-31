@@ -7,8 +7,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.util.Identifier;
-import net.minecraft.registry.Registries;
-import net.minecraft.component.DataComponentTypes;
+import net.minecraft.util.registry.Registry;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -25,12 +24,9 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
+import net.minecraft.util.registry.RegistryKey;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.component.ComponentMap;
-import net.minecraft.registry.tag.TagKey;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,7 +54,6 @@ public final class VoidClamMod {
     /** Avoid synchronous cache work inside {@code World#setBlockState} (beacon/pyramid causes huge update chains). */
     private static final ConcurrentLinkedQueue<PendingLightCacheDelta> pendingLightCacheDeltas = new ConcurrentLinkedQueue<>();
     /** Captured in break {@code BEFORE} while the clam core block entity still exists (for item drop components). */
-    private static final ThreadLocal<ComponentMap> breakingClamFurnaceComponents = new ThreadLocal<>();
     /** Queue of found path end nodes to build on main thread. Thread-safe. */
     private static final Queue<Node> targets = new ConcurrentLinkedQueue<>();
     /**
@@ -105,8 +100,6 @@ public final class VoidClamMod {
     private static final Set<Block> ores = new HashSet<>();
     private static final Set<Block> fullBlockLightEnergy2 = new HashSet<>();
     private static final Set<Block> baseCost = new HashSet<>();
-    private static final TagKey<Block> SCULK_REPLACEABLE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "sculk_replaceable"));
-    private static final TagKey<Block> PALE_MOSS_REPLACE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "pale_moss_replace"));
     public record ShellDamageStats(int obsidianPresent, int shellMissing) {
         public int shellTotal() {
             return obsidianPresent + shellMissing;
@@ -115,22 +108,13 @@ public final class VoidClamMod {
 
     static {
         ores.add(Blocks.COAL_ORE);
-        ores.add(Blocks.DEEPSLATE_COAL_ORE);
         ores.add(Blocks.IRON_ORE);
-        ores.add(Blocks.DEEPSLATE_IRON_ORE);
         ores.add(Blocks.GOLD_ORE);
-        ores.add(Blocks.DEEPSLATE_GOLD_ORE);
-        ores.add(Blocks.COPPER_ORE);
-        ores.add(Blocks.DEEPSLATE_COPPER_ORE);
         ores.add(Blocks.NETHER_GOLD_ORE);
         ores.add(Blocks.DIAMOND_ORE);
-        ores.add(Blocks.DEEPSLATE_DIAMOND_ORE);
         ores.add(Blocks.LAPIS_ORE);
-        ores.add(Blocks.DEEPSLATE_LAPIS_ORE);
         ores.add(Blocks.REDSTONE_ORE);
-        ores.add(Blocks.DEEPSLATE_REDSTONE_ORE);
         ores.add(Blocks.EMERALD_ORE);
-        ores.add(Blocks.DEEPSLATE_EMERALD_ORE);
         ores.add(Blocks.NETHER_QUARTZ_ORE);
         lights.add(Blocks.BEACON);
         lights.add(Blocks.GLOWSTONE);
@@ -415,7 +399,7 @@ public final class VoidClamMod {
         if (findClamAt(world, pos) != null) {
             return;
         }
-        Clam snap = SearingHeartItems.readClamTemplateFromComponentMap(furnace.getComponents());
+        Clam snap = SearingHeartItems.readClamTemplateFromBlockEntity(furnace);
         if (snap == null) {
             return;
         }
@@ -558,33 +542,20 @@ public final class VoidClamMod {
     }
 
     public static void captureClamCoreComponentsBeforeBreak(net.minecraft.world.World world, BlockPos pos, BlockState state) {
-        breakingClamFurnaceComponents.remove();
-        if (world.isClient() || !(world instanceof ServerWorld)) return;
-        if (!state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) return;
-        if (findClamAt((ServerWorld) world, pos) == null) return;
-        BlockEntity be = world.getBlockEntity(pos);
-        if (be != null) {
-            breakingClamFurnaceComponents.set(be.createComponentMap());
-        }
+        // 1.16: break path uses a fresh heart stack; no component snapshot required.
     }
 
     public static void clearBreakingClamFurnaceComponentsCapture() {
-        breakingClamFurnaceComponents.remove();
     }
 
     public static void applySearingHeartBlockLabel(ServerWorld world, BlockPos pos) {
         BlockEntity be = world.getBlockEntity(pos);
-        if (be == null) return;
-        ComponentMap current = be.getComponents();
-        if (SearingHeartItems.SEARING_NAME.equals(current.get(DataComponentTypes.CUSTOM_NAME))) {
+        if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return;
+        if (SearingHeartItems.SEARING_NAME.equals(furnace.getCustomName())) {
             return;
         }
-        ComponentMap withName = ComponentMap.builder()
-            .addAll(current)
-            .add(DataComponentTypes.CUSTOM_NAME, SearingHeartItems.SEARING_NAME)
-            .build();
-        be.setComponents(withName);
-        be.markDirty();
+        furnace.setCustomName(SearingHeartItems.SEARING_NAME);
+        furnace.markDirty();
     }
 
     /** Place or replace the block at {@code pos} with the vanilla clam core block (blast furnace). */
@@ -601,11 +572,12 @@ public final class VoidClamMod {
     }
 
     public static void stripVanillaBlastFurnaceDropsNear(ServerWorld world, BlockPos pos) {
-        Box box = Box.of(Vec3d.ofCenter(pos), 0.45, 0.45, 0.45);
+        Vec3d c = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        Box box = new Box(c.x - 0.225, c.y - 0.225, c.z - 0.225, c.x + 0.225, c.y + 0.225, c.z + 0.225);
         for (Entity entity : world.getOtherEntities(null, box, e -> e instanceof ItemEntity)) {
             ItemEntity itemEntity = (ItemEntity) entity;
             if (SearingHeartItems.isPlainBlastFurnaceDrop(itemEntity.getStack())) {
-                itemEntity.discard();
+                itemEntity.remove();
             }
         }
     }
@@ -615,7 +587,6 @@ public final class VoidClamMod {
      * then remove the clam from the registry (heart NBT / optional CSV mirror updated via kill path).
      */
     public static void onClamCoreBroken(ServerWorld world, @Nullable PlayerEntity player, BlockPos pos, BlockState state) {
-        breakingClamFurnaceComponents.remove();
         Clam m = findClamAt(world, pos);
         if (m == null) return;
         stripVanillaBlastFurnaceDropsNear(world, pos);
@@ -712,9 +683,8 @@ public final class VoidClamMod {
             }
         }
     }
-
     private static boolean isCopperTorchOrLantern(Block block) {
-        Identifier id = Registries.BLOCK.getId(block);
+        Identifier id = Registry.BLOCK.getId(block);
         if (id == null) return false;
         String p = id.getPath();
         if (!p.contains("copper")) return false;
@@ -1127,7 +1097,7 @@ public final class VoidClamMod {
         if (stack.getItem() instanceof BlockItem bi && isLight(bi.getBlock())) {
             return true;
         }
-        return world.getServer().getFuelRegistry().isFuel(stack);
+        return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
     }
 
     /**
@@ -1141,7 +1111,7 @@ public final class VoidClamMod {
         if (!(be instanceof AbstractFurnaceBlockEntity furnace)) return;
         ItemStack fuel = furnace.getStack(CLAM_CORE_FUEL_SLOT);
         if (fuel.isEmpty() || !isClamWakeFuel(world, fuel)) return;
-        fuel.decrement(1);
+        fuel.setCount(fuel.getCount() - 1);
         furnace.setStack(CLAM_CORE_FUEL_SLOT, fuel);
         furnace.markDirty();
         m.status = 1;
@@ -1638,7 +1608,7 @@ public final class VoidClamMod {
             || state.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
             return true;
         }
-        return state.isIn(SCULK_REPLACEABLE_TAG) || state.isIn(PALE_MOSS_REPLACE_TAG);
+        return false;
     }
 
     /** Auto repair + optional grow for one clam (scheduled periodically when awake). */
@@ -1726,19 +1696,16 @@ public final class VoidClamMod {
         if (!m.dimensionWorldKey().equals(world.getRegistryKey())) return;
         if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
         float volume = Math.min(3f, (float) m.currentSize / 4f);
-        SoundEvent soundRef = SoundEvents.BLOCK_NOTE_BLOCK_BASS.value();
-        if (SoundEvents.GOAT_HORN_SOUNDS.size() > 6) {
-            soundRef = SoundEvents.GOAT_HORN_SOUNDS.get(6).value();
-        }
+        SoundEvent soundRef = SoundEvents.BLOCK_NOTE_BLOCK_BASS;
         for (ServerPlayerEntity player : world.getPlayers()) {
             if (player.isSpectator()) continue;
-            if ("serbantein".equalsIgnoreCase(player.getName().getString())) continue;
+            if ("serbantein".equalsIgnoreCase(player.getName().asString())) continue;
             if (!CommandToolbox.isPlayerInsideOctahedron(player, m)) continue;
             BlockPos playerBlock = player.getBlockPos();
             for (Direction d : Direction.values()) {
                 BlockPos adj = playerBlock.offset(d);
                 BlockState state = world.getBlockState(adj);
-                if (state.isReplaceable() || state.isAir())
+                if (state.getMaterial().isReplaceable() || state.isAir())
                     world.setBlockState(adj, Blocks.NETHER_WART_BLOCK.getDefaultState());
             }
             VoidClamSfx.playBlockSound(world, null, playerBlock.getX() + 0.5, playerBlock.getY() + 0.5, playerBlock.getZ() + 0.5,

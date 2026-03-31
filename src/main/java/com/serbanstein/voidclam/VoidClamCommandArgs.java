@@ -5,7 +5,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.text.Text;
+import net.minecraft.text.LiteralText;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.UUID;
@@ -13,9 +13,9 @@ import java.util.UUID;
 /** Parse {@code /voidclam} target strings: UUID (with dashes or 32 hex) or three integers {@code x y z}. */
 public final class VoidClamCommandArgs {
     private static final SimpleCommandExceptionType BAD_TARGET = new SimpleCommandExceptionType(
-        Text.literal("Expected UUID or three integers x y z"));
+        new LiteralText("Expected UUID or three integers x y z"));
     private static final SimpleCommandExceptionType UNKNOWN = new SimpleCommandExceptionType(
-        Text.literal("No voidclam at that UUID or block position"));
+        new LiteralText("No voidclam at that UUID or block position"));
 
     private VoidClamCommandArgs() {
     }

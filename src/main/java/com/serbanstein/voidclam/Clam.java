@@ -1,6 +1,6 @@
 package com.serbanstein.voidclam;
 
-import net.minecraft.registry.RegistryKey;
+import net.minecraft.util.registry.RegistryKey;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 

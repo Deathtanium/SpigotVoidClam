@@ -6,9 +6,9 @@ import net.minecraft.block.entity.MobSpawnerBlockEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
-import net.minecraft.util.math.random.Random;
 import net.minecraft.world.chunk.WorldChunk;
 
+import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -31,7 +31,7 @@ public final class NaturalSpawnHandler {
         }
         long key = chunkKey(world, cp.x, cp.z);
         if (spawnedChunks.putIfAbsent(key, Boolean.TRUE) != null) return;
-        Random rand = Random.create(cp.x * 31L ^ cp.z);
+        Random rand = new Random(cp.x * 31L ^ cp.z);
         if (rand.nextDouble() >= cfg.clam_spawn_natural_default_chunk_chance) return;
         trySpawnAtChunkCenter(world, cp, rand);
     }
@@ -42,14 +42,14 @@ public final class NaturalSpawnHandler {
 
     private static void scanChunkForSpawners(ServerWorld world, WorldChunk chunk) {
         VoidClamConfig cfg = VoidClamConfig.get();
-        Random rand = Random.create(world.getSeed() ^ ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z));
+        Random rand = new Random(world.getSeed() ^ ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z));
         ChunkPos cp = chunk.getPos();
         int baseX = cp.getStartX();
         int baseZ = cp.getStartZ();
         BlockPos.Mutable m = new BlockPos.Mutable();
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
-                for (int y = world.getBottomY(); y < world.getBottomY() + world.getDimension().height(); y++) {
+                for (int y = 0; y < world.getDimensionHeight(); y++) {
                     m.set(baseX + x, y, baseZ + z);
                     BlockState st = chunk.getBlockState(m);
                     if (!st.isOf(Blocks.SPAWNER)) continue;
@@ -68,15 +68,15 @@ public final class NaturalSpawnHandler {
     }
 
     private static void trySpawnAtChunkCenter(ServerWorld world, ChunkPos cp, Random rand) {
-        int centerX = cp.getCenterX() + rand.nextBetween(-2, 2);
-        int centerZ = cp.getCenterZ() + rand.nextBetween(-2, 2);
+        int centerX = cp.getStartX() + 8 + rand.nextInt(5) - 2;
+        int centerZ = cp.getStartZ() + 8 + rand.nextInt(5) - 2;
         if (!world.isChunkLoaded(centerX >> 4, centerZ >> 4)) return;
-        int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE_WG, centerX, centerZ);
-        if (surfaceY <= world.getBottomY()) return;
+        int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING, centerX, centerZ);
+        if (surfaceY <= 0) return;
         int clearanceR = 3 + rand.nextInt(3);
         int clearR = clearanceR + 1;
         int centerY = surfaceY - clearR - 2;
-        int minY = world.getBottomY() + clearR + 1;
+        int minY = clearR + 1;
         if (centerY < minY) return;
         clearSphere(world, centerX, centerY, centerZ, clearR);
         VoidClamMod.makeStub(world, centerX, centerY, centerZ);

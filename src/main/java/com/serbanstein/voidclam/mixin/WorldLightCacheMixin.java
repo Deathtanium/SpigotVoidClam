@@ -35,7 +35,7 @@ public abstract class WorldLightCacheMixin {
             return;
         }
         BlockState oldState = dq.pop();
-        if (!cir.getReturnValueZ()) {
+        if (!Boolean.TRUE.equals(cir.getReturnValue())) {
             return;
         }
         World self = (World) (Object) this;

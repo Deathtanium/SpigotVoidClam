@@ -1,5 +1,5 @@
 plugins {
-    id 'fabric-loom' version '1.14-SNAPSHOT'
+    id 'fabric-loom' version '1.10.1'
     id 'maven-publish'
 }
 
@@ -20,8 +20,9 @@ dependencies {
     mappings "net.fabricmc:yarn:${project.findProperty('yarn.mappings')}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.findProperty('loader.version')}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.findProperty('fabric.version')}"
-    implementation "com.google.code.gson:gson:2.11.0"
-    include "com.google.code.gson:gson:2.11.0"
+    implementation "com.google.code.gson:gson:2.10.1"
+    include "com.google.code.gson:gson:2.10.1"
+    implementation "org.slf4j:slf4j-api:1.7.36"
 }
 
 processResources {
@@ -48,7 +49,6 @@ loom {
     runs {
         server {
             server()
-            vmArgs '-Dfabric.api.gametest=1'
             runDir 'run'
         }
     }

@@ -694,11 +694,12 @@ public final class CommandToolbox {
         if (!(be instanceof AbstractFurnaceBlockEntity)) {
             throw new IOException("heart block entity missing or not a furnace");
         }
-        NbtCompound tag = be.createNbtWithIdentifyingData(server.getRegistryManager());
-        Path dir = server.getRunDirectory().resolve("voidclam-nbt-dumps");
+        NbtCompound tag = new NbtCompound();
+        be.writeNbt(tag);
+        Path dir = server.getRunDirectory().toPath().resolve("voidclam-nbt-dumps");
         Files.createDirectories(dir);
         Path file = dir.resolve(m.clamId.toString() + ".nbt");
-        NbtIo.writeCompressed(tag, file);
+        NbtIo.writeCompressed(tag, file.toFile());
         return file;
     }
 }

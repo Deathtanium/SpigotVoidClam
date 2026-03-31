@@ -13,7 +13,7 @@ public final class VoidClamSfx {
     public static void playBlockSound(ServerWorld world, Entity entity, double x, double y, double z,
                                       SoundEvent sound, SoundCategory category, float volume, float pitch) {
         float v = (float) (volume * VoidClamConfig.get().sfx_volume_multiplier);
-        world.playSound(entity, x, y, z, sound, category, v, pitch);
+        world.playSound(null, x, y, z, sound, category, v, pitch);
     }
 
     public static void playBlockSound(ServerWorld world, BlockPos pos, SoundEvent sound, SoundCategory category,

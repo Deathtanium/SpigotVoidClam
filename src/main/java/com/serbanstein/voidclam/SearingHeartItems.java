@@ -1,37 +1,31 @@
 package com.serbanstein.voidclam;
 
-import net.minecraft.component.ComponentMap;
-import net.minecraft.component.DataComponentTypes;
-import net.minecraft.component.type.NbtComponent;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.nbt.NbtCompound;
-import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
+import net.minecraft.text.LiteralText;
+import net.minecraft.text.Style;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.registry.Registry;
+import net.minecraft.util.registry.RegistryKey;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.UUID;
 
 /**
- * Vanilla blast furnace items tagged in {@link DataComponentTypes#CUSTOM_DATA} so clam state stays server-side
- * without a custom item registry entry. Furnace block data is merged from {@link BlockEntity#createComponentMap()}
- * captured before the block is removed.
+ * Vanilla blast furnace items tagged with {@link ItemStack} NBT so clam state stays server-side
+ * without a custom item registry entry.
  */
 public final class SearingHeartItems {
-    public static final Text SEARING_NAME = Text.literal("Searing Heart")
-        .styled(s -> s.withColor(Formatting.RED).withBold(true).withItalic(false));
+    public static final Text SEARING_NAME = new LiteralText("Searing Heart").setStyle(
+        Style.EMPTY.withColor(Formatting.RED).withBold(true));
     private static final String ROOT_KEY = "voidclam";
     private static final String CLAM_NBT_SUBKEY = "module";
 
-    /**
-     * Seek caches / blacklists are no longer written to the heart NBT; this snapshot supports legacy reads and
-     * always reports zero persisted list sizes when lists were removed from {@link #writeClamNbt}.
-     */
     public record PersistedSeekCacheSnapshot(int lightsC, int oresC, int oresBL, boolean hadVoidclamClamNbt) {
     }
 
@@ -39,17 +33,14 @@ public final class SearingHeartItems {
     }
 
     public static boolean isSearingHeartStack(ItemStack stack) {
-        if (stack.isEmpty() || !stack.isOf(Items.BLAST_FURNACE)) return false;
-        NbtComponent data = stack.get(DataComponentTypes.CUSTOM_DATA);
-        if (data == null) return false;
-        NbtCompound root = data.copyNbt();
-        return root.getCompound(ROOT_KEY).flatMap(clam -> clam.getCompound(CLAM_NBT_SUBKEY)).isPresent();
+        if (stack.isEmpty() || stack.getItem() != Items.BLAST_FURNACE) return false;
+        NbtCompound root = stack.getTag();
+        if (root == null) return false;
+        NbtCompound clam = root.getCompound(ROOT_KEY);
+        if (clam.isEmpty()) return false;
+        return clam.contains(CLAM_NBT_SUBKEY, 10);
     }
 
-    /**
-     * New heart for {@code /voidclam giveheart}: same template defaults as a fresh stub ({@link VoidClamMod#makeStub}),
-     * excluding world position and {@link Clam#clamId} (assigned on placement).
-     */
     public static ItemStack createFreshHeartStack() {
         Clam template = new Clam();
         template.type = 1;
@@ -65,21 +56,19 @@ public final class SearingHeartItems {
         return createDropFromBreak(template, null);
     }
 
-    public static ItemStack createDropFromBreak(Clam m, @Nullable ComponentMap furnaceComponents) {
+    public static ItemStack createDropFromBreak(Clam m, @Nullable NbtCompound mergeFurnaceTag) {
         ItemStack stack = new ItemStack(Items.BLAST_FURNACE, 1);
-        if (furnaceComponents != null) {
-            stack.applyComponentsFrom(furnaceComponents);
+        if (mergeFurnaceTag != null) {
+            NbtCompound tag = mergeFurnaceTag.copy();
+            tag.remove("voidclam");
+            stack.setTag(tag);
         }
-        stack.set(DataComponentTypes.CUSTOM_NAME, SEARING_NAME);
-        NbtCompound root = new NbtCompound();
-        NbtComponent existingData = stack.get(DataComponentTypes.CUSTOM_DATA);
-        if (existingData != null) {
-            root.copyFrom(existingData.copyNbt());
-        }
+        stack.setCustomName(SEARING_NAME);
+        NbtCompound root = stack.getTag() != null ? stack.getTag().copy() : new NbtCompound();
         NbtCompound clam = new NbtCompound();
         clam.put(CLAM_NBT_SUBKEY, writeClamNbt(m));
         root.put(ROOT_KEY, clam);
-        stack.set(DataComponentTypes.CUSTOM_DATA, NbtComponent.of(root));
+        stack.setTag(root);
         return stack;
     }
 
@@ -105,55 +94,53 @@ public final class SearingHeartItems {
     }
 
     public static @Nullable Clam readClamTemplateFromStack(ItemStack stack) {
-        NbtComponent data = stack.get(DataComponentTypes.CUSTOM_DATA);
-        if (data == null) return null;
-        NbtCompound root = data.copyNbt();
-        return root.getCompound(ROOT_KEY)
-            .flatMap(clam -> clam.getCompound(CLAM_NBT_SUBKEY))
-            .map(SearingHeartItems::readClamNbt)
-            .orElse(null);
+        NbtCompound root = stack.getTag();
+        if (root == null || !root.contains(ROOT_KEY, 10)) return null;
+        NbtCompound clam = root.getCompound(ROOT_KEY);
+        if (!clam.contains(CLAM_NBT_SUBKEY, 10)) return null;
+        return readClamNbt(clam.getCompound(CLAM_NBT_SUBKEY));
     }
 
-    /** Same tags as a Searing Heart stack: read clam fields from a block entity's components. */
-    public static @Nullable Clam readClamTemplateFromComponentMap(ComponentMap components) {
-        NbtComponent data = components.get(DataComponentTypes.CUSTOM_DATA);
-        if (data == null) return null;
-        NbtCompound root = data.copyNbt();
-        return root.getCompound(ROOT_KEY)
-            .flatMap(clam -> clam.getCompound(CLAM_NBT_SUBKEY))
-            .map(SearingHeartItems::readClamNbt)
-            .orElse(null);
+    public static @Nullable Clam readClamTemplateFromBlockEntity(AbstractFurnaceBlockEntity furnace) {
+        if (furnace == null) return null;
+        NbtCompound tag = new NbtCompound();
+        furnace.writeNbt(tag);
+        NbtCompound clam = tag.getCompound(ROOT_KEY);
+        if (!tag.contains(ROOT_KEY, 10)) return null;
+        if (!clam.contains(CLAM_NBT_SUBKEY, 10)) return null;
+        return readClamNbt(clam.getCompound(CLAM_NBT_SUBKEY));
     }
 
     public static Clam readClamNbt(NbtCompound n) {
         Clam m = new Clam();
-        n.getString("clamId").ifPresent(s -> {
+        if (n.contains("clamId", 8)) {
             try {
-                m.clamId = UUID.fromString(s);
+                m.clamId = UUID.fromString(n.getString("clamId"));
             } catch (IllegalArgumentException ignored) {
             }
-        });
-        m.type = n.getInt("type").orElse(0);
-        m.currentSize = n.getInt("currentSize").orElse(1);
+        }
+        m.type = n.contains("type") ? n.getInt("type") : 0;
+        m.currentSize = n.contains("currentSize") ? n.getInt("currentSize") : 1;
         if (m.currentSize < 1) m.currentSize = 1;
-        m.status = n.getInt("status").orElse(0);
-        m.material = Math.max(0, n.getInt("material").orElse(0));
-        m.energy = n.getInt("energy").orElse(0);
-        m.age = n.getInt("age").orElse(0);
-        m.seekLights = n.getBoolean("seekLights").orElse(false);
-        m.seekOres = n.getBoolean("seekOres").orElse(false);
-        m.protectItself = n.getBoolean("protectItself").orElse(true);
-        m.stubBuilt = n.getBoolean("stubBuilt").orElse(true);
-        n.getString("dimension").ifPresent(str -> {
-            Identifier id = Identifier.tryParse(str);
-            if (id != null) {
-                m.worldKey = RegistryKey.of(RegistryKeys.WORLD, id);
+        m.status = n.contains("status") ? n.getInt("status") : 0;
+        m.material = Math.max(0, n.contains("material") ? n.getInt("material") : 0);
+        m.energy = n.contains("energy") ? n.getInt("energy") : 0;
+        m.age = n.contains("age") ? n.getInt("age") : 0;
+        m.seekLights = n.contains("seekLights") && n.getBoolean("seekLights");
+        m.seekOres = n.contains("seekOres") && n.getBoolean("seekOres");
+        m.protectItself = !n.contains("protectItself") || n.getBoolean("protectItself");
+        m.stubBuilt = !n.contains("stubBuilt") || n.getBoolean("stubBuilt");
+        if (n.contains("dimension", 8)) {
+            String str = n.getString("dimension");
+            try {
+                Identifier id = new Identifier(str);
+                m.worldKey = RegistryKey.of(Registry.WORLD_KEY, id);
+            } catch (Exception ignored) {
             }
-        });
+        }
         return m;
     }
 
-    /** Copy fields from {@code snapshot} onto {@code into} (coordinates unchanged; {@code clamId} copied only if set on snapshot). */
     public static void applyTemplateOntoClam(Clam snapshot, Clam into) {
         if (snapshot.clamId != null) {
             into.clamId = snapshot.clamId;
@@ -188,13 +175,9 @@ public final class SearingHeartItems {
     }
 
     public static boolean isPlainBlastFurnaceDrop(ItemStack stack) {
-        return stack.isOf(Items.BLAST_FURNACE) && !isSearingHeartStack(stack);
+        return stack.getItem() == Items.BLAST_FURNACE && !isSearingHeartStack(stack);
     }
 
-    /**
-     * Writes authoritative {@link Clam} fields into the heart blast furnace’s {@link DataComponentTypes#CUSTOM_DATA}
-     * so chunk save survives server restart (replaces CSV mirror).
-     */
     public static void syncClamToBlockEntity(AbstractFurnaceBlockEntity furnace, Clam m) {
         if (furnace == null || m == null) {
             return;
@@ -202,50 +185,27 @@ public final class SearingHeartItems {
         m.ensureClamId();
         m.material = Math.max(0, m.material);
         m.energy = Math.max(0, m.energy);
-        ComponentMap current = furnace.getComponents();
-        NbtCompound root = new NbtCompound();
-        NbtComponent existingData = current.get(DataComponentTypes.CUSTOM_DATA);
-        if (existingData != null) {
-            root.copyFrom(existingData.copyNbt());
-        }
+        NbtCompound tag = new NbtCompound();
+        furnace.writeNbt(tag);
         NbtCompound clam = new NbtCompound();
         clam.put(CLAM_NBT_SUBKEY, writeClamNbt(m));
-        root.put(ROOT_KEY, clam);
-        NbtComponent updatedData = NbtComponent.of(root);
-        boolean sameData = existingData != null && existingData.equals(updatedData);
-        boolean sameName = SEARING_NAME.equals(current.get(DataComponentTypes.CUSTOM_NAME));
-        if (sameData && sameName) {
-            return;
-        }
-        ComponentMap merged = ComponentMap.builder()
-            .addAll(current)
-            .add(DataComponentTypes.CUSTOM_DATA, updatedData)
-            .add(DataComponentTypes.CUSTOM_NAME, SEARING_NAME)
-            .build();
-        furnace.setComponents(merged);
+        tag.put(ROOT_KEY, clam);
+        furnace.fromTag(furnace.getCachedState(), tag);
+        furnace.setCustomName(SEARING_NAME);
         furnace.markDirty();
     }
 
-    /**
-     * Reads seek-cache list lengths from the furnace block entity’s custom data without requiring a {@link Clam} round-trip.
-     * Missing keys yield size {@code 0}; {@code hadVoidclamClamNbt} is false when no {@code voidclam/module} compound exists.
-     */
     public static PersistedSeekCacheSnapshot readPersistedSeekCacheSnapshot(AbstractFurnaceBlockEntity furnace) {
         if (furnace == null) {
             return new PersistedSeekCacheSnapshot(0, 0, 0, false);
         }
-        net.minecraft.component.ComponentMap current = furnace.getComponents();
-        NbtComponent data = current.get(DataComponentTypes.CUSTOM_DATA);
-        if (data == null) {
+        NbtCompound tag = new NbtCompound();
+        furnace.writeNbt(tag);
+        NbtCompound clam = tag.getCompound(ROOT_KEY);
+        if (!tag.contains(ROOT_KEY, 10)) {
             return new PersistedSeekCacheSnapshot(0, 0, 0, false);
         }
-        NbtCompound root = data.copyNbt();
-        var clamOpt = root.getCompound(ROOT_KEY);
-        if (clamOpt.isEmpty()) {
-            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
-        }
-        var modOpt = clamOpt.get().getCompound(CLAM_NBT_SUBKEY);
-        if (modOpt.isEmpty()) {
+        if (!clam.contains(CLAM_NBT_SUBKEY, 10)) {
             return new PersistedSeekCacheSnapshot(0, 0, 0, false);
         }
         return new PersistedSeekCacheSnapshot(0, 0, 0, true);

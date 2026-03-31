@@ -3,7 +3,6 @@ package com.serbanstein.voidclam.mixin;
 import com.serbanstein.voidclam.VoidClamMod;
 import com.serbanstein.voidclam.VoidClamCoreBlocks;
 import net.minecraft.block.AbstractFurnaceBlock;
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -30,11 +29,11 @@ public abstract class AbstractFurnaceBlockEntityMixin {
             return;
         }
         VoidClamMod.tryRegisterFromClamCoreBlockEntity(world, pos, blockEntity);
-        var clam = VoidClamMod.findClamAt(world, pos);
+        com.serbanstein.voidclam.Clam clam = VoidClamMod.findClamAt(world, pos);
         if (clam == null) return;
         boolean wantLit = clam.status == 1;
         if (state.get(AbstractFurnaceBlock.LIT) != wantLit) {
-            world.setBlockState(pos, state.with(AbstractFurnaceBlock.LIT, wantLit), Block.NOTIFY_LISTENERS);
+            world.setBlockState(pos, state.with(AbstractFurnaceBlock.LIT, wantLit), 2);
         }
     }
 }
