@@ -41,7 +41,6 @@ All commands are under `/voidclam`. Run **`/voidclam`** or **`/voidclam help`** 
 |--------|---------|
 | `make <x> <y> <z>` | Create a new clam (heart + stub) |
 | `kill <target>` | Remove clam (coordinated kill) |
-| `resize <size> <target>` | Set shell size (**size before target**) |
 | `repair <target>` | Safe repair when pathfinding idle |
 | `reach <target>` | Pathfind toward nearest light/ore per flags |
 | `grow <target>` | Safe grow +2 when idle |

@@ -161,7 +161,6 @@ public class VoidClamModEntry implements ModInitializer {
                         s.sendFeedback(() -> Text.literal("Voidclam commands (gamemaster or trusted player). Target = UUID or x y z at heart."), false);
                         s.sendFeedback(() -> Text.literal("make <x> <y> <z> — new clam"), false);
                         s.sendFeedback(() -> Text.literal("kill <target>"), false);
-                        s.sendFeedback(() -> Text.literal("resize <size> <target> — size first"), false);
                         s.sendFeedback(() -> Text.literal("repair <target> | reach <target> | grow <target> | storage <target>"), false);
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect set <true|false> <target> — bool before target"), false);
                         s.sendFeedback(() -> Text.literal("seek ores|lights|protect get <target>"), false);
@@ -191,33 +190,16 @@ public class VoidClamModEntry implements ModInitializer {
                                 })))))
                 .then(CommandManager.literal("kill")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             VoidClamMod.clamKill(ctx.getSource().getServer(), m.clamId, true);
                             ctx.getSource().sendMessage(Text.literal("Killed voidclam " + m.clamId));
                             return 1;
                         })))
-                .then(CommandManager.literal("resize")
-                    .then(CommandManager.argument("size", IntegerArgumentType.integer(1))
-                        .then(CommandManager.argument("target", StringArgumentType.greedyString())
-                            .executes(ctx -> {
-                                Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
-                                int tsize = IntegerArgumentType.getInteger(ctx, "size");
-                                int csize = m.currentSize;
-                                if (csize > tsize) {
-                                    ctx.getSource().sendError(Text.literal("target size cannot be smaller than current size"));
-                                    return 0;
-                                }
-                                int maxSize = VoidClamConfig.get().clam_size_max;
-                                if (tsize > maxSize) {
-                                    ctx.getSource().sendError(Text.literal("target size cannot exceed config clam_size_max (" + maxSize + ")"));
-                                    return 0;
-                                }
-                                CommandToolbox.clamReSize(ctx.getSource().getWorld(), m.clamId, tsize);
-                                return 1;
-                            }))))
                 .then(CommandManager.literal("repair")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             ServerWorld modWorld = resolveHeartWorldForCommands(ctx.getSource(), m);
@@ -242,6 +224,7 @@ public class VoidClamModEntry implements ModInitializer {
                         })))
                 .then(CommandManager.literal("reach")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             CommandToolbox.clamReach(ctx.getSource().getWorld(), m.clamId);
@@ -249,6 +232,7 @@ public class VoidClamModEntry implements ModInitializer {
                         })))
                 .then(CommandManager.literal("storage")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             m.ensureClamId();
@@ -263,6 +247,7 @@ public class VoidClamModEntry implements ModInitializer {
                         })))
                 .then(CommandManager.literal("dumpnbt")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             try {
@@ -282,6 +267,7 @@ public class VoidClamModEntry implements ModInitializer {
                         .then(CommandManager.literal("set")
                             .then(CommandManager.argument("value", BoolArgumentType.bool())
                                 .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                                    .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                                     .executes(ctx -> {
                                         Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                         boolean val = BoolArgumentType.getBool(ctx, "value");
@@ -291,6 +277,7 @@ public class VoidClamModEntry implements ModInitializer {
                                     }))))
                         .then(CommandManager.literal("get")
                             .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                                .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                                 .executes(ctx -> {
                                     Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                     ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek ores = " + m.seekOres));
@@ -300,6 +287,7 @@ public class VoidClamModEntry implements ModInitializer {
                         .then(CommandManager.literal("set")
                             .then(CommandManager.argument("value", BoolArgumentType.bool())
                                 .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                                    .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                                     .executes(ctx -> {
                                         Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                         boolean val = BoolArgumentType.getBool(ctx, "value");
@@ -309,6 +297,7 @@ public class VoidClamModEntry implements ModInitializer {
                                     }))))
                         .then(CommandManager.literal("get")
                             .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                                .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                                 .executes(ctx -> {
                                     Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                     ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " protect itself = " + m.protectItself));
@@ -318,6 +307,7 @@ public class VoidClamModEntry implements ModInitializer {
                         .then(CommandManager.literal("set")
                             .then(CommandManager.argument("value", BoolArgumentType.bool())
                                 .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                                    .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                                     .executes(ctx -> {
                                         Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                         boolean val = BoolArgumentType.getBool(ctx, "value");
@@ -327,6 +317,7 @@ public class VoidClamModEntry implements ModInitializer {
                                     }))))
                         .then(CommandManager.literal("get")
                             .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                                .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                                 .executes(ctx -> {
                                     Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                                     ctx.getSource().sendMessage(Text.literal("Voidclam " + m.clamId + " seek lights = " + m.seekLights));
@@ -334,6 +325,7 @@ public class VoidClamModEntry implements ModInitializer {
                                 })))))
                 .then(CommandManager.literal("status")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             MinecraftServer server = ctx.getSource().getServer();
@@ -395,6 +387,7 @@ public class VoidClamModEntry implements ModInitializer {
                         return 1;
                     })
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
@@ -404,6 +397,7 @@ public class VoidClamModEntry implements ModInitializer {
                         })))
                 .then(CommandManager.literal("grow")
                     .then(CommandManager.argument("target", StringArgumentType.greedyString())
+                        .suggests(VoidClamCommandArgs::suggestNearestClamUuid)
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             int maxSize = VoidClamConfig.get().clam_size_max;
