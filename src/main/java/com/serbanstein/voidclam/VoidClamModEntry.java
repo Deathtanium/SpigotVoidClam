@@ -168,7 +168,7 @@ public class VoidClamModEntry implements ModInitializer {
                 .then(CommandManager.literal("help")
                     .executes(ctx -> {
                         ServerCommandSource s = ctx.getSource();
-                        s.sendFeedback(() -> Text.literal("Voidclam commands (gamemaster or trusted player). Target = UUID or x y z at heart."), false);
+                        s.sendFeedback(() -> Text.literal("Voidclam commands (gamemaster / OP 2+ or trusted player). Target = UUID or x y z at heart."), false);
                         s.sendFeedback(() -> Text.literal("make <x> <y> <z> — new clam"), false);
                         s.sendFeedback(() -> Text.literal("kill <target>"), false);
                         s.sendFeedback(() -> Text.literal("repair <target> | reach <target> | grow <target> | storage <target>"), false);

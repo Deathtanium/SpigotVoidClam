@@ -700,7 +700,7 @@ public final class VoidClamMod {
 
     /**
      * Remove blast furnace item entities at the break position so {@link #onClamCoreBroken}'s single Searing Heart drop
-     * does not stack with vanilla loot (including a tagged Searing Heart when {@link AbstractFurnaceBlockMixin} did not suppress loot).
+     * does not stack with vanilla loot (including a tagged Searing Heart when {@link com.serbanstein.voidclam.mixin.AbstractBlockStateMixin} did not suppress loot).
      */
     public static void stripVanillaBlastFurnaceDropsNear(ServerWorld world, BlockPos pos) {
         Box box = Box.of(Vec3d.ofCenter(pos), 0.45, 0.45, 0.45);
