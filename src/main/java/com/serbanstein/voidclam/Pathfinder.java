@@ -697,8 +697,7 @@ public final class Pathfinder {
      * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}, for
      * neighbors where the goal exception for {@link BlockEntityProvider} does not apply).
      */
-    private static boolean isPathfindCellImpassable(ServerWorld world, PathfindChunkCache pathChunkCache, BlockPos pos) {
-        BlockState bl = pathChunkCache.getBlockState(pos);
+    private static boolean isPathfindCellImpassable(ServerWorld world, BlockState bl, BlockPos pos) {
         if (VoidClamCoreBlocks.isWartOrCore(bl)) {
             return false;
         }
@@ -710,6 +709,25 @@ public final class Pathfinder {
         }
         float h = getHardness(world, pos, bl);
         return h > 5 || h < 0;
+    }
+
+    private static boolean isPathfindCellImpassable(ServerWorld world, PathfindChunkCache pathChunkCache, BlockPos pos) {
+        return isPathfindCellImpassable(world, pathChunkCache.getBlockState(pos), pos);
+    }
+
+    /**
+     * Walk parent chain from goal toward start; every node except the goal must be path-enterable (matches A* interior rules).
+     * The goal cell may be a beacon etc. and is not checked here.
+     */
+    private static boolean pathInteriorHasImpassibleStep(ServerWorld world, Node gnode) {
+        for (Node c = gnode.parent; c != null; c = c.parent) {
+            BlockPos p = new BlockPos(c.x, c.y, c.z);
+            BlockState st = world.getBlockState(p);
+            if (isPathfindCellImpassable(world, st, p)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean inPathfindSearchBounds(Clam mod, int x, int y, int z) {
@@ -1190,6 +1208,10 @@ public final class Pathfinder {
         if (pathSteps < 0) {
             return;
         }
+        if (pathInteriorHasImpassibleStep(world, gnode)) {
+            VoidClamMod.releasePathfindingMainCycle(modForFlag);
+            return;
+        }
         modForFlag.pathApplyPendingSteps = pathSteps;
 
         Node firstNode = gnode;
@@ -1226,6 +1248,11 @@ public final class Pathfinder {
                     int packedH = TendrilPulseManager.getPackedBrightnessAt(world, pos);
                     TendrilPulseManager.startPulse(world, pos, mat, packedH, () -> {}, TendrilPulseManager.INITIAL_SCALE_OMNI);
                     VoidClamMod.completeOnePathApplyStep(modForFlag);
+                    return;
+                }
+                if (refNode != gnode && isPathfindCellImpassable(world, mat, pos)) {
+                    sliceState.blocked = true;
+                    VoidClamMod.releasePathfindingMainCycle(modForFlag);
                     return;
                 }
                 int cst;
@@ -1290,9 +1317,10 @@ public final class Pathfinder {
                         }
                     }
                     VoidClamMod.addEnergy(pathClamId, -1);
-                } else {
-                    sliceState.stamina -= cst;
+                    VoidClamMod.completeOnePathApplyStep(modForFlag);
+                    return;
                 }
+                sliceState.stamina -= cst;
 
                 boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat));
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
