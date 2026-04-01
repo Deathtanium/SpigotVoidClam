@@ -19,6 +19,7 @@ import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -608,12 +609,16 @@ public final class VoidClamMod {
         }
     }
 
+    /**
+     * Remove blast furnace item entities at the break position so {@link #onClamCoreBroken}'s single Searing Heart drop
+     * does not stack with vanilla loot (including a tagged Searing Heart when loot suppression mixin is ineffective).
+     */
     public static void stripVanillaBlastFurnaceDropsNear(ServerWorld world, BlockPos pos) {
         Vec3d c = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
         Box box = new Box(c.x - 0.225, c.y - 0.225, c.z - 0.225, c.x + 0.225, c.y + 0.225, c.z + 0.225);
         for (Entity entity : world.getOtherEntities(null, box, e -> e instanceof ItemEntity)) {
             ItemEntity itemEntity = (ItemEntity) entity;
-            if (SearingHeartItems.isPlainBlastFurnaceDrop(itemEntity.getStack())) {
+            if (itemEntity.getStack().getItem() == Items.BLAST_FURNACE) {
                 itemEntity.remove();
             }
         }
@@ -643,8 +648,8 @@ public final class VoidClamMod {
         if (snap == null) return;
         if (findClamAt(world, pos) != null) return;
         Clam m = new Clam();
-        m.clamId = UUID.randomUUID();
         SearingHeartItems.applyTemplateOntoClam(snap, m);
+        m.clamId = UUID.randomUUID();
         m.x = pos.getX();
         m.y = pos.getY();
         m.z = pos.getZ();
