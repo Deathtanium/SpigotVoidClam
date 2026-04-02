@@ -2,6 +2,8 @@
 
 Server-side Fabric mod for **Minecraft 1.21.x**. **Clams** are creatures made of blocks that consume energy and materials from their environment to repair and grow. They feed on light sources, seek ores, and convert blocks as they spread.
 
+**Design overview (for promotion and non-developers):** [`VOIDCLAM-DESIGN.md`](VOIDCLAM-DESIGN.md).
+
 ## Behavior and porting
 
 Loader-specific wiring (Fabric entrypoint, tick events, commands) lives in code under `src/`. **Loader-agnostic rules** — ticks, locks, queues, pathfinding, grow/repair, persistence — are documented in [`docs/logic/README.md`](docs/logic/README.md) (Obsidian-friendly `[[wikilinks]]` between notes). **Full technical reference** (save schema, mixins, cache algorithm, verification): [`docs/logic/Technical-documentation.md`](docs/logic/Technical-documentation.md).
