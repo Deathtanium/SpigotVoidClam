@@ -89,6 +89,7 @@ That makes the clam feel like **part of the world** rather than an overlay on it
 - **Stamina** limits how far a single path can “chew” through hard terrain in one go; running out can **blacklist** a target and **drain energy**.
 - Pathfinding can run **asynchronously** (worker pool) or in **sync batched** mode depending on config; **block changes** always apply on the **main server thread**.
 - **Delayed placement** spreads tendril steps over time so one path does not freeze the server tick.
+- The performance of all of these has been made very resource-friendly, but a first-party implementation could make it even better
 
 ---
 
@@ -105,12 +106,13 @@ That makes the clam feel like **part of the world** rather than an overlay on it
 
 - Items from broken blocks can be routed into **chests, trapped chests, or barrels** that are **reachable through the clam’s tissue** from its center, using search rules documented for parity.
 - This gives a **logistics angle**: encase storage in the right place and the clam **feeds** it while mining.
+- In a first-party implementation, the clam would instead use organic "storage nodules" from where players can take mined blocks or siphon them with hoppers
 
 ---
 
 ## Visual and audio presentation
 
-- **Tendril pulse:** When blocks change, the mod often shows a brief **scaled block display** (nether wart) that **shrinks** before the real block appears—**spectacle** on vanilla clients.
+- **Tendril pulse:** When blocks change, the mod often shows a brief **scaled block display** (nether wart) that **shrinks** before the real block appears—**smoke and mirrors** on vanilla clients.
 - **Omnidirectional pulse:** A periodic wave can spread from each clam with **batched** updates so ticks stay smooth.
 - **Heartbeat:** Conduit-like **ambient sound** at the core, **louder** as the clam grows.
 - **Defense:** Large clams with protection enabled can **apply status effects** and **convert nearby blocks** when players intrude into a defined **octahedron** region around the core.
@@ -120,7 +122,7 @@ These effects exist because the server **cannot** rely on custom block models on
 
 ---
 
-## Natural spawning (optional)
+## Natural spawning (optional) (currently broken)
 
 If enabled in config, new **Overworld** chunks can **roll** to spawn a clam near **chunk surface**, or a **dungeon** method can **replace spawners** with clams at configurable rates. **Defaults are conservative**; turn features on deliberately.
 
