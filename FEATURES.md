@@ -52,7 +52,7 @@ Abstract feature list:
         - ❌ method to dynamically determine what blocks are light source blocks, no matter what future minecraft versions bring to the table or what mods are installed, with an optional whitelist and blacklist in the config
         
     - ? clams eat ores for the "material" resource
-        - ✅ while clams always seek lights when enabled, **material / ore hunger** uses each heart’s persisted **`materialSeekThreshold`**: when `material < threshold`, ore-style replenishment pathing can run (with `seekLights`). Threshold **starts** at config `clam_material_seek_threshold` and **increases by 1** on each **auto** repair/grow cycle when **no** shell damage is detected, so healthy clams gradually want more stockpiled material (saved on the heart block).
+        - ✅ while clams always seek lights when enabled, **material / ore hunger** uses each heart’s persisted **`materialSeekThreshold`**: when `material < threshold`, ore-style replenishment pathing can run (with `seekLights`). Baseline is `min(config, 10×currentSize)` (same cap as max material); threshold **+1** each **auto** cycle with **no** shell damage, **capped** at that maximum; it **resets** to the baseline whenever the clam **grows** (`currentSize` up).
         - ✅ method to include **modded ores**: when `clam_ore_detect_with_c_ores_tag` is true (default), `c:ores` counts as ore **in addition to** the built-in vanilla list; turn off for legacy behavior only
         
 - ? growing

@@ -64,7 +64,7 @@ public final class SearingHeartItems {
         template.protectItself = cfg.clam_protect_itself_default;
         template.stubBuilt = false;
         template.repairWakeCyclesRemaining = VoidClamMod.SEARING_WAKE_REPAIR_CYCLES;
-        template.materialSeekThreshold = cfg.clam_material_seek_threshold;
+        template.materialSeekThreshold = VoidClamMod.materialSeekThresholdBaselineForSize(template.currentSize);
         return createDropFromBreak(template, null);
     }
 
@@ -167,8 +167,10 @@ public final class SearingHeartItems {
         if (thrOpt.isPresent()) {
             m.materialSeekThreshold = Math.max(0, thrOpt.get());
         } else {
-            m.materialSeekThreshold = VoidClamConfig.get().clam_material_seek_threshold;
+            m.materialSeekThreshold = VoidClamMod.materialSeekThresholdBaselineForSize(m.currentSize);
         }
+        int matCap = VoidClamMod.resourceCapForSize(m.currentSize);
+        m.materialSeekThreshold = Math.max(0, Math.min(m.materialSeekThreshold, matCap));
         return m;
     }
 
@@ -224,7 +226,8 @@ public final class SearingHeartItems {
         m.ensureClamId();
         m.material = Math.max(0, m.material);
         m.energy = Math.max(0, m.energy);
-        m.materialSeekThreshold = Math.max(0, m.materialSeekThreshold);
+        int matCap = VoidClamMod.resourceCapForSize(m.currentSize);
+        m.materialSeekThreshold = Math.max(0, Math.min(m.materialSeekThreshold, matCap));
         ComponentMap current = furnace.getComponents();
         NbtCompound root = new NbtCompound();
         NbtComponent existingData = current.get(DataComponentTypes.CUSTOM_DATA);

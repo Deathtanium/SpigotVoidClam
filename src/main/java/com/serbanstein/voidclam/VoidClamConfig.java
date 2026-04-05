@@ -119,8 +119,9 @@ public final class VoidClamConfig {
     /** Player defense check cadence in seconds; keep at or above goat-horn sound length to avoid overlap. */
     public int clam_defense_detection_interval_seconds = 8;
     /**
-     * Starting value for each heart’s {@link Clam#materialSeekThreshold} (new placements, `/giveheart`, legacy saves missing the field).
-     * Ore hunger uses {@code material < materialSeekThreshold}; the live threshold rises by 1 on each healthy auto repair/grow cycle.
+     * Baseline for each heart’s {@link Clam#materialSeekThreshold} (new placements, after growth, legacy saves missing the field),
+     * clamped to {@link VoidClamMod#resourceCapForSize}({@link Clam#currentSize}). The live threshold rises by 1 per healthy auto
+     * cycle up to that cap and resets to this baseline when size increases.
      */
     public int clam_material_seek_threshold = 5;
     /**

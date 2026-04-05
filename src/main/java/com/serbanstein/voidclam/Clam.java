@@ -35,7 +35,8 @@ public class Clam {
     public int material;
     /**
      * When {@link #seekLights} and {@code material < this}, ore-style material hunger pathing is allowed (alongside {@link #prioritizeRepairOreSeek}).
-     * Starts at {@link VoidClamConfig#clam_material_seek_threshold} for new/legacy hearts; increases by 1 on each auto repair/grow cycle with **no** shell damage.
+     * Baseline from {@link VoidClamMod#materialSeekThresholdBaselineForSize} (config capped by {@link VoidClamMod#resourceCapForSize});
+     * rises by 1 on each healthy auto cycle, never above that cap; resets to baseline when {@link #currentSize} increases.
      * Persisted on heart NBT.
      */
     public int materialSeekThreshold;

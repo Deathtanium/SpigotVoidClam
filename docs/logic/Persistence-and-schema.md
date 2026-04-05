@@ -25,7 +25,7 @@ Display:
 | `currentSize` | int | always | `1`, clamped ≥ 1 | |
 | `status` | int | always | `0` | `1` awake, `0` asleep |
 | `material` | int | always | `0`, clamped ≥ 0 on read | Persisted |
-| `materialSeekThreshold` | int | always | absent → `clam_material_seek_threshold` from config | Ore “comfort” target; +1 each auto cycle with no shell damage |
+| `materialSeekThreshold` | int | always | absent → baseline `min(config, 10×size)` | Capped at `10×currentSize`; +1 per healthy auto cycle; reset to baseline on size growth |
 | `energy` | int | always | `0` | Clamped non-negative when syncing to BE |
 | `age` | int | always | `0` | |
 | `seekLights` | boolean | always | `false` | |

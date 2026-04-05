@@ -181,6 +181,23 @@ public final class VoidClamMod {
         return Math.max(1, size) * 10;
     }
 
+    /**
+     * Initial / post-growth value for {@link Clam#materialSeekThreshold}: {@code clam_material_seek_threshold} from config,
+     * clamped to {@link #resourceCapForSize} for the clam’s current size (cannot “want” more material than the tank holds).
+     */
+    public static int materialSeekThresholdBaselineForSize(int currentSize) {
+        VoidClamConfig cfg = VoidClamConfig.get();
+        int base = cfg != null ? cfg.clam_material_seek_threshold : 5;
+        int cap = resourceCapForSize(currentSize);
+        return Math.max(0, Math.min(base, cap));
+    }
+
+    /** After {@link Clam#currentSize} increases; threshold returns to config baseline capped at the new size’s material cap. */
+    public static void resetMaterialSeekThresholdAfterGrowth(Clam m) {
+        if (m == null) return;
+        m.materialSeekThreshold = materialSeekThresholdBaselineForSize(m.currentSize);
+    }
+
     public static void clampResourcesForSize(Clam m) {
         if (m == null) return;
         int cap = resourceCapForSize(m.currentSize);
@@ -188,6 +205,7 @@ public final class VoidClamMod {
         if (m.material > cap) m.material = cap;
         if (m.energy < 0) m.energy = 0;
         if (m.material < 0) m.material = 0;
+        m.materialSeekThreshold = Math.max(0, Math.min(m.materialSeekThreshold, cap));
     }
 
     public static int autoGrowRepairIntervalTicks() {
@@ -1669,7 +1687,7 @@ public final class VoidClamMod {
         m.seekLights = cfg.clam_light_flag_default;
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
-        m.materialSeekThreshold = cfg.clam_material_seek_threshold;
+        m.materialSeekThreshold = materialSeekThresholdBaselineForSize(m.currentSize);
         m.repairWakeCyclesRemaining = 0;
         if (!registerClam(m)) {
             return null;
@@ -1945,7 +1963,8 @@ public final class VoidClamMod {
             return;
         }
         m.prioritizeRepairOreSeek = false;
-        m.materialSeekThreshold = Math.max(0, m.materialSeekThreshold) + 1;
+        int matCap = resourceCapForSize(m.currentSize);
+        m.materialSeekThreshold = Math.min(Math.max(0, m.materialSeekThreshold) + 1, matCap);
         syncClamCoreBlockEntityFromClam(world, m);
         // No shell damage healthy cycle: raise ore comfort target so material gathering scales with time intact.
         CommandToolbox.clamReSize(world, m.clamId, m.currentSize);

@@ -505,6 +505,7 @@ public final class CommandToolbox {
         m.pathfindingResumeWorldTime = obsidianAtTick + VoidClamMod.POST_RESIZE_OBSIDIAN_PATHFINDING_DELAY_TICKS;
 
         m.currentSize = tsize;
+        VoidClamMod.resetMaterialSeekThresholdAfterGrowth(m);
         VoidClamMod.placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
         VoidClamMod.startSeekCachesRebuild(m);
     }
