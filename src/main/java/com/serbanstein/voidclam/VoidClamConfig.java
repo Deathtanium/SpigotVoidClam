@@ -88,6 +88,13 @@ public final class VoidClamConfig {
     public Boolean pathfind_chunk_cache;
 
     /**
+     * When {@code true}, each {@link CommandToolbox#clamReach} run performs a full reachability flood from the heart
+     * (same bounds as pathfinding), snapshots visited {@link net.minecraft.block.BlockState}s for A*, and picks targets
+     * by minimum BFS adjacency depth then Euclidean tie-break. Volatile only for that job. Default {@code false} (extra CPU/RAM).
+     */
+    public boolean clam_reachability_volatile_map = false;
+
+    /**
      * Light + ore seek caches: when {@code true} (default), {@link Clam#lightsCache}/{@link Clam#oresCache} are
      * maintained (tick rebuild + block deltas) and {@link CommandToolbox#clamReach} reads them; cache and blacklist
      * positions stay in server memory only (see {@link VoidClamMod#tickSeekEphemeralExpiry}). When {@code false}

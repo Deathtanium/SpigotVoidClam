@@ -6,6 +6,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.WorldChunk;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -23,8 +24,18 @@ public final class PathfindChunkCache {
     private final ServerWorld world;
     private final boolean useColumnSnapshot;
     private final Map<Long, WorldChunk> columns;
+    private final @Nullable ReachabilityVolatileMap reachabilityOverlay;
 
     public PathfindChunkCache(ServerWorld world, Clam mod) {
+        this(world, mod, null);
+    }
+
+    /**
+     * @param reachabilityOverlay when non-null, {@link #getBlockState} returns the snapshot for positions the BFS
+     *                            visited first; other positions use column snapshot / live world (same as without overlay).
+     */
+    public PathfindChunkCache(ServerWorld world, Clam mod, @Nullable ReachabilityVolatileMap reachabilityOverlay) {
+        this.reachabilityOverlay = reachabilityOverlay;
         this.world = world;
         this.useColumnSnapshot = VoidClamConfig.get().pathfindChunkCacheEnabled();
         if (!useColumnSnapshot) {
@@ -68,6 +79,12 @@ public final class PathfindChunkCache {
     }
 
     public BlockState getBlockState(int x, int y, int z) {
+        if (reachabilityOverlay != null) {
+            BlockState frozen = reachabilityOverlay.stateAtPacked(BlockPos.asLong(x, y, z));
+            if (frozen != null) {
+                return frozen;
+            }
+        }
         if (!useColumnSnapshot) {
             return world.getBlockState(new BlockPos(x, y, z));
         }

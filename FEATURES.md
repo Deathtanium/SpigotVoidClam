@@ -27,16 +27,13 @@ Abstract feature list:
         - ? async mode (haven't tested yet)
         - ✅ sync_batched vs async mode
     - ✅ volatile target cache, to ignore unreachable blocks; I want to deprecate this in favor of the "reachability map" feature
-    - ❌ reachability map. This rethinks a lot of the process up to and including A*
-        - ❌ BFS reachability map; clam performs BFS (range limit equal to "reach" range limit) with A* costs to decide reachable and unreachable and stores all the reachable blocks' coordinates, material type, cost and BFS distance. Need to carefully consider what data structure to store this in, to allow easy coordinate-based stepping.
-            - ❌ debug function to monitor RAM usage of this. In the open, this basically stores ~99% of blocks in range; for clam size 15, this is 216k x bytes taken by one map location
-            - ❌ config toggle between:
-                - ❌ reachability map is volatile and computed on-demand and released when the job is done
-                - ❌ reachability map is computed the moment the clam is in a loaded chunk, delta'd on block change event in range, rebuilt completely on clam repair event and released when the clam "no longer exists" (which happens on clam death or chunk unload)
-                    - ❌ delta also needs to occur when voidclams themselves perform block changes
-            - ❌ reachability map rebuild, sync_batched vs async
-        - ❌ allow BFS distance to be used as heuristic in A*
-        - ❌ target is chosen only from the reachability map; closest target is chosen based on BFS distance and A* begins computing the path on this map
+    - ✅ reachability map **MVP (volatile)** — `clam_reachability_volatile_map` in `voidclam.json` (default **off**)
+        - ✅ Full BFS flood from heart within pathfinding bounds; edge rule matches A* interior steps; per-visit `BlockState` snapshot + hop distance (`ReachabilityVolatileMap`); discarded after the path job.
+        - ❌ debug telemetry for map RAM footprint
+        - ❌ persistent map + block-change delta + full rebuild on repair; unload lifecycle
+        - ❌ separate sync/async “map job” mode (map today runs on the same thread as pathfinding for that reach)
+        - ❌ BFS distance as A* heuristic (Manhattan unchanged)
+        - ✅ When enabled: pick target by **minimum BFS adjacency depth** to goal, then Euclidean; pass map into A* so flooded cells read frozen states via `PathfindChunkCache` overlay; skip redundant goal-directed prepass when map is prebuilt in `clamReach`.
     - ✅ path build after calculation
         - ✅ final, atomic, sanity check; path will stop early:
             - ✅ after a block has been broken

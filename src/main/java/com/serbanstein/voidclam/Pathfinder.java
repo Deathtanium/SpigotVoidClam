@@ -28,6 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -146,12 +147,23 @@ public final class Pathfinder {
      * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncAStarJobs}.
      */
     public static void enqueueSyncAStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+        enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz, null);
+    }
+
+    /** @param prebuiltReachMap non-null skips goal-directed prepass (map built earlier, e.g. in {@link CommandToolbox#clamReach}). */
+    public static void enqueueSyncAStarJob(
+        ServerWorld world,
+        UUID clamId,
+        int sx, int sy, int sz,
+        int gx, int gy, int gz,
+        @Nullable ReachabilityVolatileMap prebuiltReachMap
+    ) {
         Clam m = VoidClamMod.getClamById(clamId);
         if (m != null) {
             m.ensureClamId();
         }
         if (clamId == null) return;
-        syncAStarJobs.add(new AStarJob(world, clamId, sx, sy, sz, gx, gy, gz));
+        syncAStarJobs.add(new AStarJob(world, clamId, sx, sy, sz, gx, gy, gz, prebuiltReachMap));
     }
 
     /**
@@ -199,6 +211,7 @@ public final class Pathfinder {
         final ServerWorld worldRef;
         final UUID clamId;
         final int sx, sy, sz, gx, gy, gz;
+        final @Nullable ReachabilityVolatileMap prebuiltReachMap;
         AStarPhase phase = AStarPhase.PREPASS;
         BlockBfs prepassBfs;
         AStarFrontier astarFrontier;
@@ -209,6 +222,16 @@ public final class Pathfinder {
         PathfindChunkCache activePathChunkCache;
 
         AStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+            this(world, clamId, sx, sy, sz, gx, gy, gz, null);
+        }
+
+        AStarJob(
+            ServerWorld world,
+            UUID clamId,
+            int sx, int sy, int sz,
+            int gx, int gy, int gz,
+            @Nullable ReachabilityVolatileMap prebuiltReachMap
+        ) {
             this.worldRef = world;
             this.clamId = clamId;
             this.sx = sx;
@@ -217,6 +240,7 @@ public final class Pathfinder {
             this.gx = gx;
             this.gy = gy;
             this.gz = gz;
+            this.prebuiltReachMap = prebuiltReachMap;
         }
 
         boolean isFinished() {
@@ -240,7 +264,8 @@ public final class Pathfinder {
                 finishFail(modForFlag);
                 return 0;
             }
-            activePathChunkCache = new PathfindChunkCache(world, modForFlag);
+            activePathChunkCache = new PathfindChunkCache(
+                world, modForFlag, (prebuiltReachMap != null && phase == AStarPhase.ASTAR) ? prebuiltReachMap : null);
             if (phase == AStarPhase.PREPASS) {
                 return stepPrepass(world, modForFlag, budget);
             }
@@ -252,6 +277,22 @@ public final class Pathfinder {
 
         private int stepPrepass(ServerWorld world, Clam modForFlag, int budget) {
             if (prepassBfs == null) {
+                if (prebuiltReachMap != null) {
+                    if (sx == gx && sy == gy && sz == gz) {
+                        beginAstarPhase();
+                        return 1;
+                    }
+                    PathfindChunkCache cc = new PathfindChunkCache(world, modForFlag, prebuiltReachMap);
+                    if (!isGoalAdjacentReachableWithPrebakedMap(prebuiltReachMap, gx, gy, gz, world, modForFlag)) {
+                        VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+                        VoidClamMod.removeOreGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+                        finishFail(modForFlag);
+                        return 1;
+                    }
+                    activePathChunkCache = cc;
+                    beginAstarPhase();
+                    return 1;
+                }
                 if (sx == gx && sy == gy && sz == gz) {
                     beginAstarPhase();
                     return 1;
@@ -769,6 +810,79 @@ public final class Pathfinder {
     }
 
     /**
+     * Full 6-neighbor flood from the clam heart (no early goal), same edge rule as reachability prepass but without a goal exception
+     * on interior steps. Snapshots {@link BlockState} at each visited cell. Bounded by {@link VoidClamConfig#effectiveSyncMaxTotalExpansionsPerJob}.
+     */
+    public static ReachabilityVolatileMap buildVolatileReachabilityMap(ServerWorld world, Clam mod) {
+        mod.ensureClamId();
+        PathfindChunkCache base = new PathfindChunkCache(world, mod, null);
+        HashMap<Long, BlockState> states = new HashMap<>();
+        long startLong = BlockPos.asLong(mod.x, mod.y, mod.z);
+        BlockBfs.EdgePolicy policy = (w, fromLong, toLong, fromDist) -> {
+            BlockPos nextPos = BlockPos.fromLong(toLong);
+            if (!inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())) {
+                return false;
+            }
+            return isPassibleForAStarStep(w, base, nextPos, false);
+        };
+        long jobExpCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
+        BlockBfs bfs = BlockBfs.start(
+            world,
+            startLong,
+            policy,
+            blockBfsMaxVisited(jobExpCap),
+            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
+            null,
+            null,
+            asyncPathfindingAbortChecker(world, mod.x, mod.z, mod.clamId),
+            BlockBfs.NO_EARLY_GOAL,
+            (w, cur, d) -> states.put(cur, base.getBlockState(BlockPos.fromLong(cur)))
+        );
+        bfs.runToCompletionOnCurrentThread();
+        return new ReachabilityVolatileMap(states, new HashMap<>(bfs.distances()));
+    }
+
+    /**
+     * Minimum BFS hop distance from the heart to a cell that is a 6-neighbor of {@code goal} and from which the clam
+     * may enter {@code goal} as the dig target ({@link #isPassibleForAStarStep} with goal exception), or {@link Integer#MAX_VALUE} if none.
+     */
+    public static int adjacentReachBfsStepsToGoal(
+        ReachabilityVolatileMap map,
+        BlockPos goal,
+        ServerWorld world,
+        Clam mod
+    ) {
+        PathfindChunkCache pass = new PathfindChunkCache(world, mod, map);
+        int gx = goal.getX(), gy = goal.getY(), gz = goal.getZ();
+        Map<Long, Integer> dist = map.distancesView();
+        int best = Integer.MAX_VALUE;
+        for (Cursor c : xc) {
+            int nx = gx + c.x, ny = gy + c.y, nz = gz + c.z;
+            long nl = BlockPos.asLong(nx, ny, nz);
+            Integer d = dist.get(nl);
+            if (d == null) {
+                continue;
+            }
+            if (!isPassibleForAStarStep(world, pass, goal, true)) {
+                continue;
+            }
+            if (d < best) {
+                best = d;
+            }
+        }
+        return best;
+    }
+
+    private static boolean isGoalAdjacentReachableWithPrebakedMap(
+        ReachabilityVolatileMap map,
+        int gx, int gy, int gz,
+        ServerWorld world,
+        Clam mod
+    ) {
+        return adjacentReachBfsStepsToGoal(map, new BlockPos(gx, gy, gz), world, mod) != Integer.MAX_VALUE;
+    }
+
+    /**
      * 6-neighbor BFS from start within the same axis bounds as A*. Edge admission matches A* {@link #aStarNeighborCost}
      * (wall = cost {@code 2500}), including goal exception for {@link BlockEntityProvider}.
      * Ignores movement costs; only detects hard disconnects so unreachable goals skip the expensive A* search.
@@ -830,6 +944,20 @@ public final class Pathfinder {
      * prepass clears {@code Clam#mainCycleBusy} and returns before building the open list. {@code bfs_mode} does not change prepass.
      */
     public static boolean calculatePath(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
+        return calculatePath(world, clamId, sx, sy, sz, gx, gy, gz, null);
+    }
+
+    /**
+     * @param prebuiltReachMap when non-null, goal-directed prepass is skipped and A* reads frozen cell states for flooded cells
+     *                        (see {@link VoidClamConfig#clam_reachability_volatile_map}).
+     */
+    public static boolean calculatePath(
+        ServerWorld world,
+        UUID clamId,
+        int sx, int sy, int sz,
+        int gx, int gy, int gz,
+        @Nullable ReachabilityVolatileMap prebuiltReachMap
+    ) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) {
             Clam early = VoidClamMod.getClamById(clamId);
             if (early != null) {
@@ -849,11 +977,18 @@ public final class Pathfinder {
             return false;
         }
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
-            enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz);
+            enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz, prebuiltReachMap);
             return true;
         }
-        PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag);
-        if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag, asyncPathCache)) {
+        PathfindChunkCache asyncPathCache = new PathfindChunkCache(world, modForFlag, prebuiltReachMap);
+        if (prebuiltReachMap == null) {
+            if (!isGoalReachableByPrepass(world, sx, sy, sz, gx, gy, gz, modForFlag, asyncPathCache)) {
+                VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+                VoidClamMod.removeOreGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
+                VoidClamMod.releasePathfindingMainCycle(modForFlag);
+                return false;
+            }
+        } else if (!isGoalAdjacentReachableWithPrebakedMap(prebuiltReachMap, gx, gy, gz, world, modForFlag)) {
             VoidClamMod.removeLightGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.removeOreGoalFromCacheIfPrepassUnreachable(world, clamId, gx, gy, gz);
             VoidClamMod.releasePathfindingMainCycle(modForFlag);

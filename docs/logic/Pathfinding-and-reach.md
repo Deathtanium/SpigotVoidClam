@@ -6,6 +6,10 @@
 
 **Guards:** Clam non-null, awake (`status == 1`), center chunk loaded, same `ServerWorld` as clam dimension, **`mainCycleBusy == 0`**, **not** **`VoidClamMod.isGrowRepairPendingForClam`**, kill barrier / shutdown / path resume time OK.
 
+## Volatile reachability map (`clam_reachability_volatile_map`)
+
+When **`true`** in `voidclam.json`, **`CommandToolbox.clamReach`** builds a **full** 6-neighbor BFS from the heart (same axis bounds as A*), using **`isPassibleForAStarStep`** without the goal exception on interior cells, and records **`BlockState`** + hop distance per visited cell in **`ReachabilityVolatileMap`**. Targets (lights/ores) are ranked by **minimum BFS distance to an adjacent step onto the goal**, then Euclidean. The same map is passed into **`Pathfinder.calculatePath`**, which wraps **`PathfindChunkCache`** so A* reads the **frozen** state for cells in the flood (others still use chunk snapshot / live world). Goal-directed prepass is **skipped** when this prebuilt map is supplied. Default **`false`** (cost tradeoff).
+
 **Flow:**
 
 1. Set `mainCycleBusy = 1`.
