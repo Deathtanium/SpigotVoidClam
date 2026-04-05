@@ -11,7 +11,7 @@ Loader-specific wiring (Fabric entrypoint, tick events, commands) lives in code 
 ## Features (summary)
 
 - **Logic**: Clam types, energy, growth, A* pathfinding, shell building, light “food” list, base cost, blast resistance checks.
-- **Concurrency**: `busyFlagMainCycle` (reach/path lifecycle); path results queued for the main thread; staggered placement via `VoidClamModScheduler` (world-time delayed runnables).
+- **Concurrency**: `mainCycleBusy` (reach/path lifecycle); path results queued for the main thread; staggered placement via `VoidClamModScheduler` (world-time delayed runnables).
 - **Persistence**: Each clam’s **heart block** (searing blast furnace) stores authoritative state in chunk save via `CUSTOM_DATA` (`SearingHeartItems`). See `docs/logic/State-and-save.md`.
 
 ## Build

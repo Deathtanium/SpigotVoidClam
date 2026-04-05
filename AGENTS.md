@@ -28,7 +28,7 @@ Requires a JDK **17+** on `PATH`.
 
 - **Entry**: `VoidClamModEntry` — Fabric lifecycle, tick hooks, Brigadier commands (`/voidclam`, OP level 2).
 - **Core state / logic**: `VoidClamMod`, `Clam`, `Pathfinder`, `Cursor`, `Node`.
-- **Threading**: Pathfinding runs off-thread; results are queued and applied on the **server main thread**. Respect `busyFlagMainCycle` (and any future use of `busyFlagPlaceEvent`) when changing concurrency.
+- **Threading**: Pathfinding runs off-thread; results are queued and applied on the **server main thread**. Respect `mainCycleBusy` (and any future use of `busyFlagPlaceEvent`) when changing concurrency.
 - **Scheduling**: `VoidClamModScheduler` — delayed runnables keyed off **world time** (`world.getTime()`).
 - **Persistence**: Heart block entities (clam-core blast furnaces) hold authoritative clam data in chunk save via `SearingHeartItems` / `CUSTOM_DATA`. See `docs/logic/State-and-save.md`.
 

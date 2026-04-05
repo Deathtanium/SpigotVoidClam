@@ -24,7 +24,7 @@
 | `protectItself` | Defense behavior when large enough |
 | `lightsBlackList`, `oresBlackList` | Position sets; **in memory only** (not written to heart NBT in current code) |
 | `busyFlagPlaceEvent` | Declared on `Clam`; reserved / legacy |
-| `busyFlagMainCycle` | **Reach / path lifecycle lock** — see [[Threading-queues-locks]] |
+| `mainCycleBusy` | **Reach / path lifecycle lock** — see [[Threading-queues-locks]] |
 | `nextAutoGrowRepairWorldTime` | Per-dimension `getTime()` deadline for the next **per-clam** auto repair/grow (in-memory scheduling; heart NBT carries other persisted fields) |
 
 ## Registry vs heart block entity

@@ -695,6 +695,14 @@ public final class VoidClamMod {
         return true;
     }
 
+    /**
+     * True while this clam has a queued repair/grow (auto tick or {@code /voidclam grow}/{@code repair}) waiting for
+     * path idle. {@link CommandToolbox#clamReach} must not start — matches the “no reach during repair/grow cycle” flow.
+     */
+    public static boolean isGrowRepairPendingForClam(@Nullable UUID clamId) {
+        return clamId != null && growPendingWorld != null && clamId.equals(growCommandClamId);
+    }
+
     public static void captureClamCoreComponentsBeforeBreak(net.minecraft.world.World world, BlockPos pos, BlockState state) {
         breakingClamFurnaceComponents.remove();
         if (world.isClient() || !(world instanceof ServerWorld)) return;
@@ -855,7 +863,7 @@ public final class VoidClamMod {
             syncClamCoreBlockEntityFromClam(world, m);
             tickLightCacheRebuildStep(world, m);
             tickOreCacheRebuildStep(world, m);
-            if (m.busyFlagMainCycle == 0
+            if (m.mainCycleBusy == 0
                 && (m.lightPathGoalPacked != null || m.orePathGoalPacked != null)) {
                 releasePathfindingMainCycle(m);
             }
@@ -864,10 +872,10 @@ public final class VoidClamMod {
             ensureAutoGrowScheduled(world, m);
             if (isSearingHeartThermallyActive(world, m)) {
                 long due = m.nextAutoGrowRepairWorldTime;
-                if (due > 0 && t >= due) {
-                    if (tryScheduleAutoGrowRepairForClam(world, m.clamId)) {
-                        m.nextAutoGrowRepairWorldTime = t + autoGrowRepairIntervalTicks();
-                    }
+                // Only one global grow/repair queue: retry next tick if another clam holds it. Defer interval until the
+                // auto routine actually runs in tickGrowPendingCheck (not merely trySchedule).
+                if (due > 0 && t >= due && growPendingWorld == null) {
+                    tryScheduleAutoGrowRepairForClam(world, m.clamId);
                 }
             }
             int phase = Math.floorMod(pos.getX() * 31 + pos.getY() * 17 + pos.getZ() * 13, 20);
@@ -1214,7 +1222,7 @@ public final class VoidClamMod {
         if (oreGoal != null) {
             m.oresBlackList.remove(oreGoal);
         }
-        m.busyFlagMainCycle = 0;
+        m.mainCycleBusy = 0;
         m.lightPathGoalPacked = null;
         m.orePathGoalPacked = null;
         m.orePathForMaterialHunger = false;
@@ -1494,7 +1502,7 @@ public final class VoidClamMod {
         if (m == null) {
             return false;
         }
-        if (m.busyFlagMainCycle != 0) {
+        if (m.mainCycleBusy != 0) {
             return true;
         }
         if (m.busyFlagPlaceEvent != 0) {
@@ -1592,7 +1600,7 @@ public final class VoidClamMod {
             String activeGoal = m.orePathGoalPacked != null ? "ore" : (m.lightPathGoalPacked != null ? "light" : "none");
             lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
                 + " status=" + m.status + " stubBuilt=" + m.stubBuilt + " (dimension not loaded)");
-            lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
+            lines.add("busy: mainCycle=" + m.mainCycleBusy + " placeEvent=" + m.busyFlagPlaceEvent
                 + " pathApplyPendingSteps=" + m.pathApplyPendingSteps);
             lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " orePathGoalPacked=" + m.orePathGoalPacked
                 + " resumeWorldTime=" + m.pathfindingResumeWorldTime + " pathAllowed=?");
@@ -1611,7 +1619,7 @@ public final class VoidClamMod {
         String activeGoal = m.orePathGoalPacked != null ? "ore" : (m.lightPathGoalPacked != null ? "light" : "none");
         lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
             + " status=" + m.status + " stubBuilt=" + m.stubBuilt);
-        lines.add("busy: mainCycle=" + m.busyFlagMainCycle + " placeEvent=" + m.busyFlagPlaceEvent
+        lines.add("busy: mainCycle=" + m.mainCycleBusy + " placeEvent=" + m.busyFlagPlaceEvent
             + " pathApplyPendingSteps=" + m.pathApplyPendingSteps);
         lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " orePathGoalPacked=" + m.orePathGoalPacked
             + " resumeWorldTime=" + m.pathfindingResumeWorldTime + " pathAllowed=" + isPathfindingAllowedYet(world, m));
@@ -1852,8 +1860,11 @@ public final class VoidClamMod {
             return;
         }
         Clam m = getClamById(cmdId);
-        boolean idle = (m == null || m.busyFlagMainCycle == 0);
+        boolean idle = (m == null || m.mainCycleBusy == 0);
         if (!idle || countTargetsQueuedForClam(cmdId) > 0 || isResizeShellAnimationPending(world)) {
+            return;
+        }
+        if (m != null && !world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
             return;
         }
         int cmdSize = growCommandTargetSize;
@@ -1863,6 +1874,7 @@ public final class VoidClamMod {
         if (m != null) {
             if (cmdSize < 0) {
                 runAutoGrowRoutineSingle(world, m);
+                m.nextAutoGrowRepairWorldTime = world.getTime() + (long) autoGrowRepairIntervalTicks();
             } else {
                 CommandToolbox.clamReSize(world, cmdId, cmdSize);
             }

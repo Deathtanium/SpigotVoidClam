@@ -14,7 +14,7 @@ After porting hooks, run a dedicated server with the mod plus **vanilla client**
 | 1 | `/voidclam make` at clear spot | Heart blast furnace + stub; clam registered; `info` shows UUID |
 | 2 | Break heart (survival/creative per design) | Coordinated kill; drop or break behavior per `onClamCoreBroken`; no duplicate vanilla furnace loot from mixin |
 | 3 | Place **Searing Heart** item on valid spot | New `clamId`; template fields; `stubBuilt` false until fuel/stub path |
-| 4 | `/voidclam reach` while awake (`status 1`) | `busyFlagMainCycle` cycle; path or clear busy; no server hang |
+| 4 | `/voidclam reach` while awake (`status 1`) | `mainCycleBusy` cycle; path or clear busy; no server hang |
 | 5 | Unload heart chunk during async path | Worker aborts (`shouldAbortAsyncPathfindingWork`); no stuck busy forever |
 | 6 | `/voidclam grow` or `repair` | Seeks disabled for target until idle gate passes; then `clamReSize` or auto routine |
 | 7 | `/voidclam kill` during path | Kill barrier; executor drain; clam removed from registry |

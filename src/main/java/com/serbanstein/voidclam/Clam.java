@@ -93,10 +93,15 @@ public class Clam {
      */
     public final Set<Long> oresBlackList = ConcurrentHashMap.newKeySet();
     public short busyFlagPlaceEvent;
-    public short busyFlagMainCycle;
+    /**
+     * Unified lock for the clam’s main activity pipeline: non-zero while reach / pathfinding owns the clam
+     * (including multi-tick path apply and container-routing waits). Auto and command-driven repair/grow wait until this is 0.
+     * While {@link VoidClamMod#isGrowRepairPendingForClam} is true for this clam, {@link CommandToolbox#clamReach} does not run.
+     */
+    public short mainCycleBusy;
     /**
      * Scheduled {@link Pathfinder#buildPath} slice count still to finish; when it hits 0 after {@link VoidClamMod#completeOnePathApplyStep},
-     * main-cycle busy is released. Reset by {@link VoidClamMod#releasePathfindingMainCycle}.
+     * {@link #mainCycleBusy} is released. Reset by {@link VoidClamMod#releasePathfindingMainCycle}.
      */
     public int pathApplyPendingSteps;
     /**

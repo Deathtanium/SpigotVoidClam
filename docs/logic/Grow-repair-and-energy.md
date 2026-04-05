@@ -19,7 +19,7 @@ Used by `/voidclam repair` and `/voidclam grow`.
 3. **Later**, `tickGrowPendingCheck` runs when:
    - Same dimension as `growPendingWorld`
    - No async kill barrier
-   - That clam’s `busyFlagMainCycle == 0` (or clam already removed)
+   - That clam’s `mainCycleBusy == 0` (or clam already removed)
    - No **`targets`** entries for **`growCommandClamId`**
    - **`!isResizeShellAnimationPending(world)`** for that dimension
 4. Then: run `clamReSize(world, clamId, targetSize)` (or auto routine when `targetSize == -1`); restore that clam’s seeks from the snapshot maps; clear pending state.
@@ -30,15 +30,15 @@ Used by `/voidclam repair` and `/voidclam grow`.
 
 **Removed:** global `tickAutoRepairAndGrow` that iterated all registered clams every 5 minutes.
 
-**Now:** Each server tick, **`VoidClamMod.tickLoadedClamCores(world)`** (per dimension) checks each awake clam’s **`Clam#nextAutoGrowRepairWorldTime`** against `world.getTime()`. When due, it calls **`tryScheduleAutoGrowRepairForClam`** (if no grow is already pending globally). After scheduling, the deadline advances by **`VoidClamMod.AUTO_GROW_REPAIR_INTERVAL_TICKS`** (5 minutes).
+**Now:** Each server tick, **`VoidClamMod.tickLoadedClamCores(world)`** (per dimension) checks each awake clam’s **`Clam#nextAutoGrowRepairWorldTime`** against `world.getTime()`. When due, it calls **`tryScheduleAutoGrowRepairForClam`** only if **no** repair/grow is already pending globally (`growPendingWorld == null`). **The deadline does not advance on schedule:** it advances only after **`tickGrowPendingCheck`** actually runs **`runAutoGrowRoutineSingle`** (same dimension, heart chunk loaded, **`mainCycleBusy == 0`**, no queued **`targets`**, no resize animation pending). That way a long reach/path activity does not “consume” the interval merely because a due tick queued work.
 
-Completion still goes through **`tickGrowPendingCheck`** with **`growCommandTargetSize == -1`**, which runs **`runAutoGrowRoutineSingle`** for that clam only (repair to `currentSize`, clear blacklists, optional +2 grow using the same heuristics as before).
+Completion still goes through **`tickGrowPendingCheck`** with **`growCommandTargetSize == -1`**, which runs **`runAutoGrowRoutineSingle`** for that clam only (repair to `currentSize`, clear blacklists, optional +1 grow using the same heuristics as before).
 
 **Stagger:** First deadline after registration is spread across one interval using heart position (`x,y,z`), so clams do not all fire in the same tick.
 
 **Server start:** After optional CSV load / migration, **`seedAutoGrowScheduleForAllClams`** is called for **each** `ServerWorld` so clams in that dimension get initial deadlines.
 
-Clams whose chunks are unloaded **miss** that interval’s window; they reschedule on the next tick after load (entity-like behavior).
+If the heart chunk is unloaded while auto repair/grow is **queued**, **`tickGrowPendingCheck`** keeps the pending state until the chunk is loaded again (it does not drop the job or advance the deadline).
 
 ## `runAutoGrowRoutineSingle` (one clam, loaded chunk)
 

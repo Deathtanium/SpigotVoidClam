@@ -8,7 +8,7 @@ Strict **phase order** on every server tick (earlier phases always complete befo
 
 1. **`VoidClamMod.tickSeekEphemeralExpiry(server)`** — Per-clam unload timers that eventually clear in-memory seek caches / path bookmarks when the **heart chunk stays unloaded** (all dimensions).
 2. **`VoidClamMod.drainPendingLightCacheDeltas()`** — Apply batched light-cache updates queued from block changes (must run before per-world clam logic that reads caches).
-3. **Ice dormancy (instant):** For each world, **`VoidClamMod.cancelActivePathfindingForFullyIceEncasedClams(w)`** clears sync A* jobs, **`busyFlagMainCycle`**, and **`targets`** for any clam whose heart is fully ice-encased — **before** sync A* so stepped jobs do not run one tick late.
+3. **Ice dormancy (instant):** For each world, **`VoidClamMod.cancelActivePathfindingForFullyIceEncasedClams(w)`** clears sync A* jobs, **`mainCycleBusy`**, and **`targets`** for any clam whose heart is fully ice-encased — **before** sync A* so stepped jobs do not run one tick late.
 4. **Optional — sync A***: **`Pathfinder.tickSyncAStarJobs(...)`** when config `astar_mode` is `sync_batched`. Runs **before** per-world clam ticks so stepped jobs make progress in a fixed place in the frame.
 5. **For each `ServerWorld` `w`** (iteration order follows `server.getWorlds()`):
    - **`VoidClamMod.tickLoadedClamCores(w)`** — Only clams whose **heart chunk is loaded**. Registry link via mixin on furnace tick; sync heart NBT; cache rebuild slices; fuel wake; auto-grow schedule; phased **`clamReach`**, core check, heartbeat, defense.
@@ -26,20 +26,20 @@ Then **gated** by overworld time (`ServerWorld` overworld, or first world as fal
 | `TICK_OMNI_PULSE` (100) | 5 s | `TendrilPulseManager.runOmnidirectionalPulse(w)` for **each** world |
 | `TICK_CLEANUP` (1200) | 1 min | `TendrilPulseManager.cleanupStrayDisplays(w)` for every world |
 
-**Why order matters:** `tickLoadedClamCores` can enqueue scheduler work and path targets; **`tickTargets` runs after all worlds** have advanced pulse/scheduler state for that tick, so path consumption is **global per tick**, not interleaved per world. **`tickGrowPendingCheck`** runs **before** `tickTargets`, so it sees **`targets`** and **`busyFlagMainCycle`** as left by the *previous* tick’s drain (this tick’s `tickTargets` has not run yet).
+**Why order matters:** `tickLoadedClamCores` can enqueue scheduler work and path targets; **`tickTargets` runs after all worlds** have advanced pulse/scheduler state for that tick, so path consumption is **global per tick**, not interleaved per world. **`tickGrowPendingCheck`** runs **before** `tickTargets`, so it sees **`targets`** and **`mainCycleBusy`** as left by the *previous* tick’s drain (this tick’s `tickTargets` has not run yet).
 
 ## Priority and locks (behavioral deadlocks)
 
-There is **no cross-clam priority queue**. Ordering within a tick is **phase order** (above) plus **FIFO** `targets` and **time-ordered** `VoidClamModScheduler` tasks. The main **per-clam lock** is **`busyFlagMainCycle`**: while non-zero, **`clamReach` / `calculatePath`** will not start another cycle for that clam.
+There is **no cross-clam priority queue**. Ordering within a tick is **phase order** (above) plus **FIFO** `targets` and **time-ordered** `VoidClamModScheduler` tasks. The main **per-clam lock** is **`mainCycleBusy`**: while non-zero, **`clamReach` / `calculatePath`** will not start another cycle for that clam.
 
 | Mechanism | What it blocks |
 |-----------|----------------|
-| **`busyFlagMainCycle`** | New reach/path cycle; held from reach through path apply (and container routing / path-stopped waits — see [[Pathfinding-and-reach]]). |
+| **`mainCycleBusy`** | New reach/path cycle; held from reach through path apply (and container routing / path-stopped waits — see [[Pathfinding-and-reach]]). |
 | **`targets` non-empty** (for the pending grow/repair clam id) | **`tickGrowPendingCheck`** will not finish grow/repair until that clam has no queued path ends. |
 | **`VoidClamMod.isResizeShellAnimationPending(world)`** | Grow/repair waits for **`clamReSize`** shell steps scheduled via **`scheduleResizeShellDelayed`**, not all scheduler tasks. |
 | **Coordinated kill barrier** | **`CommandToolbox.submitPathfinding`** rejects; workers abort via `shouldAbortAsyncPathfindingWork`. |
 
-**Idle before grow/repair** (`tickGrowPendingCheck`, same dimension as `growPendingWorld`): **`busyFlagMainCycle == 0`** for the command target (or clam removed), **`countTargetsQueuedForClam(cmdId) == 0`**, **`!isResizeShellAnimationPending(world)`**, and **`!asyncPathfindingKillBarrierInEffect`**. It does **not** consult **`VoidClamModScheduler.hasPendingTasks`**. See [[Threading-queues-locks]] for **`busyFlagMainCycle`** transitions and [[Grow-repair-and-energy]] for the user-visible grow/repair pipeline.
+**Idle before grow/repair** (`tickGrowPendingCheck`, same dimension as `growPendingWorld`): **`mainCycleBusy == 0`** for the command target (or clam removed), **`countTargetsQueuedForClam(cmdId) == 0`**, **`!isResizeShellAnimationPending(world)`**, and **`!asyncPathfindingKillBarrierInEffect`**. It does **not** consult **`VoidClamModScheduler.hasPendingTasks`**. See [[Threading-queues-locks]] for **`mainCycleBusy`** transitions and [[Grow-repair-and-energy]] for the user-visible grow/repair pipeline.
 
 ## Heart block entity (clam core)
 

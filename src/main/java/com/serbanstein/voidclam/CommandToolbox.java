@@ -519,8 +519,9 @@ public final class CommandToolbox {
         m.ensureClamId();
         if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) return;
         if (!VoidClamMod.isPathfindingAllowedYet(world, m)) return;
-        if (m.busyFlagMainCycle != 0) return;
-        m.busyFlagMainCycle = 1;
+        if (VoidClamMod.isGrowRepairPendingForClam(clamId)) return;
+        if (m.mainCycleBusy != 0) return;
+        m.mainCycleBusy = 1;
 
         submitPathfinding(world, m.x, m.z, m.clamId, () -> VoidClamMod.releasePathfindingMainCycle(m), () -> {
             try {

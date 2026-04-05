@@ -200,7 +200,7 @@ public final class SearingHeartItems {
         into.oresBlackList.clear();
         into.lightsBlackList.clear();
         into.busyFlagPlaceEvent = 0;
-        into.busyFlagMainCycle = 0;
+        into.mainCycleBusy = 0;
         into.pathApplyPendingSteps = 0;
         into.lightPathGoalPacked = null;
         into.orePathGoalPacked = null;

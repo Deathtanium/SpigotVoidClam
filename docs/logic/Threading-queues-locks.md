@@ -16,23 +16,23 @@ Work tied to a specific clam stops when **any** of: the server is stopping; a **
 - **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)` — pass the path job’s `clamId` for kill matching. When the job’s clam is resolved and its heart chunk is loaded, abort also applies if `!VoidClamMod.isSearingHeartThermallyActive` (ice dormancy, `status != 1`, etc.), not ice-only.
 - **Shutdown flag**: `isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
 - **Kill barrier**: `isAsyncPathfindingKillBarrierInEffect()` — while `true`, `submitPathfinding` **rejects without queuing** (runs `onAbortedBeforeRun` immediately). Used so no new async tasks are created during a kill drain. `asyncPathfindingKillVictimClamId` identifies which clam is aborted cooperatively in workers.
-- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). Clears kill barrier state, sets the shutdown flag, **shuts down and awaits** the pathfinder executor, **replaces** the pool, and clears every clam’s `busyFlagMainCycle`.
+- **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). Clears kill barrier state, sets the shutdown flag, **shuts down and awaits** the pathfinder executor, **replaces** the pool, and clears every clam’s `mainCycleBusy`.
 - **Cleared (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStart()` at `SERVER_STARTED` (before `load`).
-- **`submitPathfinding`**: `submitPathfinding(world, cx, cz, pathfindingClamId, onAbortedBeforeRun, task)`. Rejects if kill barrier **or** shutdown (no `execute`). Otherwise, if abort before the body, runs `onAbortedBeforeRun` (clears `busyFlagMainCycle` / `pathStoppedAwaitingContainer` where needed).
+- **`submitPathfinding`**: `submitPathfinding(world, cx, cz, pathfindingClamId, onAbortedBeforeRun, task)`. Rejects if kill barrier **or** shutdown (no `execute`). Otherwise, if abort before the body, runs `onAbortedBeforeRun` (clears `mainCycleBusy` / `pathStoppedAwaitingContainer` where needed).
 - **Where abort is polled**:
   - `CommandToolbox.submitPathfinding` (reject vs before task body),
   - `clamReach` (before submit; periodic checks in the light/ore scan),
   - `Pathfinder.calculatePath` (A* loop + goal enqueue guard),
   - `Pathfinder.isGoalReachableByPrepass` / `runContainerBfsOnWorld` via `BlockBfs.AbortChecker`,
   - Main-thread `applyContainerResult` path after container BFS (via `world.getServer().execute`): skips applying if abort is true.
-- **`busyFlagMainCycle` on interrupt**: Aborted paths clear the flag via `onAbortedBeforeRun`, A* early exit, `calculatePath` failure, or container callback guards. Kill starts by clearing the victim’s flag and purging that slot from `targets` to narrow enqueue races.
+- **`mainCycleBusy` on interrupt**: Aborted paths clear the flag via `onAbortedBeforeRun`, A* early exit, `calculatePath` failure, or container callback guards. Kill starts by clearing the victim’s flag and purging that slot from `targets` to narrow enqueue races.
 
 ## Coordinated clam kill (`clamKill` / `clamKillBlocking`)
 
 `/voidclam kill` and automatic core death call `VoidClamMod.clamKill(server, clamId, saveAfter)` (alias for `clamKillBlocking`). Sequence:
 
 1. **Queue** the request (serialized with `asyncKillCoordinatorLock`).
-2. **Start drain**: clear victim `busyFlagMainCycle`, **purge `targets`** entries for that `clamId`, set victim UUID + kill barrier.
+2. **Start drain**: clear victim `mainCycleBusy`, **purge `targets`** entries for that `clamId`, set victim UUID + kill barrier.
 3. **Background thread** runs `shutdownPathfinderExecutorAfterKillDrain()` (same await/replace as server stop) so the server thread is not blocked while workers may call `server.execute`.
 4. **Server thread** (`server.execute`): **purge `targets`**, clear grow-pending if it was for this victim, remove clam from registry, clear victim/barrier, optional legacy `save`, then start the next queued kill if any.
 
@@ -40,7 +40,7 @@ Work tied to a specific clam stops when **any** of: the server is stopping; a **
 
 ## `Clam` mutation from pathfinding workers
 
-`clamReach` runs on the pathfinder pool and reads/writes the same **`Clam`** instance the main thread uses (`busyFlagMainCycle`, blacklists). Ordering is relied on so the busy flag is not corrupted in normal operation; blacklists are also cleared on grow/repair. This matches historical risk; a stricter port could confine `Clam` mutation to the main thread only.
+`clamReach` runs on the pathfinder pool and reads/writes the same **`Clam`** instance the main thread uses (`mainCycleBusy`, blacklists). Ordering is relied on so the busy flag is not corrupted in normal operation; blacklists are also cleared on grow/repair. This matches historical risk; a stricter port could confine `Clam` mutation to the main thread only.
 
 **Porting:** New off-thread work must respect `shouldAbortAsyncPathfindingWork` and the kill barrier; new kill paths should use the same coordinator or extend it.
 
@@ -58,7 +58,7 @@ Work tied to a specific clam stops when **any** of: the server is stopping; a **
 
 **Porting note:** If delayed tasks are scheduled with per-dimension worlds, ensure the tick passes the same world reference used for scheduling, or change `tick` to match on registry key like `hasPendingTasks`.
 
-## `busyFlagMainCycle`
+## `mainCycleBusy`
 
 Per-clam **binary lock** (0 = idle, non-zero = busy) for the **reach → pathfind → apply path** cycle.
 
@@ -70,7 +70,9 @@ Per-clam **binary lock** (0 = idle, non-zero = busy) for the **reach → pathfin
 | `calculatePath` succeeds | Left at `1` until `buildPath` finishes or aborts |
 | `buildPath` | Cleared on early exit (bad cost, unloaded chunk, seek flags off, stamina blocked, final light/empty goal step) or **after** container apply for ore / path-stopped block breaks (see `pathStoppedAwaitingContainer` in `Pathfinder`) |
 
-**Grow/repair idle check** (`tickGrowPendingCheck`): Waits until `busyFlagMainCycle == 0` for the command target clam, **`countTargetsQueuedForClam(cmdId) == 0`**, and **`!isResizeShellAnimationPending(world)`** (same dimension as `growPendingWorld`) before running **`clamReSize`** / auto routine. It does **not** use **`hasPendingTasks`**.
+**Grow/repair idle check** (`tickGrowPendingCheck`): Waits until `mainCycleBusy == 0` for the command target clam, heart **chunk loaded**, **`countTargetsQueuedForClam(cmdId) == 0`**, and **`!isResizeShellAnimationPending(world)`** (same dimension as `growPendingWorld`) before running **`clamReSize`** / auto routine. It does **not** use **`hasPendingTasks`**. After **`runAutoGrowRoutineSingle`**, **`nextAutoGrowRepairWorldTime`** is set from **`world.getTime() + autoGrowRepairIntervalTicks()`**.
+
+**Reach while grow queued:** **`clamReach`** returns immediately when **`isGrowRepairPendingForClam`** is true (auto or `/voidclam` grow/repair), matching “no reach during repair/grow cycle.”
 
 ## `busyFlagPlaceEvent`
 

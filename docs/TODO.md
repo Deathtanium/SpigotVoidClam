@@ -53,6 +53,6 @@ Breaking a **spawned-in** (or not-yet-awakened) heart drops **two** heart items:
 
 ## Notes
 
-- Implementation should stay consistent with existing tick order, `busyFlagMainCycle`, and resize cooldown rules documented under `docs/logic/` (the logic docs may need to be updated btw)
+- Implementation should stay consistent with existing tick order, `mainCycleBusy`, and resize cooldown rules documented under `docs/logic/` (the logic docs may need to be updated btw)
 - After shipping a bullet, either remove it from this file or mark it done and link the PR/commit if the team wants history.
 - Investigate whether packet-forgery-based visual illusions are computationally cheaper than spawning and ticking full display entities for tendril VFX.

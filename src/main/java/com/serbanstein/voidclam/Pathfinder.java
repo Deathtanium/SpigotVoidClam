@@ -632,7 +632,7 @@ public final class Pathfinder {
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
                     return AStarExpandResult.ABORT;
                 }
-                if (modForFlag.busyFlagMainCycle == 0) {
+                if (modForFlag.mainCycleBusy == 0) {
                     return AStarExpandResult.ABORT;
                 }
                 VoidClamMod.enqueueTarget(nextNode);
@@ -827,7 +827,7 @@ public final class Pathfinder {
     /**
      * {@link VoidClamConfig.AstarMode#SYNC_BATCHED}: enqueues a server-tick job whose prepass and A* steps share the main thread.
      * {@link VoidClamConfig.AstarMode#ASYNC}: pathfinder worker runs prepass BFS then the A* loop on that same thread; unreachable
-     * prepass clears {@code busyFlagMainCycle} and returns before building the open list. {@code bfs_mode} does not change prepass.
+     * prepass clears {@code Clam#mainCycleBusy} and returns before building the open list. {@code bfs_mode} does not change prepass.
      */
     public static boolean calculatePath(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
         if (!world.isChunkLoaded(sx >> 4, sz >> 4)) {
@@ -1249,7 +1249,7 @@ public final class Pathfinder {
         final int pathOriginY = mod.y;
         final int pathOriginZ = mod.z;
         final Clam modForFlag = mod;
-        if (modForFlag.busyFlagMainCycle == 0) {
+        if (modForFlag.mainCycleBusy == 0) {
             return;
         }
         if (gnode.f >= 2500) {
