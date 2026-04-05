@@ -102,6 +102,11 @@ public final class VoidClamConfig {
      * Natural grow attempts only when {@code energy > this * currentSize}. Each successful light feed adds 1 energy.
      */
     public int clam_grow_energymultiplier = 4;
+    /**
+     * Material consumed for each successful **auto** grow (+1 {@link Clam#currentSize}) in {@link VoidClamMod#runAutoGrowRoutineSingle}.
+     * {@code 0} keeps legacy behavior (grow costs energy only). Operator {@code /voidclam grow} is not debited here.
+     */
+    public int clam_grow_material_cost = 0;
     /** Auto repair/grow cadence in seconds (world-time based; per-clam phase offset still applies). */
     public int clam_repair_grow_cycle_interval_seconds = 5 * 60;
     /** How often awake clams attempt target selection/pathfinding in seconds (phase-staggered per clam). */
@@ -169,6 +174,7 @@ public final class VoidClamConfig {
         if (clam_spawn_natural_default_chunk_chance > 1) clam_spawn_natural_default_chunk_chance = 1;
         if (clam_size_max < 1) clam_size_max = 1;
         if (clam_grow_energymultiplier < 1) clam_grow_energymultiplier = 1;
+        if (clam_grow_material_cost < 0) clam_grow_material_cost = 0;
         if (clam_repair_grow_cycle_interval_seconds < 1) clam_repair_grow_cycle_interval_seconds = 1;
         if (clam_seek_attempt_interval_seconds < 1) clam_seek_attempt_interval_seconds = 1;
         if (clam_seek_attempt_probability < 0) clam_seek_attempt_probability = 0;

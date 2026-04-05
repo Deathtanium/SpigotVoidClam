@@ -59,7 +59,7 @@ Abstract feature list:
     - ? room check
         - ? blocks replaceable by either sculk or moss do not count as obstacles (this is a cheap way to avoid breaking potentially precious blocks while growing)
         - ? natural blocks not considered obstacles
-        - ❌ material cost for growing (not sure how much this should be)
+        - ✅ material cost for **auto** grow: `clam_grow_material_cost` (default `0`); each successful +1 size in the scheduled auto routine debits this much material if non-zero; `/voidclam grow` unchanged
         
 - ✅ repairing 
     - ✅ costs and consumes "material"
@@ -106,7 +106,7 @@ behavioral flow is below; current implementation may be more needlessly complex 
                          ticked                                                              
                             │                                                                
                             ▼                                                                
-                       check ice encased─y─► dormant immediately: no thermal seek/defense; **cancel** sync A*, busy flag, and queued path targets (early in tick, before sync A* step); async workers abort via ice check; delayed path-apply steps exit if no longer thermally active  
+                       check ice encased─y─► dormant immediately: no thermal seek/defense; **cancel** sync A*, busy flag, and queued path targets (early in tick, before sync A* step); async workers abort if not thermally active; delayed path-apply steps exit if no longer thermally active  
                             │                                                                
                             n                                                                
                             │                                                                

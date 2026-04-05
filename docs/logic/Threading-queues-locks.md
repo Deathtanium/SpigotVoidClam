@@ -13,7 +13,7 @@
 
 Work tied to a specific clam stops when **any** of: the server is stopping; a **coordinated clam kill** has marked this clam’s **UUID** as victim; that clam’s **center chunk is unloaded** (`world.isChunkLoaded(cx >> 4, cz >> 4)`).
 
-- **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)` — pass the path job’s `clamId` for kill matching.
+- **Combined API**: `VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)` — pass the path job’s `clamId` for kill matching. When the job’s clam is resolved and its heart chunk is loaded, abort also applies if `!VoidClamMod.isSearingHeartThermallyActive` (ice dormancy, `status != 1`, etc.), not ice-only.
 - **Shutdown flag**: `isAsyncPathfindingShutdownRequested()` — volatile; when `true`, worker tasks must **stop quickly**, **not** call `enqueueTarget`, and **not** schedule main-thread work from pathfinding.
 - **Kill barrier**: `isAsyncPathfindingKillBarrierInEffect()` — while `true`, `submitPathfinding` **rejects without queuing** (runs `onAbortedBeforeRun` immediately). Used so no new async tasks are created during a kill drain. `asyncPathfindingKillVictimClamId` identifies which clam is aborted cooperatively in workers.
 - **Set (shutdown)**: `VoidClamMod.onAsyncPathfindingSessionStop()` at `SERVER_STOPPING` (before save). Clears kill barrier state, sets the shutdown flag, **shuts down and awaits** the pathfinder executor, **replaces** the pool, and clears every clam’s `busyFlagMainCycle`.

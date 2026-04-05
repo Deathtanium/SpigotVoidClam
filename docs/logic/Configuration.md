@@ -37,6 +37,7 @@ Authoritative schema: `VoidClamConfig.java` (Gson loads **`config/voidclam.json`
 |-----|---------|
 | `clam_size_max` | Upper bound on shell size. |
 | `clam_grow_energymultiplier` | Natural grow only when `energy > multiplier * currentSize` (energy per light feed ≈ 1). |
+| `clam_grow_material_cost` | Material consumed per successful **auto** grow (+1 size) in `runAutoGrowRoutineSingle`. `0` = no material cost (default). Does not apply to `/voidclam grow`. |
 | `clam_repair_grow_cycle_interval_seconds` | Base period for auto repair/grow scheduling (world time). |
 | `clam_seek_attempt_interval_seconds` | How often an awake clam may start a seek attempt (staggered per clam). |
 | `clam_seek_attempt_probability` | After each seek interval, probability in `0..1` that `clamReach` actually runs (`1` = always). |

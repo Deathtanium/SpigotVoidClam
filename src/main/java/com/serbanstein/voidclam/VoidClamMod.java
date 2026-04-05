@@ -200,7 +200,8 @@ public final class VoidClamMod {
 
     /**
      * Off-thread pathfinding should stop when the server is shutting down, the clam center chunk is unloaded, this clam's UUID
-     * is the coordinated-kill victim, or the heart is **fully ice-encased** (same instant-dormancy rule as {@link #tickLoadedClamCores}).
+     * is the coordinated-kill victim, or the heart is **not thermally active** (ice dormancy, {@code status != 1}, etc. —
+     * same gate as {@link #isSearingHeartThermallyActive} / {@link CommandToolbox#clamReach}).
      *
      * @param pathfindingClamId stable id for this path job; kill barrier matches this UUID
      */
@@ -223,7 +224,7 @@ public final class VoidClamMod {
             if (cm != null && world.getServer() != null) {
                 ServerWorld dim = world.getServer().getWorld(cm.dimensionWorldKey());
                 if (dim != null && dim.isChunkLoaded(cm.x >> 4, cm.z >> 4)
-                    && isHeartFullyIceEncased(dim, new BlockPos(cm.x, cm.y, cm.z))) {
+                    && !isSearingHeartThermallyActive(dim, cm)) {
                     return true;
                 }
             }
@@ -1970,7 +1971,13 @@ public final class VoidClamMod {
             }
             if (cst <= 10 * csize) {
                 int nextSize = Math.min(m.currentSize + 1, cfg.clam_size_max);
-                if (nextSize > m.currentSize) {
+                int matCost = cfg.clam_grow_material_cost;
+                if (nextSize > m.currentSize && matCost > 0 && m.material < matCost) {
+                    // Room and energy OK; wait for more material before +1 size.
+                } else if (nextSize > m.currentSize) {
+                    if (matCost > 0) {
+                        addMaterial(m.clamId, -matCost);
+                    }
                     m.energy = 0;
                     CommandToolbox.clamReSize(world, m.clamId, nextSize);
                     m.currentSize = nextSize;

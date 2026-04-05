@@ -46,7 +46,8 @@ Clams whose chunks are unloaded **miss** that interval’s window; they reschedu
 2. Clear both blacklists.
 3. If `energy <= clam_grow_energymultiplier * currentSize` or `currentSize >= clam_size_max`, skip growth.
 4. Else scan interior volume for blast resistance / “has room” heuristics (`cst > 10 * cSize` fails).
-5. If room: zero energy, `clamReSize` to a larger size per config/heuristics, updating `currentSize`.
+5. If room and `clam_grow_material_cost > 0` but `material` is below that cost, skip growth (energy is not zeroed).
+6. If room: optionally debit `clam_grow_material_cost`, zero energy, `clamReSize` to a larger size per config/heuristics, updating `currentSize`.
 
 ## `clamReSize` (summary)
 
