@@ -38,7 +38,7 @@ Abstract feature list:
     - ✅ path build after calculation
         - ✅ final, atomic, sanity check; path will stop early:
             - ✅ after a block has been broken
-                - ❌ applies to solid blocks only
+                - ✅ applies to **solid** breaks only (hardness heuristic aligned with pathfinding “stickiness”: soft replacement continues the path)
             - ? before stepping into a block that has changed since the pathfinding stage (e.g. if a player or another voidclam); **expect this to be superseded** by the **reachability map** (single coherent model for search + apply). After the map is implemented and validated, **remove this bullet** (and prune other reach/prepass/cache bullets the map replaces) so FEATURES stays minimal
         - ? stamina cost based on block cost to not have the entire path be built all at once; known issue (not planning to fix) is that this results in repeated re-calculations 
         - ✅ block break preservation; when path building is about to replace a solid block, its drop item is calculated (either itself or some arbitrary loot in some cases), then a BFS search from the heart is started for a storage block connected via the flesh blocks and the closest container is chosen that can fit the loot; if no such storage block exists, one is created on the spot, like an "organic storage nodule" (it's a barrel on vanilla-compatible versions) and future loot will naturally flow into that

@@ -927,6 +927,11 @@ public final class Pathfinder {
     /** True if block at pos is "solid" for tendril stickiness (not air/fluid/soft/wart). */
     private static boolean isSolid(World world, PathfindChunkCache pathChunkCache, BlockPos pos) {
         BlockState state = pathChunkCache.getBlockState(pos);
+        return isSolidForTendrilPath(world, pos, state);
+    }
+
+    /** Same rules as {@link #isSolid} but for live world reads (path apply vs chunk cache). */
+    private static boolean isSolidForTendrilPath(World world, BlockPos pos, BlockState state) {
         if (state.isOf(Blocks.NETHER_WART_BLOCK)) return false;
         if (VoidClamMod.isBaseCost(state.getBlock())) return false;
         return getHardness(world, pos, state) > 0.2f;
@@ -1390,7 +1395,9 @@ public final class Pathfinder {
                 sliceState.stamina -= cst;
 
                 boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat));
-                if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR) {
+                // Stop further dig steps only after a "solid" break (same hardness heuristic as pathfinding stickiness).
+                // Soft plants, torches, etc. are consumed in-place without ending the path early.
+                if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR && isSolidForTendrilPath(world, pos, mat)) {
                     sliceState.pathStopped = true;
                     sliceState.pathStoppedAwaitingContainer = true;
                     ItemStack toStore = new ItemStack(mat.getBlock().asItem(), 1);
