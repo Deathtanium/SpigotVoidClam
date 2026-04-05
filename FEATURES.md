@@ -49,7 +49,7 @@ Abstract feature list:
     - ✅ clams mainly eat lights for the "energy" resource via the "reach" function
         - ? each light block has an arbitrary energy value depending on how "strong" I think they are as a light source
         - ? eaten Beacon blocks refund the nether star via "block break preservation"
-        - ❌ method to dynamically determine what blocks are light source blocks, no matter what future minecraft versions bring to the table or what mods are installed, with an optional whitelist and blacklist in the config
+        - ✅ optional **dynamic lights**: `clam_light_detect_dynamic` + `clam_light_luminance_min` + `c:lights` (`clam_light_detect_c_lights_tag`) + `clam_light_block_allowlist` / `clam_light_block_denylist`; default off (static set + copper heuristic only)
         
     - ? clams eat ores for the "material" resource
         - ✅ while clams always seek lights when enabled, **material / ore hunger** uses each heart’s persisted **`materialSeekThreshold`**: when `material < threshold`, ore-style replenishment pathing can run (with `seekLights`). Baseline is `min(config, 10×currentSize)` (same cap as max material); threshold **+1** each **auto** cycle with **no** shell damage, **capped** at that maximum; it **resets** to the baseline whenever the clam **grows** (`currentSize` up).

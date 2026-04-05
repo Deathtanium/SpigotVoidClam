@@ -29,6 +29,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.World;
 import net.minecraft.world.biome.Biome;
 import net.minecraft.registry.RegistryKey;
@@ -125,6 +126,8 @@ public final class VoidClamMod {
     private static final TagKey<Block> PALE_MOSS_REPLACE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "pale_moss_replace"));
     /** Common convention tag (Fabric / mod ecosystem); fallback list in {@link #ores} still applies. */
     private static final TagKey<Block> COMMON_ORES_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("c", "ores"));
+    /** Optional tag when {@link VoidClamConfig#clam_light_detect_dynamic} and {@link VoidClamConfig#clam_light_detect_c_lights_tag} are on. */
+    private static final TagKey<Block> COMMON_LIGHTS_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("c", "lights"));
     public record ShellDamageStats(int obsidianPresent, int shellMissing) {
         public int shellTotal() {
             return obsidianPresent + shellMissing;
@@ -900,14 +903,53 @@ public final class VoidClamMod {
         return p.contains("torch") || p.contains("lantern");
     }
 
+    /**
+     * Whether this block state counts as light “food” for seek / cache / wake fuel. Uses world position when
+     * {@link VoidClamConfig#clam_light_detect_dynamic} uses luminance (state is authoritative; {@code world}/{@code pos} reserved).
+     */
+    public static boolean isLight(BlockState state, @Nullable BlockView world, BlockPos pos) {
+        Block block = state.getBlock();
+        VoidClamConfig cfg = VoidClamConfig.get();
+        if (cfg != null && cfg.isBlockLightDenied(block)) {
+            return false;
+        }
+        if (lights.contains(block) || isCopperTorchOrLantern(block)) {
+            return true;
+        }
+        if (cfg == null || !cfg.clam_light_detect_dynamic) {
+            return false;
+        }
+        if (cfg.lightDynamicAllowlistRestricts() && !cfg.isBlockLightAllowlisted(block)) {
+            return false;
+        }
+        if (cfg.clam_light_detect_c_lights_tag && state.isIn(COMMON_LIGHTS_TAG)) {
+            return true;
+        }
+        return state.getLuminance() >= cfg.clam_light_luminance_min;
+    }
+
+    /** When no {@link BlockState} is handy; uses default state (wrong for some properties — prefer {@link #isLight(BlockState, BlockView, BlockPos)}). */
     public static boolean isLight(Block block) {
-        return lights.contains(block) || isCopperTorchOrLantern(block);
+        return isLight(block.getDefaultState(), null, BlockPos.ORIGIN);
+    }
+
+    public static int lightEnergyForBlock(BlockState state) {
+        Block block = state.getBlock();
+        if (block == Blocks.BEACON) {
+            return 5;
+        }
+        if (fullBlockLightEnergy2.contains(block)) {
+            return 2;
+        }
+        VoidClamConfig cfg = VoidClamConfig.get();
+        if (cfg != null && cfg.clam_light_detect_dynamic && state.getLuminance() >= 15) {
+            return 2;
+        }
+        return 1;
     }
 
     public static int lightEnergyForBlock(Block block) {
-        if (block == Blocks.BEACON) return 5;
-        if (fullBlockLightEnergy2.contains(block)) return 2;
-        return 1;
+        return lightEnergyForBlock(block.getDefaultState());
     }
 
     /**
@@ -995,7 +1037,8 @@ public final class VoidClamMod {
             if (!world.isChunkLoaded(mut.getX() >> 4, mut.getZ() >> 4)) {
                 continue;
             }
-            if (VoidClamMod.isLight(world.getBlockState(mut).getBlock())) {
+            BlockState lst = world.getBlockState(mut);
+            if (VoidClamMod.isLight(lst, world, mut)) {
                 m.lightsCache.add(mut.asLong());
             }
         }
@@ -1074,7 +1117,8 @@ public final class VoidClamMod {
     /** If the path goal is still a registered light block, drop it from this clam's cache (unreachable prepass). */
     public static void removeLightGoalFromCacheIfPrepassUnreachable(ServerWorld world, UUID clamId, int gx, int gy, int gz) {
         BlockPos goal = new BlockPos(gx, gy, gz);
-        if (!isLight(world.getBlockState(goal).getBlock())) {
+        BlockState gst = world.getBlockState(goal);
+        if (!isLight(gst, world, goal)) {
             return;
         }
         removeLightFromClamCacheAfterFailedPath(clamId, goal);
@@ -1107,8 +1151,9 @@ public final class VoidClamMod {
      */
     public static void removeSeekGoalFromCachesAfterFailedPath(ServerWorld world, UUID clamId, int gx, int gy, int gz) {
         BlockPos goal = new BlockPos(gx, gy, gz);
-        Block b = world.getBlockState(goal).getBlock();
-        if (isLight(b)) {
+        BlockState gbs = world.getBlockState(goal);
+        Block b = gbs.getBlock();
+        if (isLight(gbs, world, goal)) {
             removeLightFromClamCacheAfterFailedPath(clamId, goal);
         }
         if (isOre(b)) {
@@ -1157,7 +1202,7 @@ public final class VoidClamMod {
     public static void enqueueLightCacheDeltaFromBlockChange(ServerWorld world, BlockPos pos, BlockState oldState, BlockState newState) {
         Block ob = oldState.getBlock();
         Block nb = newState.getBlock();
-        boolean lightRel = isLight(ob) || isLight(nb);
+        boolean lightRel = isLight(oldState, world, pos) || isLight(newState, world, pos);
         boolean oreRel = isOre(ob) || isOre(nb);
         if (!lightRel && !oreRel) {
             return;
@@ -1231,10 +1276,8 @@ public final class VoidClamMod {
         if (!VoidClamConfig.get().lightBlockCacheEnabled()) {
             return;
         }
-        Block ob = oldState.getBlock();
-        Block nb = newState.getBlock();
-        boolean wasLight = isLight(ob);
-        boolean nowLight = isLight(nb);
+        boolean wasLight = isLight(oldState, world, pos);
+        boolean nowLight = isLight(newState, world, pos);
         if (!wasLight && !nowLight) {
             return;
         }

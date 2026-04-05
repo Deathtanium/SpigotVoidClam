@@ -3,6 +3,9 @@ package com.serbanstein.voidclam;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.block.Block;
+import net.minecraft.registry.Registries;
+import net.minecraft.util.Identifier;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -11,8 +14,12 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -130,11 +137,39 @@ public final class VoidClamConfig {
      */
     public boolean clam_ore_detect_with_c_ores_tag = true;
 
+    /**
+     * When {@code true}, {@link VoidClamMod#isLight} may also accept blocks via {@code c:lights} (if enabled below),
+     * block luminance, and optional allowlist rules. Static core list + copper torch/lantern heuristic still apply first.
+     * Default {@code false} preserves vanilla-adjacent behavior unless enabled.
+     */
+    public boolean clam_light_detect_dynamic = false;
+    /**
+     * Minimum {@link net.minecraft.block.BlockState#getLuminance()} for luminance-based detection (0–15).
+     * Used only when {@link #clam_light_detect_dynamic} is {@code true}.
+     */
+    public int clam_light_luminance_min = 1;
+    /**
+     * When {@code true} and {@link #clam_light_detect_dynamic} is {@code true}, blocks in {@code c:lights} count as lights.
+     */
+    public boolean clam_light_detect_c_lights_tag = true;
+    /**
+     * If non-empty, luminance/tag dynamic detection applies only to these block ids ({@code namespace:path}).
+     * Core static lights and copper heuristic ignore the allowlist. Optional tightening for modpacks.
+     */
+    public List<String> clam_light_block_allowlist = new ArrayList<>();
+    /**
+     * Block ids ({@code namespace:path}) never treated as lights (checked before all other rules).
+     */
+    public List<String> clam_light_block_denylist = new ArrayList<>();
+
     public boolean vfx_enabled = true;
     public double sfx_volume_multiplier = 1.0;
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static volatile VoidClamConfig instance = defaultInstance();
+
+    private transient Set<Block> resolvedLightAllowBlocks = Set.of();
+    private transient Set<Block> resolvedLightDenyBlocks = Set.of();
 
     private static VoidClamConfig defaultInstance() {
         return new VoidClamConfig();
@@ -206,6 +241,53 @@ public final class VoidClamConfig {
         // Keep legacy keys migration-only so config converges to one cache flag.
         light_block_cache = null;
         ore_block_cache = null;
+        if (clam_light_block_allowlist == null) {
+            clam_light_block_allowlist = new ArrayList<>();
+        }
+        if (clam_light_block_denylist == null) {
+            clam_light_block_denylist = new ArrayList<>();
+        }
+        if (clam_light_luminance_min < 0) {
+            clam_light_luminance_min = 0;
+        }
+        if (clam_light_luminance_min > 15) {
+            clam_light_luminance_min = 15;
+        }
+        resolvedLightAllowBlocks = resolveConfigBlockSet(clam_light_block_allowlist);
+        resolvedLightDenyBlocks = resolveConfigBlockSet(clam_light_block_denylist);
+    }
+
+    private static Set<Block> resolveConfigBlockSet(List<String> ids) {
+        Set<Block> out = new HashSet<>();
+        if (ids == null) {
+            return out;
+        }
+        for (String raw : ids) {
+            if (raw == null) {
+                continue;
+            }
+            Identifier id = Identifier.tryParse(raw.trim());
+            if (id == null) {
+                continue;
+            }
+            if (Registries.BLOCK.containsId(id)) {
+                out.add(Registries.BLOCK.get(id));
+            }
+        }
+        return out;
+    }
+
+    public boolean isBlockLightDenied(Block block) {
+        return block != null && !resolvedLightDenyBlocks.isEmpty() && resolvedLightDenyBlocks.contains(block);
+    }
+
+    /** When {@code true}, luminance/tag dynamic paths require {@link #isBlockLightAllowlisted}. */
+    public boolean lightDynamicAllowlistRestricts() {
+        return !resolvedLightAllowBlocks.isEmpty();
+    }
+
+    public boolean isBlockLightAllowlisted(Block block) {
+        return block != null && resolvedLightAllowBlocks.contains(block);
     }
 
     public NaturalSpawnMethod naturalSpawnMethodEnum() {

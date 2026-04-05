@@ -553,8 +553,8 @@ public final class CommandToolbox {
                                 }
                                 BlockPos pos = BlockPos.fromLong(packed);
                                 if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
-                                net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
-                                if (!VoidClamMod.isLight(block)) continue;
+                                net.minecraft.block.BlockState lst = world.getBlockState(pos);
+                                if (!VoidClamMod.isLight(lst, world, pos)) continue;
                                 double dist = modPos.getSquaredDistance(pos);
                                 if (dist < closestLightDist) {
                                     closestLightDist = dist;
@@ -580,8 +580,8 @@ public final class CommandToolbox {
                                         if (m.lightsBlackList.contains(packed)) {
                                             continue;
                                         }
-                                        net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
-                                        if (!VoidClamMod.isLight(block)) continue;
+                                        net.minecraft.block.BlockState lst = world.getBlockState(pos);
+                                        if (!VoidClamMod.isLight(lst, world, pos)) continue;
                                         double dist = modPos.getSquaredDistance(pos);
                                         if (dist < closestLightDist) {
                                             closestLightDist = dist;

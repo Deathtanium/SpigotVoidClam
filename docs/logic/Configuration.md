@@ -45,6 +45,16 @@ Authoritative schema: `VoidClamConfig.java` (Gson loads **`config/voidclam.json`
 | `clam_material_seek_threshold` | Baseline for **`materialSeekThreshold`** (new hearts, after each **growth**, legacy saves missing the field). Always clamped to **`resource_cap = 10 × currentSize`** (same as max material). Each **healthy** auto cycle (no shell damage) adds 1 up to that cap. Hunger: `material < materialSeekThreshold`. |
 | `clam_ore_detect_with_c_ores_tag` | When `true`, blocks in `c:ores` count as ores in addition to the mod’s built-in vanilla list. |
 
+## Dynamic light detection (optional)
+
+| Key | Meaning |
+|-----|---------|
+| `clam_light_detect_dynamic` | When `false` (default), only the built-in core light set + copper torch/lantern name heuristic count as lights. When `true`, also allow `c:lights` (if enabled), luminance threshold, and allowlist rules below. |
+| `clam_light_luminance_min` | Min block luminance (0–15) for dynamic detection. |
+| `clam_light_detect_c_lights_tag` | When `true` and dynamic is on, blocks in tag `c:lights` count (this mod ships an empty tag; datapacks/mods can add entries). |
+| `clam_light_block_allowlist` | JSON array of `namespace:path` strings. If non-empty, **only** those block types may qualify via tag/luminance (core list and copper heuristic are unchanged). |
+| `clam_light_block_denylist` | Block ids never counted as lights (overrides everything else). |
+
 ## Presentation
 
 | Key | Meaning |
