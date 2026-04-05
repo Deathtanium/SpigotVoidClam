@@ -15,6 +15,7 @@ import net.minecraft.util.Identifier;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -63,6 +64,7 @@ public final class SearingHeartItems {
         template.protectItself = cfg.clam_protect_itself_default;
         template.stubBuilt = false;
         template.repairWakeCyclesRemaining = VoidClamMod.SEARING_WAKE_REPAIR_CYCLES;
+        template.materialSeekThreshold = cfg.clam_material_seek_threshold;
         return createDropFromBreak(template, null);
     }
 
@@ -100,6 +102,7 @@ public final class SearingHeartItems {
         n.putBoolean("protectItself", m.protectItself);
         n.putBoolean("stubBuilt", m.stubBuilt);
         n.putInt("repairWakeCyclesRemaining", m.repairWakeCyclesRemaining);
+        n.putInt("materialSeekThreshold", m.materialSeekThreshold);
         if (m.worldKey != null) {
             n.putString("dimension", m.worldKey.getValue().toString());
         }
@@ -160,6 +163,12 @@ public final class SearingHeartItems {
                 m.worldKey = RegistryKey.of(RegistryKeys.WORLD, id);
             }
         });
+        Optional<Integer> thrOpt = n.getInt("materialSeekThreshold");
+        if (thrOpt.isPresent()) {
+            m.materialSeekThreshold = Math.max(0, thrOpt.get());
+        } else {
+            m.materialSeekThreshold = VoidClamConfig.get().clam_material_seek_threshold;
+        }
         return m;
     }
 
@@ -179,6 +188,7 @@ public final class SearingHeartItems {
         into.protectItself = snapshot.protectItself;
         into.stubBuilt = snapshot.stubBuilt;
         into.repairWakeCyclesRemaining = snapshot.repairWakeCyclesRemaining;
+        into.materialSeekThreshold = snapshot.materialSeekThreshold;
         into.worldKey = snapshot.worldKey;
         into.lightsCache.clear();
         into.oresCache.clear();
@@ -214,6 +224,7 @@ public final class SearingHeartItems {
         m.ensureClamId();
         m.material = Math.max(0, m.material);
         m.energy = Math.max(0, m.energy);
+        m.materialSeekThreshold = Math.max(0, m.materialSeekThreshold);
         ComponentMap current = furnace.getComponents();
         NbtCompound root = new NbtCompound();
         NbtComponent existingData = current.get(DataComponentTypes.CUSTOM_DATA);

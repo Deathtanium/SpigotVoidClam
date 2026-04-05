@@ -538,7 +538,7 @@ public final class CommandToolbox {
                 BlockPos closestOre = null;
                 double closestOreDist = Double.MAX_VALUE;
                 VoidClamConfig cfg = VoidClamConfig.get();
-                boolean oreHunger = m.seekLights && m.material < cfg.clam_material_seek_threshold;
+                boolean oreHunger = m.seekLights && m.material < m.materialSeekThreshold;
                 boolean oreRepairPriority = m.seekLights && m.prioritizeRepairOreSeek;
                 boolean materialOreFlow = oreHunger || oreRepairPriority;
                 boolean shouldSeekOre = m.seekOres || materialOreFlow;

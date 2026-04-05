@@ -42,12 +42,16 @@ Clams whose chunks are unloaded **miss** that interval’s window; they reschedu
 
 ## `runAutoGrowRoutineSingle` (one clam, loaded chunk)
 
-1. `clamReSize(world, clamId, currentSize)` — repair shell to recorded size.
-2. Clear both blacklists.
-3. If `energy <= clam_grow_energymultiplier * currentSize` or `currentSize >= clam_size_max`, skip growth.
-4. Else scan interior volume for blast resistance / “has room” heuristics (`cst > 10 * cSize` fails).
-5. If room and `clam_grow_material_cost > 0` but `material` is below that cost, skip growth (energy is not zeroed).
-6. If room: optionally debit `clam_grow_material_cost`, zero energy, `clamReSize` to a larger size per config/heuristics, updating `currentSize`.
+1. If **shell damage** (`inspectObsidianShellDamage.shellMissing() > 0`): repair-sized `clamReSize`, clear blacklists, set `prioritizeRepairOreSeek` from material vs damage, return — **no** change to `materialSeekThreshold`.
+2. If **no shell damage** (healthy cycle): increment **`materialSeekThreshold`** by 1 (persisted on heart), sync block entity, then continue.
+3. `clamReSize(world, clamId, currentSize)` — refresh flesh/path to recorded size.
+4. Clear both blacklists.
+5. If `energy <= clam_grow_energymultiplier * currentSize` or `currentSize >= clam_size_max`, skip growth.
+6. Else scan interior volume for blast resistance / “has room” heuristics (`cst > 10 * cSize` fails).
+7. If room and `clam_grow_material_cost > 0` but `material` is below that cost, skip growth (energy is not zeroed).
+8. If room: optionally debit `clam_grow_material_cost`, zero energy, `clamReSize` to a larger size per config/heuristics, updating `currentSize`.
+
+**Material hunger:** `CommandToolbox.clamReach` treats ore-flow / hunger when `seekLights && material < materialSeekThreshold` (or repair-priority ore seek). The threshold is not the static config value after load — it climbs on each healthy auto cycle so intact clams gradually demand more stockpiled material before feeling “full,” encouraging mining toward growth costs.
 
 ## `clamReSize` (summary)
 

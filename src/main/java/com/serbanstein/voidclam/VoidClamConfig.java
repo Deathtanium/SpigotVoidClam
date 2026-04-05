@@ -118,7 +118,10 @@ public final class VoidClamConfig {
     public double clam_seek_attempt_probability = 1.0;
     /** Player defense check cadence in seconds; keep at or above goat-horn sound length to avoid overlap. */
     public int clam_defense_detection_interval_seconds = 8;
-    /** Ore-hunger trigger for material replenishment pathing. When material is below this, ore seeking can run. */
+    /**
+     * Starting value for each heart’s {@link Clam#materialSeekThreshold} (new placements, `/giveheart`, legacy saves missing the field).
+     * Ore hunger uses {@code material < materialSeekThreshold}; the live threshold rises by 1 on each healthy auto repair/grow cycle.
+     */
     public int clam_material_seek_threshold = 5;
     /**
      * When {@code true} (default), {@link VoidClamMod#isOre} is also true for blocks in the {@code c:ores} block tag

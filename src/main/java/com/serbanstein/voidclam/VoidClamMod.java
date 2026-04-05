@@ -1488,7 +1488,7 @@ public final class VoidClamMod {
             return lines;
         }
         if (world == null) {
-            boolean oreHunger = m.seekLights && m.material < VoidClamConfig.get().clam_material_seek_threshold;
+            boolean oreHunger = m.seekLights && m.material < m.materialSeekThreshold;
             boolean materialOreFlow = oreHunger || (m.seekLights && m.prioritizeRepairOreSeek);
             String activeGoal = m.orePathGoalPacked != null ? "ore" : (m.lightPathGoalPacked != null ? "light" : "none");
             lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
@@ -1502,12 +1502,12 @@ public final class VoidClamMod {
                 + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
             lines.add("resources: energy=" + m.energy + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
                 + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
-            lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " activeGoal=" + activeGoal);
+            lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " materialSeekThreshold=" + m.materialSeekThreshold + " activeGoal=" + activeGoal);
             lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=?");
             lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
             return lines;
         }
-        boolean oreHunger = m.seekLights && m.material < VoidClamConfig.get().clam_material_seek_threshold;
+        boolean oreHunger = m.seekLights && m.material < m.materialSeekThreshold;
         boolean materialOreFlow = oreHunger || (m.seekLights && m.prioritizeRepairOreSeek);
         String activeGoal = m.orePathGoalPacked != null ? "ore" : (m.lightPathGoalPacked != null ? "light" : "none");
         lines.add("flags: seekLights=" + m.seekLights + " seekOres=" + m.seekOres + " protectItself=" + m.protectItself
@@ -1521,7 +1521,7 @@ public final class VoidClamMod {
             + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
         lines.add("resources: energy=" + m.energy + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
             + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
-        lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " activeGoal=" + activeGoal);
+        lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " materialSeekThreshold=" + m.materialSeekThreshold + " activeGoal=" + activeGoal);
         lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=" + world.getTime());
         lines.add("targetsQueuedForClam=" + countTargetsQueuedForClam(m.clamId));
         return lines;
@@ -1669,6 +1669,7 @@ public final class VoidClamMod {
         m.seekLights = cfg.clam_light_flag_default;
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
+        m.materialSeekThreshold = cfg.clam_material_seek_threshold;
         m.repairWakeCyclesRemaining = 0;
         if (!registerClam(m)) {
             return null;
@@ -1944,7 +1945,9 @@ public final class VoidClamMod {
             return;
         }
         m.prioritizeRepairOreSeek = false;
-        // No shell damage: flesh/path cleanup remains free as before.
+        m.materialSeekThreshold = Math.max(0, m.materialSeekThreshold) + 1;
+        syncClamCoreBlockEntityFromClam(world, m);
+        // No shell damage healthy cycle: raise ore comfort target so material gathering scales with time intact.
         CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
         m.oresBlackList.clear();
         m.lightsBlackList.clear();

@@ -33,6 +33,12 @@ public class Clam {
     public int status;
     /** Internal resource used for shell repair and ore-hunger logic (persisted on heart NBT). */
     public int material;
+    /**
+     * When {@link #seekLights} and {@code material < this}, ore-style material hunger pathing is allowed (alongside {@link #prioritizeRepairOreSeek}).
+     * Starts at {@link VoidClamConfig#clam_material_seek_threshold} for new/legacy hearts; increases by 1 on each auto repair/grow cycle with **no** shell damage.
+     * Persisted on heart NBT.
+     */
+    public int materialSeekThreshold;
     public int energy;
     /** Age since last phase change / startpassive */
     public int age;

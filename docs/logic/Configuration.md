@@ -42,7 +42,7 @@ Authoritative schema: `VoidClamConfig.java` (Gson loads **`config/voidclam.json`
 | `clam_seek_attempt_interval_seconds` | How often an awake clam may start a seek attempt (staggered per clam). |
 | `clam_seek_attempt_probability` | After each seek interval, probability in `0..1` that `clamReach` actually runs (`1` = always). |
 | `clam_defense_detection_interval_seconds` | Player-defense check cadence (keep ≥ horn length). |
-| `clam_material_seek_threshold` | Ore-seeking hunger when `material` is below this. |
+| `clam_material_seek_threshold` | Initial **`materialSeekThreshold`** on new hearts and when loading legacy saves without that field. Each **healthy** auto repair/grow cycle (no shell damage) increases the stored threshold by 1 so ore/material hunger rises over time. Hunger uses `material < materialSeekThreshold` (not this config key directly after the first tick). |
 | `clam_ore_detect_with_c_ores_tag` | When `true`, blocks in `c:ores` count as ores in addition to the mod’s built-in vanilla list. |
 
 ## Presentation
