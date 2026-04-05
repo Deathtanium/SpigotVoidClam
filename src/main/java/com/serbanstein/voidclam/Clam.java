@@ -41,6 +41,11 @@ public class Clam {
      */
     public int materialSeekThreshold;
     public int energy;
+    /**
+     * Accumulated from consuming **soul-tinted** light sources (soul fire, soul torch/lantern/campfire when lit).
+     * Capped like {@link #energy} via {@link VoidClamMod#resourceCapForSize}; not spent by any system yet (reserved for future mechanics).
+     */
+    public int soul;
     /** Age since last phase change / startpassive */
     public int age;
     /** Whether this clam seeks light sources */

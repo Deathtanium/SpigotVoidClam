@@ -96,6 +96,7 @@ public final class SearingHeartItems {
         n.putInt("status", m.status);
         n.putInt("material", m.material);
         n.putInt("energy", m.energy);
+        n.putInt("soul", m.soul);
         n.putInt("age", m.age);
         n.putBoolean("seekLights", m.seekLights);
         n.putBoolean("seekOres", m.seekOres);
@@ -144,6 +145,7 @@ public final class SearingHeartItems {
         m.status = n.getInt("status").orElse(0);
         m.material = Math.max(0, n.getInt("material").orElse(0));
         m.energy = n.getInt("energy").orElse(0);
+        m.soul = Math.max(0, n.getInt("soul").orElse(0));
         m.age = n.getInt("age").orElse(0);
         m.seekLights = n.getBoolean("seekLights").orElse(false);
         m.seekOres = n.getBoolean("seekOres").orElse(false);
@@ -184,6 +186,7 @@ public final class SearingHeartItems {
         into.status = snapshot.status;
         into.material = snapshot.material;
         into.energy = snapshot.energy;
+        into.soul = snapshot.soul;
         into.age = snapshot.age;
         into.seekLights = snapshot.seekLights;
         into.seekOres = snapshot.seekOres;
@@ -224,10 +227,11 @@ public final class SearingHeartItems {
             return;
         }
         m.ensureClamId();
-        m.material = Math.max(0, m.material);
-        m.energy = Math.max(0, m.energy);
-        int matCap = VoidClamMod.resourceCapForSize(m.currentSize);
-        m.materialSeekThreshold = Math.max(0, Math.min(m.materialSeekThreshold, matCap));
+        int cap = VoidClamMod.resourceCapForSize(m.currentSize);
+        m.material = Math.max(0, Math.min(m.material, cap));
+        m.energy = Math.max(0, Math.min(m.energy, cap));
+        m.soul = Math.max(0, Math.min(m.soul, cap));
+        m.materialSeekThreshold = Math.max(0, Math.min(m.materialSeekThreshold, cap));
         ComponentMap current = furnace.getComponents();
         NbtCompound root = new NbtCompound();
         NbtComponent existingData = current.get(DataComponentTypes.CUSTOM_DATA);

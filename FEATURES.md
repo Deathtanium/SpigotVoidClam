@@ -46,6 +46,7 @@ Abstract feature list:
     - NOTE: considering replacing A* altogether with creating a 
         
 - ✅ resource budget
+    - ✅ **`soul`** resource (persisted on heart): same cap as **`energy`** (`10×size`); +1 when a **soul-fire family** light is eaten at path goal (`soul_fire`, soul torch/wall torch/lantern, lit soul campfire); **not consumed** by any system yet (see `docs/logic/Resources-and-caps.md`)
     - ✅ clams mainly eat lights for the "energy" resource via the "reach" function
         - ? each light block has an arbitrary energy value depending on how "strong" I think they are as a light source
         - ? eaten Beacon blocks refund the nether star via "block break preservation"

@@ -4,6 +4,7 @@ import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.CampfireBlock;
 import net.minecraft.block.SnowBlock;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
@@ -205,8 +206,10 @@ public final class VoidClamMod {
         if (m == null) return;
         int cap = resourceCapForSize(m.currentSize);
         if (m.energy > cap) m.energy = cap;
+        if (m.soul > cap) m.soul = cap;
         if (m.material > cap) m.material = cap;
         if (m.energy < 0) m.energy = 0;
+        if (m.soul < 0) m.soul = 0;
         if (m.material < 0) m.material = 0;
         m.materialSeekThreshold = Math.max(0, Math.min(m.materialSeekThreshold, cap));
     }
@@ -904,6 +907,35 @@ public final class VoidClamMod {
     }
 
     /**
+     * Soul-fire family: dimmer than vanilla fire/torch but always a valid light target and grants counterpart energy + {@link Clam#soul}.
+     */
+    public static boolean isSoulLightSource(BlockState state) {
+        Block b = state.getBlock();
+        if (b == Blocks.SOUL_FIRE || b == Blocks.SOUL_TORCH || b == Blocks.SOUL_WALL_TORCH || b == Blocks.SOUL_LANTERN) {
+            return true;
+        }
+        return b == Blocks.SOUL_CAMPFIRE && state.contains(CampfireBlock.LIT) && Boolean.TRUE.equals(state.get(CampfireBlock.LIT));
+    }
+
+    /** Energy yield for soul sources = same rule as their non-soul counterpart (brightness ignored pre-recurse). */
+    private static int lightEnergyForSoulCounterpart(BlockState soulState) {
+        Block b = soulState.getBlock();
+        if (b == Blocks.SOUL_FIRE) {
+            return lightEnergyForBlock(Blocks.FIRE.getDefaultState());
+        }
+        if (b == Blocks.SOUL_TORCH || b == Blocks.SOUL_WALL_TORCH) {
+            return lightEnergyForBlock(Blocks.TORCH.getDefaultState());
+        }
+        if (b == Blocks.SOUL_LANTERN) {
+            return lightEnergyForBlock(Blocks.LANTERN.getDefaultState());
+        }
+        if (b == Blocks.SOUL_CAMPFIRE) {
+            return lightEnergyForBlock(Blocks.CAMPFIRE.getDefaultState().with(CampfireBlock.LIT, true));
+        }
+        return lightEnergyForBlock(soulState);
+    }
+
+    /**
      * Whether this block state counts as light “food” for seek / cache / wake fuel. Uses world position when
      * {@link VoidClamConfig#clam_light_detect_dynamic} uses luminance (state is authoritative; {@code world}/{@code pos} reserved).
      */
@@ -912,6 +944,9 @@ public final class VoidClamMod {
         VoidClamConfig cfg = VoidClamConfig.get();
         if (cfg != null && cfg.isBlockLightDenied(block)) {
             return false;
+        }
+        if (isSoulLightSource(state)) {
+            return true;
         }
         if (lights.contains(block) || isCopperTorchOrLantern(block)) {
             return true;
@@ -934,6 +969,9 @@ public final class VoidClamMod {
     }
 
     public static int lightEnergyForBlock(BlockState state) {
+        if (isSoulLightSource(state)) {
+            return lightEnergyForSoulCounterpart(state);
+        }
         Block block = state.getBlock();
         if (block == Blocks.BEACON) {
             return 5;
@@ -1561,7 +1599,7 @@ public final class VoidClamMod {
             lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
                 + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
                 + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
-            lines.add("resources: energy=" + m.energy + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
+            lines.add("resources: energy=" + m.energy + " soul=" + m.soul + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
                 + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
             lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " materialSeekThreshold=" + m.materialSeekThreshold + " activeGoal=" + activeGoal);
             lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=?");
@@ -1580,7 +1618,7 @@ public final class VoidClamMod {
         lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
             + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
             + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
-        lines.add("resources: energy=" + m.energy + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
+        lines.add("resources: energy=" + m.energy + " soul=" + m.soul + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
             + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
         lines.add("seekDecision: materialOreFlow=" + materialOreFlow + " oreHunger=" + oreHunger + " materialSeekThreshold=" + m.materialSeekThreshold + " activeGoal=" + activeGoal);
         lines.add("schedule: nextAutoGrowRepairWT=" + m.nextAutoGrowRepairWorldTime + " worldTime=" + world.getTime());
@@ -1631,6 +1669,15 @@ public final class VoidClamMod {
         Clam m = getClamById(clamId);
         if (m != null) {
             m.material = m.material + delta;
+            clampResourcesForSize(m);
+        }
+    }
+
+    /** @see Clam#soul */
+    public static void addSoul(UUID clamId, int delta) {
+        Clam m = getClamById(clamId);
+        if (m != null) {
+            m.soul = m.soul + delta;
             clampResourcesForSize(m);
         }
     }

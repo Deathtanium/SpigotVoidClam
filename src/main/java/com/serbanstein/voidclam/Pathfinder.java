@@ -1436,7 +1436,10 @@ public final class Pathfinder {
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
                 if (refNode == gnode && VoidClamMod.isLight(mat, world, pos)) {
-                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat)); // energy only when light source is eaten
+                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat));
+                    if (VoidClamMod.isSoulLightSource(mat)) {
+                        VoidClamMod.addSoul(pathClamId, 1);
+                    }
                 }
                 if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat))) {
                     if (mat.getBlock().asItem() != Items.AIR)

@@ -59,8 +59,9 @@ Clams whose chunks are unloaded **miss** that interval’s window; they reschedu
 
 ## Energy rules (summary)
 
-- **Gain +1** when a **light** block is consumed at the path goal (`buildPath`).
-- **Lose 1** when stamina fails mid-path toward a non-fluid block (and goal blacklisted).
+- **Gain** energy when a **light** block is consumed at the path goal (`buildPath`), amount from `lightEnergyForBlock` (beacon / “bright” tier / default 1).
+- **Soul-tinted lights** (`soul_fire`, soul torch/wall torch/lantern, **lit** soul campfire): always count as lights for targeting; energy equals the **non-soul counterpart** (`fire`, `torch`, `lantern`, lit campfire). **+1 `soul`** per such meal (capped like energy; unused for gameplay until implemented — see [[Resources-and-caps]]).
+- **Lose 1** energy when stamina fails mid-path toward a non-fluid block (and goal blacklisted).
 
 ## Related notes
 

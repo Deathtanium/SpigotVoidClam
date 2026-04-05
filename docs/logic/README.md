@@ -20,6 +20,7 @@ This folder describes **game and simulation behavior** in terms any port can reu
 | [[Threading-queues-locks]] | Executor, `targets` queue, scheduler, `busyFlagMainCycle` |
 | [[Pathfinding-and-reach]] | A*, light vs ore tie-break, `buildPath`, stamina, blacklists |
 | [[Grow-repair-and-energy]] | Safe grow/repair, per-heart auto routine, energy rules |
+| [[Resources-and-caps]] | `energy` / `material` / `soul` caps and sources |
 | [[Verification-and-porting]] | Smoke tests, save compatibility, logging |
 | [[Hivemind-future]] | Future inter-clam coordination (duplicates, WorldEdit) |
 | [[Presentation-and-effects]] | Tendril pulses, defense, heartbeat (behavioral summary) |

@@ -16,6 +16,7 @@ This note is the **entry point for implementers and porters** who need bytecode-
 | 8 | [[Threading-queues-locks]] | Executor, kill barrier, busy flag |
 | 9 | [[Pathfinding-and-reach]] | A\*, `buildPath`, containers |
 | 10 | [[Grow-repair-and-energy]] | Safe grow/repair, energy |
+| 10b | [[Resources-and-caps]] | `energy` / `material` / `soul` caps and gains |
 | 11 | [[Verification-and-porting]] | Regression-style checks, version pin |
 
 ## Source of truth

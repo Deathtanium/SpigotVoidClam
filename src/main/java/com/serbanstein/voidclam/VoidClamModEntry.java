@@ -386,7 +386,7 @@ public class VoidClamModEntry implements ModInitializer {
                             if (closest != null) {
                                 Clam m = closest;
                                 ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
-                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
+                                ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Soul: " + m.soul + "  Material: " + m.material));
                             }
                         } else {
                             List<Clam> list = new ArrayList<>(VoidClamMod.getAllClams());
@@ -394,7 +394,7 @@ public class VoidClamModEntry implements ModInitializer {
                             ctx.getSource().sendMessage(Text.literal("Voidclam count: " + list.size()));
                             for (Clam m : list) {
                                 if (m == null) continue;
-                                ctx.getSource().sendMessage(Text.literal(m.clamId + " @ " + m.x + " " + m.y + " " + m.z + " size " + m.currentSize + " material " + m.material));
+                                ctx.getSource().sendMessage(Text.literal(m.clamId + " @ " + m.x + " " + m.y + " " + m.z + " size " + m.currentSize + " energy " + m.energy + " soul " + m.soul + " material " + m.material));
                             }
                         }
                         return 1;
@@ -404,7 +404,7 @@ public class VoidClamModEntry implements ModInitializer {
                         .executes(ctx -> {
                             Clam m = VoidClamCommandArgs.parseTarget(StringArgumentType.getString(ctx, "target"), ctx.getSource());
                             ctx.getSource().sendMessage(Text.literal("UUID: " + m.clamId));
-                            ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Material: " + m.material));
+                            ctx.getSource().sendMessage(Text.literal("Center: " + m.x + " " + m.y + " " + m.z + "  Size: " + m.currentSize + "  Power: " + m.energy + "  Soul: " + m.soul + "  Material: " + m.material));
                             ctx.getSource().sendMessage(Text.literal("Seek lights: " + m.seekLights + "  Seek ores: " + m.seekOres + "  Protect: " + m.protectItself));
                             return 1;
                         })))

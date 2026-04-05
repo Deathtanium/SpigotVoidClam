@@ -17,6 +17,8 @@
 | `currentSize` | Shell radius parameter used in geometry, path bounds, defense |
 | `status` | `1` awake / `0` asleep (persisted on heart) |
 | `energy` | Consumed by failed path steps; gained when a **light** block is consumed at path end |
+| `material` | Ores, shell repair, grow cost — see [[Resources-and-caps]] |
+| `soul` | +1 per **soul-fire family** light eaten at path goal; same cap as `energy`; **no spend** yet |
 | `age` | Age / phase timing (persisted on heart) |
 | `seekLights`, `seekOres` | Whether periodic reach scans consider lights and/or ores |
 | `protectItself` | Defense behavior when large enough |

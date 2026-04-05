@@ -26,7 +26,8 @@ Display:
 | `status` | int | always | `0` | `1` awake, `0` asleep |
 | `material` | int | always | `0`, clamped ≥ 0 on read | Persisted |
 | `materialSeekThreshold` | int | always | absent → baseline `min(config, 10×size)` | Capped at `10×currentSize`; +1 per healthy auto cycle; reset to baseline on size growth |
-| `energy` | int | always | `0` | Clamped non-negative when syncing to BE |
+| `energy` | int | always | `0` | Clamped to resource cap when syncing to BE |
+| `soul` | int | always | absent → `0` | Same cap as `energy`; +1 when eating soul-fire family lights; **no spend logic yet** |
 | `age` | int | always | `0` | |
 | `seekLights` | boolean | always | `false` | |
 | `seekOres` | boolean | always | `false` | |
