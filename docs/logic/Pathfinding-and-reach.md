@@ -42,7 +42,7 @@ Runs on **main thread** from `tickTargets`.
 
 **Ore goal:** Fortune-3 style drops from `getFortune3Drops`, off-thread container BFS, then replace or barrel; busy clears after apply (or immediately if no fortune drops).
 
-**Light goal:** Replacing the light with wart grants energy via **`addEnergy(clamId, …)`**; clear busy flag on that final scheduled step.
+**Light goal:** Replacing the light with wart grants energy via **`addEnergy(clamId, lightEnergyForBlock)`**; soul-fire family blocks also **`addSoul(…, 1)`** (see [[Resources-and-caps]]). Clear busy flag on that final scheduled step.
 
 **Blacklist cleanup:** Schedules `removeLightsBlackList` / `removeOresBlackList` for the goal position after a delay derived from path length (`timer`).
 
