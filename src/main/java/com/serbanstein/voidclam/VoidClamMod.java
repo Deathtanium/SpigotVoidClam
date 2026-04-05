@@ -123,6 +123,8 @@ public final class VoidClamMod {
     private static final Set<Block> baseCost = new HashSet<>();
     private static final TagKey<Block> SCULK_REPLACEABLE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "sculk_replaceable"));
     private static final TagKey<Block> PALE_MOSS_REPLACE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "pale_moss_replace"));
+    /** Common convention tag (Fabric / mod ecosystem); fallback list in {@link #ores} still applies. */
+    private static final TagKey<Block> COMMON_ORES_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("c", "ores"));
     public record ShellDamageStats(int obsidianPresent, int shellMissing) {
         public int shellTotal() {
             return obsidianPresent + shellMissing;
@@ -197,8 +199,8 @@ public final class VoidClamMod {
     }
 
     /**
-     * Off-thread pathfinding should stop when the server is shutting down, the clam center chunk is unloaded, or this clam's UUID
-     * is the coordinated-kill victim.
+     * Off-thread pathfinding should stop when the server is shutting down, the clam center chunk is unloaded, this clam's UUID
+     * is the coordinated-kill victim, or the heart is **fully ice-encased** (same instant-dormancy rule as {@link #tickLoadedClamCores}).
      *
      * @param pathfindingClamId stable id for this path job; kill barrier matches this UUID
      */
@@ -213,7 +215,20 @@ public final class VoidClamMod {
         if (victimId != null && pathfindingClamId != null && victimId.equals(pathfindingClamId)) {
             return true;
         }
-        return !world.isChunkLoaded(clamCenterX >> 4, clamCenterZ >> 4);
+        if (!world.isChunkLoaded(clamCenterX >> 4, clamCenterZ >> 4)) {
+            return true;
+        }
+        if (pathfindingClamId != null) {
+            Clam cm = getClamById(pathfindingClamId);
+            if (cm != null && world.getServer() != null) {
+                ServerWorld dim = world.getServer().getWorld(cm.dimensionWorldKey());
+                if (dim != null && dim.isChunkLoaded(cm.x >> 4, cm.z >> 4)
+                    && isHeartFullyIceEncased(dim, new BlockPos(cm.x, cm.y, cm.z))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public static boolean isAsyncPathfindingKillBarrierInEffect() {
@@ -756,6 +771,22 @@ public final class VoidClamMod {
     }
 
     /**
+     * When the heart is fully ice-encased, clear sync A* jobs, busy flags, and queued path targets for that clam.
+     * Called once per world each tick before {@link Pathfinder#tickSyncAStarJobs} so sync path work does not advance after dormancy.
+     */
+    public static void cancelActivePathfindingForFullyIceEncasedClams(ServerWorld world) {
+        for (Clam m : clamsById.values()) {
+            if (m == null || !m.dimensionWorldKey().equals(world.getRegistryKey())) continue;
+            if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) continue;
+            BlockPos heart = new BlockPos(m.x, m.y, m.z);
+            if (!isHeartFullyIceEncased(world, heart)) continue;
+            Pathfinder.clearSyncAStarJobsForClam(m.clamId);
+            releasePathfindingMainCycle(m);
+            purgeTargetsForClam(m.clamId);
+        }
+    }
+
+    /**
      * Server tick for clams whose {@link Clam#dimensionWorldKey()} matches {@code world}.
      */
     public static void tickLoadedClamCores(ServerWorld world) {
@@ -825,7 +856,10 @@ public final class VoidClamMod {
             }
             if (!isSearingHeartThermallyActive(world, m)) continue;
             if ((t + seekPhase) % seekIntervalTicks == 0) {
-                CommandToolbox.clamReach(world, clamId);
+                double seekP = VoidClamConfig.get().clam_seek_attempt_probability;
+                if (seekP >= 1.0 || world.random.nextDouble() < seekP) {
+                    CommandToolbox.clamReach(world, clamId);
+                }
             }
             if ((t + phase + 11) % (4 * 20) == 0) {
                 tickHeartbeatForClam(world, getClamByClamId(clamId));
@@ -1279,7 +1313,13 @@ public final class VoidClamMod {
         placeHeartBlockForClam(world, pos, m);
         applyPostWakeShellAndSeek(world, m);
     }
-    public static boolean isOre(Block block) { return ores.contains(block); }
+    public static boolean isOre(Block block) {
+        VoidClamConfig cfg = VoidClamConfig.get();
+        if (cfg != null && cfg.clam_ore_detect_with_c_ores_tag && block.getDefaultState().isIn(COMMON_ORES_TAG)) {
+            return true;
+        }
+        return ores.contains(block);
+    }
     public static boolean isBaseCost(Block block) { return baseCost.contains(block); }
 
     public static boolean isClamInLoadedChunk(ServerWorld world, @Nullable UUID clamId) {

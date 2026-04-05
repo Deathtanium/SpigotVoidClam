@@ -8,15 +8,16 @@ Strict **phase order** on every server tick (earlier phases always complete befo
 
 1. **`VoidClamMod.tickSeekEphemeralExpiry(server)`** — Per-clam unload timers that eventually clear in-memory seek caches / path bookmarks when the **heart chunk stays unloaded** (all dimensions).
 2. **`VoidClamMod.drainPendingLightCacheDeltas()`** — Apply batched light-cache updates queued from block changes (must run before per-world clam logic that reads caches).
-3. **Optional — sync A***: **`Pathfinder.tickSyncAStarJobs(...)`** when config `astar_mode` is `sync_batched`. Runs **before** per-world clam ticks so stepped jobs make progress in a fixed place in the frame.
-4. **For each `ServerWorld` `w`** (iteration order follows `server.getWorlds()`):
+3. **Ice dormancy (instant):** For each world, **`VoidClamMod.cancelActivePathfindingForFullyIceEncasedClams(w)`** clears sync A* jobs, **`busyFlagMainCycle`**, and **`targets`** for any clam whose heart is fully ice-encased — **before** sync A* so stepped jobs do not run one tick late.
+4. **Optional — sync A***: **`Pathfinder.tickSyncAStarJobs(...)`** when config `astar_mode` is `sync_batched`. Runs **before** per-world clam ticks so stepped jobs make progress in a fixed place in the frame.
+5. **For each `ServerWorld` `w`** (iteration order follows `server.getWorlds()`):
    - **`VoidClamMod.tickLoadedClamCores(w)`** — Only clams whose **heart chunk is loaded**. Registry link via mixin on furnace tick; sync heart NBT; cache rebuild slices; fuel wake; auto-grow schedule; phased **`clamReach`**, core check, heartbeat, defense.
    - **`VoidClamMod.tickGrowPendingCheck(w)`** — May complete a pending grow/repair when **idle** (see locks below).
    - **`TendrilPulseManager.tick(w)`** — In-world pulse display jobs for that world.
    - **`VoidClamModScheduler.tick(w)`** — Due delayed tasks scheduled with **this** `ServerWorld` reference (`runAtTick <= world.getTime()`).
    - **`TendrilPulseManager.tickOmniPulseJob(w)`** — Incremental omnidirectional pulse BFS batching for that world.
-5. **`VoidClamMod.tickTargets(server)`** — Drain the global **`targets`** queue (FIFO) and run **`Pathfinder.buildPath`** for each node (may enqueue delayed steps on specific worlds).
-6. **`VoidClamMod.tickOrphanedClamActivityWarnings(server)`** — Throttled **author-facing `WARN` log** if a registered clam still has path/grow/cache activity while its heart is **not tickable** (dimension unloaded, heart chunk unloaded, or core block missing/wrong at the recorded center).
+6. **`VoidClamMod.tickTargets(server)`** — Drain the global **`targets`** queue (FIFO) and run **`Pathfinder.buildPath`** for each node (may enqueue delayed steps on specific worlds).
+7. **`VoidClamMod.tickOrphanedClamActivityWarnings(server)`** — Throttled **author-facing `WARN` log** if a registered clam still has path/grow/cache activity while its heart is **not tickable** (dimension unloaded, heart chunk unloaded, or core block missing/wrong at the recorded center).
 
 Then **gated** by overworld time (`ServerWorld` overworld, or first world as fallback):
 

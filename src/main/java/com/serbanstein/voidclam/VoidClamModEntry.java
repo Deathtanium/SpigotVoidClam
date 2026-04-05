@@ -111,6 +111,9 @@ public class VoidClamModEntry implements ModInitializer {
     private void onServerTick(MinecraftServer server) {
         VoidClamMod.tickSeekEphemeralExpiry(server);
         VoidClamMod.drainPendingLightCacheDeltas();
+        for (ServerWorld w : server.getWorlds()) {
+            VoidClamMod.cancelActivePathfindingForFullyIceEncasedClams(w);
+        }
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             Pathfinder.tickSyncAStarJobs(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
         }

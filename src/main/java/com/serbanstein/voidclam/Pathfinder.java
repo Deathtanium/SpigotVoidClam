@@ -260,8 +260,11 @@ public final class Pathfinder {
                 long startLong = BlockPos.asLong(sx, sy, sz);
                 BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
                     BlockPos nextPos = BlockPos.fromLong(toLong);
-                    return inPathfindSearchBounds(modForFlag, nextPos.getX(), nextPos.getY(), nextPos.getZ())
-                        && !isPathfindCellImpassable(w, activePathChunkCache, nextPos);
+                    if (!inPathfindSearchBounds(modForFlag, nextPos.getX(), nextPos.getY(), nextPos.getZ())) {
+                        return false;
+                    }
+                    boolean stepOntoGoal = toLong == goalLong;
+                    return isPassibleForAStarStep(w, activePathChunkCache, nextPos, stepOntoGoal);
                 };
                 long jobExpCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
                 prepassBfs = BlockBfs.start(
@@ -528,7 +531,11 @@ public final class Pathfinder {
                 return 2500;
             }
         }
-        if (bl.isOf(Blocks.WATER) || (isAirLike(bl, world, pathChunkCache, nextPos) && isSolid(world, pathChunkCache, nextPos.down()))) {
+        if (bl.isOf(Blocks.WATER)) {
+            // No air-style gravity in water; prefer cells adjacent to something other than water or plain air (terrain/lava/wart/etc.).
+            return waterCellHasNonWaterNonPlainAirNeighbor(pathChunkCache, nextPos) ? 1.0 : 2.0;
+        }
+        if (isAirLike(bl, world, pathChunkCache, nextPos) && isSolid(world, pathChunkCache, nextPos.down())) {
             return 1;
         }
         if (isAirLike(bl, world, pathChunkCache, nextPos)) {
@@ -536,6 +543,22 @@ public final class Pathfinder {
             return 6 - b;
         }
         return 10 + getBlastResistance(bl);
+    }
+
+    /**
+     * Whether A* would allow entering {@code nextPos} (neighbor cost strictly below the wall sentinel {@code 2500}).
+     * When {@code isGoalCell} is true, the goal exception for {@link net.minecraft.block.BlockEntityProvider} applies,
+     * matching {@link #expandOneAStarIteration}.
+     */
+    private static boolean isPassibleForAStarStep(
+        ServerWorld world,
+        PathfindChunkCache pathChunkCache,
+        BlockPos nextPos,
+        boolean isGoalCell
+    ) {
+        BlockState bl = pathChunkCache.getBlockState(nextPos);
+        double cst = aStarNeighborCost(world, pathChunkCache, nextPos, bl, !isGoalCell);
+        return cst < 2500.0;
     }
 
     /**
@@ -702,8 +725,8 @@ public final class Pathfinder {
     }
 
     /**
-     * True if this cell cannot be entered in A* (same condition as {@code cst == 2500} in {@link #calculatePath}, for
-     * neighbors where the goal exception for {@link BlockEntityProvider} does not apply).
+     * True if this cell cannot be entered when treated as a non-goal step (hardness / {@link BlockEntityProvider} wall).
+     * Prepass connectivity uses {@link #isPassibleForAStarStep} instead so air/water/gravity costs match A*.
      */
     private static boolean isPathfindCellImpassable(ServerWorld world, BlockState bl, BlockPos pos) {
         if (VoidClamCoreBlocks.isWartOrCore(bl)) {
@@ -727,11 +750,14 @@ public final class Pathfinder {
      * Walk parent chain from goal toward start; every node except the goal must be path-enterable (matches A* interior rules).
      * The goal cell may be a beacon etc. and is not checked here.
      */
-    private static boolean pathInteriorHasImpassibleStep(ServerWorld world, Node gnode) {
+    private static boolean pathInteriorHasImpassibleStep(ServerWorld world, Clam mod, Node gnode) {
+        if (mod == null) {
+            return true;
+        }
+        PathfindChunkCache cache = new PathfindChunkCache(world, mod);
         for (Node c = gnode.parent; c != null; c = c.parent) {
             BlockPos p = new BlockPos(c.x, c.y, c.z);
-            BlockState st = world.getBlockState(p);
-            if (isPathfindCellImpassable(world, st, p)) {
+            if (!isPassibleForAStarStep(world, cache, p, false)) {
                 return true;
             }
         }
@@ -743,7 +769,8 @@ public final class Pathfinder {
     }
 
     /**
-     * 6-neighbor BFS from start within the same axis bounds as A*. Edges match A* impassability (cells with cost 2500 are walls).
+     * 6-neighbor BFS from start within the same axis bounds as A*. Edge admission matches A* {@link #aStarNeighborCost}
+     * (wall = cost {@code 2500}), including goal exception for {@link BlockEntityProvider}.
      * Ignores movement costs; only detects hard disconnects so unreachable goals skip the expensive A* search.
      * <p>
      * Runs to completion on the <strong>invoking</strong> thread: for async A* that is the same pathfinder worker that
@@ -768,8 +795,11 @@ public final class Pathfinder {
         long startLong = BlockPos.asLong(sx, sy, sz);
         BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
             BlockPos nextPos = BlockPos.fromLong(toLong);
-            return inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())
-                && !isPathfindCellImpassable(w, pathChunkCache, nextPos);
+            if (!inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())) {
+                return false;
+            }
+            boolean stepOntoGoal = toLong == goalLong;
+            return isPassibleForAStarStep(w, pathChunkCache, nextPos, stepOntoGoal);
         };
         long jobExpCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
         int prepassCap = blockBfsMaxVisited(jobExpCap);
@@ -911,6 +941,31 @@ public final class Pathfinder {
     private static boolean isWaterAirOrWart(BlockState state) {
         return state.isOf(Blocks.WATER) || state.isAir()
             || VoidClamCoreBlocks.isWartOrCore(state);
+    }
+
+    /**
+     * For water cells: true if some 6-neighbor looks like environmental “wall” (not water, not plain air, not clam flesh/core).
+     * Adjacent nether wart or searing core alone does not count as hugging terrain — same as {@link #isWaterAirOrWart} spirit.
+     */
+    private static boolean waterCellHasNonWaterNonPlainAirNeighbor(
+        PathfindChunkCache pathChunkCache,
+        BlockPos pos
+    ) {
+        int px = pos.getX(), py = pos.getY(), pz = pos.getZ();
+        for (Cursor c : xc) {
+            BlockState nb = pathChunkCache.getBlockState(px + c.x, py + c.y, pz + c.z);
+            if (nb.isOf(Blocks.WATER)) {
+                continue;
+            }
+            if (nb.isAir()) {
+                continue;
+            }
+            if (VoidClamCoreBlocks.isWartOrCore(nb)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     /** Number of adjacent blocks (6-neighborhood) that are not water/air/nether wart. */
@@ -1215,7 +1270,7 @@ public final class Pathfinder {
         if (pathSteps < 0) {
             return;
         }
-        if (pathInteriorHasImpassibleStep(world, gnode)) {
+        if (pathInteriorHasImpassibleStep(world, mod, gnode)) {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
@@ -1239,6 +1294,11 @@ public final class Pathfinder {
             final int cSize = modForFlag.currentSize;
             VoidClamMod.scheduleDelayed(world, runAt, () -> {
                 if (!VoidClamMod.clamMatchesAt(pathClamId, pathOriginX, pathOriginY, pathOriginZ)) {
+                    VoidClamMod.releasePathfindingMainCycle(modForFlag);
+                    return;
+                }
+                Clam thermalClam = VoidClamMod.getClamByClamId(pathClamId);
+                if (thermalClam == null || !VoidClamMod.isSearingHeartThermallyActive(world, thermalClam)) {
                     VoidClamMod.releasePathfindingMainCycle(modForFlag);
                     return;
                 }

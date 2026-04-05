@@ -106,10 +106,20 @@ public final class VoidClamConfig {
     public int clam_repair_grow_cycle_interval_seconds = 5 * 60;
     /** How often awake clams attempt target selection/pathfinding in seconds (phase-staggered per clam). */
     public int clam_seek_attempt_interval_seconds = 1;
+    /**
+     * After the seek interval elapses, probability in {@code [0, 1]} that the clam actually runs {@code clamReach}.
+     * {@code 1} = always; {@code 0} = never.
+     */
+    public double clam_seek_attempt_probability = 1.0;
     /** Player defense check cadence in seconds; keep at or above goat-horn sound length to avoid overlap. */
     public int clam_defense_detection_interval_seconds = 8;
     /** Ore-hunger trigger for material replenishment pathing. When material is below this, ore seeking can run. */
     public int clam_material_seek_threshold = 5;
+    /**
+     * When {@code true} (default), {@link VoidClamMod#isOre} is also true for blocks in the {@code c:ores} block tag
+     * (Fabric/common convention), in addition to the built-in vanilla list.
+     */
+    public boolean clam_ore_detect_with_c_ores_tag = true;
 
     public boolean vfx_enabled = true;
     public double sfx_volume_multiplier = 1.0;
@@ -161,6 +171,8 @@ public final class VoidClamConfig {
         if (clam_grow_energymultiplier < 1) clam_grow_energymultiplier = 1;
         if (clam_repair_grow_cycle_interval_seconds < 1) clam_repair_grow_cycle_interval_seconds = 1;
         if (clam_seek_attempt_interval_seconds < 1) clam_seek_attempt_interval_seconds = 1;
+        if (clam_seek_attempt_probability < 0) clam_seek_attempt_probability = 0;
+        if (clam_seek_attempt_probability > 1) clam_seek_attempt_probability = 1;
         if (clam_defense_detection_interval_seconds < 1) clam_defense_detection_interval_seconds = 1;
         if (clam_material_seek_threshold < 0) clam_material_seek_threshold = 0;
         if (sfx_volume_multiplier < 0) sfx_volume_multiplier = 0;
