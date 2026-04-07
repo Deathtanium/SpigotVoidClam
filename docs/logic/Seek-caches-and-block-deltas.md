@@ -48,6 +48,14 @@ Constants in **`VoidClamMod`**:
 
 Heart chunk unloaded: **`tickSeekEphemeralExpiry`** arms a dimension **`world.getTime()`** deadline; when it fires, **`clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry`** clears ephemeral path/seek state. Reload may set **`seekEphemeralNeedSeekDataRefresh`** to restart rebuilds when chunk loads (see `tickLoadedClamCores`).
 
+## Dormancy (ice) vs seek caches
+
+When a heart is **fully ice-encased**, the clam is **not thermally active** (`isSearingHeartThermallyActive` is false): **`cancelActivePathfindingForFullyIceEncasedClams`** clears **sync A* jobs, `mainCycleBusy`, and queued path targets** for that clam, but it does **not** clear **`lightsCache` / `oresCache`**.
+
+**In-memory seek sets therefore survive ice dormancy** while the heart chunk stays loaded. They are only cleared on **kill**, **long heart-chunk unload** (see above), or when a **resize / repair / wake** path calls **`startSeekCachesRebuild`**. Waking from ice (`repairWakeCyclesRemaining` chain completed) runs the normal post-wake path, which **does** schedule cache rebuilds where appropriate.
+
+For operator expectations and scale/lag tradeoffs when many clams exist, see [[Performance-and-abuse-considerations]].
+
 ## Related notes
 
 - [[Pathfinding-and-reach]]

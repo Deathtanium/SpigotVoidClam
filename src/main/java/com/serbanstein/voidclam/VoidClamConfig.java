@@ -81,6 +81,13 @@ public final class VoidClamConfig {
     public Long astar_sync_max_total_expansions_per_job;
 
     /**
+     * Every N A* expansions (after the first), the prepass route is compared to the live world; on mismatch a prepass
+     * refresh runs. {@code 0} disables. Uses the same thread as A*; in {@link AstarMode#SYNC_BATCHED} each BFS node
+     * expansion counts against the same per-tick budget as A* prepass/expansions.
+     */
+    public int astar_mid_prepass_sanity_interval = 4096;
+
+    /**
      * When {@code true}, A* / prepass use a per-job {@link PathfindChunkCache} snapshot.
      * When {@code false}, every cell uses live {@link ServerWorld#getBlockState} (debug / legacy).
      * {@code null} after load = default {@code true} (Gson omits key otherwise {@code boolean} would read as false).
@@ -88,9 +95,8 @@ public final class VoidClamConfig {
     public Boolean pathfind_chunk_cache;
 
     /**
-     * When {@code true}, each {@link CommandToolbox#clamReach} run performs a full reachability flood from the heart
-     * (same bounds as pathfinding), snapshots visited {@link net.minecraft.block.BlockState}s for A*, and picks targets
-     * by minimum BFS adjacency depth then Euclidean tie-break. Volatile only for that job. Default {@code false} (extra CPU/RAM).
+     * When {@code true}, {@link CommandToolbox#clamReach} ranks cached targets by minimum BFS adjacency depth (volatile flood)
+     * then Euclidean; A* still uses normal live/chunk-cache reads and mid-search prepass checks. Default {@code false}.
      */
     public boolean clam_reachability_volatile_map = false;
 
@@ -488,6 +494,11 @@ public final class VoidClamConfig {
             raw = 400_000L;
         }
         return Math.min(5_000_000L, Math.max(5_000L, raw));
+    }
+
+    /** Mid-A* live-world vs prepass snapshot check interval; {@code 0} disables. */
+    public int effectiveMidPrepassSanityInterval() {
+        return Math.max(0, astar_mid_prepass_sanity_interval);
     }
 
     /**

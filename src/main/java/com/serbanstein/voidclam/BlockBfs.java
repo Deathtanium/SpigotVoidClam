@@ -8,6 +8,7 @@ import net.minecraft.util.math.Direction;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,12 +53,16 @@ public final class BlockBfs {
     private final Runnable onBackgroundComplete;
 
     private final Map<Long, Integer> dist = new HashMap<>();
+    /** For each visited cell except the start: parent step toward the BFS root. */
+    private final Map<Long, Long> parent = new HashMap<>();
     private final Queue<Long> queue = new ArrayDeque<>();
     private final List<BfsVisitor> visitors = new ArrayList<>();
     private final AbortChecker abortChecker;
     /** If not {@link #NO_EARLY_GOAL}, stop as soon as this packed position is seen as a neighbor (not necessarily enqueued). */
     private final long earlyGoalLong;
     private boolean earlyGoalNeighborHit;
+    /** When {@link #earlyGoalNeighborHit}, the cell expanded that had {@link #earlyGoalLong} as a neighbor (dig-from cell). */
+    private long goalAdjacentCellLong = Long.MIN_VALUE;
 
     private boolean finished;
 
@@ -110,6 +115,7 @@ public final class BlockBfs {
         }
         bfs.dist.put(startLong, 0);
         bfs.queue.add(startLong);
+        // start has no parent
         if (mode == ExecutionMode.BACKGROUND) {
             if (backgroundExecutor == null) {
                 throw new IllegalArgumentException("BACKGROUND mode requires a non-null executor");
@@ -184,6 +190,41 @@ public final class BlockBfs {
         return earlyGoalNeighborHit;
     }
 
+    /**
+     * Packed cell from which the clam could step into the early goal (six-neighbor), or {@link Long#MIN_VALUE} if
+     * {@link #isEarlyGoalNeighborHit} is false.
+     */
+    public long goalAdjacentFromLong() {
+        return goalAdjacentCellLong;
+    }
+
+    /**
+     * Cells from BFS start through the goal-adjacent cell inclusive (heart → … → cell before goal), in traversal order.
+     * Empty if the search did not hit the early goal or the parent chain is broken.
+     */
+    public List<Long> orderedPathFromStartToGoalAdjacent(long startLong) {
+        if (!earlyGoalNeighborHit || goalAdjacentCellLong == Long.MIN_VALUE) {
+            return List.of();
+        }
+        ArrayList<Long> rev = new ArrayList<>();
+        long cur = goalAdjacentCellLong;
+        int guard = dist.size() + 2;
+        while (cur != startLong && guard-- > 0) {
+            rev.add(cur);
+            Long p = parent.get(cur);
+            if (p == null) {
+                return List.of();
+            }
+            cur = p;
+        }
+        if (cur != startLong) {
+            return List.of();
+        }
+        rev.add(startLong);
+        Collections.reverse(rev);
+        return rev;
+    }
+
     private void runToCompletion() {
         try {
             while (!queue.isEmpty() && dist.size() < maxVisited) {
@@ -219,6 +260,7 @@ public final class BlockBfs {
             long toLong = BlockPos.asLong(nx, ny, nz);
             if (earlyGoalLong != NO_EARLY_GOAL && toLong == earlyGoalLong) {
                 earlyGoalNeighborHit = true;
+                goalAdjacentCellLong = fromLong;
                 queue.clear();
                 finished = true;
                 return;
@@ -226,6 +268,7 @@ public final class BlockBfs {
             if (dist.containsKey(toLong)) continue;
             if (!edgePolicy.canTraverseTo(world, fromLong, toLong, fromDist)) continue;
             dist.put(toLong, fromDist + 1);
+            parent.put(toLong, fromLong);
             queue.add(toLong);
         }
     }

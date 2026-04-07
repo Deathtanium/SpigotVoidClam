@@ -15,6 +15,7 @@ This folder describes **game and simulation behavior** in terms any port can reu
 | [[Loader-integration]] | Fabric metadata, mixins, events, vanilla block IDs |
 | [[Natural-spawn]] | Chunk-generated spawn (`NaturalSpawnHandler`) |
 | [[Seek-caches-and-block-deltas]] | Batched rebuild, `setBlockState` delta queue |
+| [[Performance-and-abuse-considerations]] | Scale, dormancy vs caches, hostile config patterns |
 | [[State-and-save]] | `Clam` fields, heart NBT, grow-pending globals |
 | [[Tick-order-and-intervals]] | Per-tick order, repeating intervals, which world drives what |
 | [[Threading-queues-locks]] | Executor, `targets` queue, scheduler, `mainCycleBusy` |

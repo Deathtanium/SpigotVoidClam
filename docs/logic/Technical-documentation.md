@@ -12,6 +12,7 @@ This note is the **entry point for implementers and porters** who need bytecode-
 | 4 | [[Loader-integration]] | Mixins, Fabric events, mod metadata |
 | 5 | [[Natural-spawn]] | Chunk-gen spawn methods |
 | 6 | [[Seek-caches-and-block-deltas]] | Incremental caches + `setBlockState` hook |
+| 6b | [[Performance-and-abuse-considerations]] | Scale, lag factors, config mitigations |
 | 7 | [[Tick-order-and-intervals]] | Phases and locks |
 | 8 | [[Threading-queues-locks]] | Executor, kill barrier, busy flag |
 | 9 | [[Pathfinding-and-reach]] | A\*, `buildPath`, containers |
