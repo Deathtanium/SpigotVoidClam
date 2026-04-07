@@ -1147,6 +1147,32 @@ public final class VoidClamMod {
         }
     }
 
+    /**
+     * When path apply consumes a block that was a seek target (light or ore), remove it from this clam’s in-memory cache.
+     * Does not touch blacklists. No-op if {@code pos} is outside the light/ore seek box or caches are disabled / flags off.
+     */
+    public static void removeSeekTargetConsumedFromCache(Clam m, ServerWorld world, BlockPos pos, BlockState consumedState) {
+        if (m == null || world == null || consumedState == null) {
+            return;
+        }
+        if (!world.getRegistryKey().equals(m.dimensionWorldKey())) {
+            return;
+        }
+        if (!inLightSeekRange(m, pos)) {
+            return;
+        }
+        VoidClamConfig cfg = VoidClamConfig.get();
+        long packed = pos.asLong();
+        if (cfg.lightBlockCacheEnabled() && m.seekLights
+            && (isLight(consumedState, world, pos) || consumedState.isOf(Blocks.BEACON))) {
+            m.lightsCache.remove(packed);
+        }
+        boolean oreSeekRelevant = m.seekOres || m.orePathForMaterialHunger || m.prioritizeRepairOreSeek;
+        if (cfg.oreBlockCacheEnabled() && oreSeekRelevant && isOre(consumedState.getBlock())) {
+            m.oresCache.remove(packed);
+        }
+    }
+
     /** When pathfinding cannot reach a light goal, drop it from the cache until the next repair rebuild. */
     public static void removeLightFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
         Clam m = getClamById(clamId);

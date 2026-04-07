@@ -1578,6 +1578,21 @@ public final class Pathfinder {
         );
     }
 
+    private static void grantPathBrokenLightRewards(ServerWorld world, Clam m, UUID pathClamId, BlockPos pos, BlockState mat) {
+        if (mat.isOf(Blocks.BEACON)) {
+            VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(Blocks.BEACON));
+            VoidClamMod.removeSeekTargetConsumedFromCache(m, world, pos, mat);
+            return;
+        }
+        if (VoidClamMod.isLight(mat, world, pos)) {
+            VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat));
+            if (VoidClamMod.isSoulLightSource(mat)) {
+                VoidClamMod.addSoul(pathClamId, 1);
+            }
+            VoidClamMod.removeSeekTargetConsumedFromCache(m, world, pos, mat);
+        }
+    }
+
     public static void buildPath(ServerWorld world, Node gnode) {
         if (gnode.clamId == null) return;
         Clam mod = VoidClamMod.getClamById(gnode.clamId);
@@ -1682,38 +1697,45 @@ public final class Pathfinder {
                     cst = 1_000_000;
                 }
 
-                // Beacon at goal: preserve the nether star and route it through container BFS (barrel fallback if needed).
-                if (refNode == gnode && mat.isOf(Blocks.BEACON)) {
+                // Beacon: nether star via container routing + light energy (any step along the path).
+                if (mat.isOf(Blocks.BEACON)) {
                     ItemStack starDrop = new ItemStack(Items.NETHER_STAR, 1);
                     BlockPos breakPos = pos.toImmutable();
+                    final BlockState beaconMat = mat;
                     enqueueGoalLootContainerRouting(
                         world, mod, modForFlag, cSize, pathClamId, breakPos,
                         Collections.singletonList(starDrop),
                         () -> {
                             VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(Blocks.BEACON));
+                            VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, breakPos, beaconMat);
                             VoidClamMod.completeOnePathApplyStep(modForFlag);
                         });
                     return;
                 }
 
-                // Ore at goal: fortune-3 drops, store in containers, replace with wart
-                if (refNode == gnode && VoidClamMod.isOre(mat.getBlock()) && modForFlag.orePathForMaterialHunger) {
+                // Ore: material hunger consumes to wart + material; else fortune routing (any step).
+                if (VoidClamMod.isOre(mat.getBlock()) && modForFlag.orePathForMaterialHunger) {
                     replaceWithWartAndPulse(world, pos);
                     VoidClamMod.addMaterial(pathClamId, 1);
+                    VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, pos, mat);
                     VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
 
-                // Ore at goal: fortune-3 drops, store in containers, replace with wart
-                if (refNode == gnode && VoidClamMod.isOre(mat.getBlock())) {
+                if (VoidClamMod.isOre(mat.getBlock())) {
                     List<ItemStack> drops = getFortune3Drops(mat.getBlock());
                     if (!drops.isEmpty()) {
                         BlockPos breakPos = pos.toImmutable();
+                        final BlockState oreMat = mat;
                         enqueueGoalLootContainerRouting(
                             world, mod, modForFlag, cSize, pathClamId, breakPos, drops,
-                            () -> VoidClamMod.completeOnePathApplyStep(modForFlag));
+                            () -> {
+                                VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, breakPos, oreMat);
+                                VoidClamMod.completeOnePathApplyStep(modForFlag);
+                            });
                     } else {
                         replaceWithWartAndPulse(world, pos);
+                        VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, pos, mat);
                         VoidClamMod.completeOnePathApplyStep(modForFlag);
                     }
                     return;
@@ -1738,6 +1760,42 @@ public final class Pathfinder {
                 boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat));
                 // Stop further dig steps only after a "solid" break (same hardness heuristic as pathfinding stickiness).
                 // Soft plants, torches, etc. are consumed in-place without ending the path early.
+                if (isReplacingBlock && isSolidForTendrilPath(world, pos, mat)) {
+                    if (VoidClamMod.isLight(mat, world, pos)) {
+                        grantPathBrokenLightRewards(world, modForFlag, pathClamId, pos, mat);
+                        replaceWithWartAndPulse(world, pos);
+                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                        return;
+                    }
+                    if (VoidClamMod.isOre(mat.getBlock())) {
+                        if (modForFlag.orePathForMaterialHunger) {
+                            replaceWithWartAndPulse(world, pos);
+                            VoidClamMod.addMaterial(pathClamId, 1);
+                            VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, pos, mat);
+                            VoidClamMod.completeOnePathApplyStep(modForFlag);
+                            return;
+                        }
+                        List<ItemStack> drops = getFortune3Drops(mat.getBlock());
+                        if (!drops.isEmpty()) {
+                            BlockPos breakPos = pos.toImmutable();
+                            final BlockState oreMat = mat;
+                            sliceState.pathStopped = true;
+                            sliceState.pathStoppedAwaitingContainer = true;
+                            enqueueGoalLootContainerRouting(
+                                world, mod, modForFlag, cSize, pathClamId, breakPos, drops,
+                                () -> {
+                                    VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, breakPos, oreMat);
+                                    sliceState.pathStoppedAwaitingContainer = false;
+                                    VoidClamMod.completeOnePathApplyStep(modForFlag);
+                                });
+                            return;
+                        }
+                        replaceWithWartAndPulse(world, pos);
+                        VoidClamMod.removeSeekTargetConsumedFromCache(modForFlag, world, pos, mat);
+                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                        return;
+                    }
+                }
                 if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR && isSolidForTendrilPath(world, pos, mat)) {
                     sliceState.pathStopped = true;
                     sliceState.pathStoppedAwaitingContainer = true;
@@ -1774,14 +1832,11 @@ public final class Pathfinder {
                 }
 
                 int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, pos);
+                if (VoidClamMod.isLight(mat, world, pos)) {
+                    grantPathBrokenLightRewards(world, modForFlag, pathClamId, pos, mat);
+                }
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
-                if (refNode == gnode && VoidClamMod.isLight(mat, world, pos)) {
-                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat));
-                    if (VoidClamMod.isSoulLightSource(mat)) {
-                        VoidClamMod.addSoul(pathClamId, 1);
-                    }
-                }
                 if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
