@@ -121,7 +121,6 @@ public final class VoidClamMod {
     private static final Set<Block> lights = new HashSet<>();
     /** Blocks that count as ores (fortune-3 style drops when eaten). */
     private static final Set<Block> ores = new HashSet<>();
-    private static final Set<Block> fullBlockLightEnergy2 = new HashSet<>();
     private static final Set<Block> baseCost = new HashSet<>();
     private static final TagKey<Block> SCULK_REPLACEABLE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "sculk_replaceable"));
     private static final TagKey<Block> PALE_MOSS_REPLACE_TAG = TagKey.of(RegistryKeys.BLOCK, Identifier.of("minecraft", "pale_moss_replace"));
@@ -165,11 +164,6 @@ public final class VoidClamMod {
         lights.add(Blocks.WALL_TORCH);
         lights.add(Blocks.SHROOMLIGHT);
         lights.add(Blocks.LAVA);
-        fullBlockLightEnergy2.add(Blocks.GLOWSTONE);
-        fullBlockLightEnergy2.add(Blocks.JACK_O_LANTERN);
-        fullBlockLightEnergy2.add(Blocks.SEA_LANTERN);
-        fullBlockLightEnergy2.add(Blocks.SHROOMLIGHT);
-        fullBlockLightEnergy2.add(Blocks.END_ROD);
         baseCost.add(Blocks.AIR);
         baseCost.add(Blocks.WATER);
         baseCost.add(Blocks.LAVA);
@@ -805,7 +799,7 @@ public final class VoidClamMod {
 
     /**
      * When the heart is fully ice-encased, clear sync A* jobs, busy flags, and queued path targets for that clam.
-     * Called once per world each tick before {@link Pathfinder#tickSyncAStarJobs} so sync path work does not advance after dormancy.
+     * Called once per world each tick before {@link Pathfinder#tickSyncMainThreadPathWork} so sync path work does not advance after dormancy.
      */
     public static void cancelActivePathfindingForFullyIceEncasedClams(ServerWorld world) {
         for (Clam m : clamsById.values()) {
@@ -925,24 +919,6 @@ public final class VoidClamMod {
         return b == Blocks.SOUL_CAMPFIRE && state.contains(CampfireBlock.LIT) && Boolean.TRUE.equals(state.get(CampfireBlock.LIT));
     }
 
-    /** Energy yield for soul sources = same rule as their non-soul counterpart (brightness ignored pre-recurse). */
-    private static int lightEnergyForSoulCounterpart(BlockState soulState) {
-        Block b = soulState.getBlock();
-        if (b == Blocks.SOUL_FIRE) {
-            return lightEnergyForBlock(Blocks.FIRE.getDefaultState());
-        }
-        if (b == Blocks.SOUL_TORCH || b == Blocks.SOUL_WALL_TORCH) {
-            return lightEnergyForBlock(Blocks.TORCH.getDefaultState());
-        }
-        if (b == Blocks.SOUL_LANTERN) {
-            return lightEnergyForBlock(Blocks.LANTERN.getDefaultState());
-        }
-        if (b == Blocks.SOUL_CAMPFIRE) {
-            return lightEnergyForBlock(Blocks.CAMPFIRE.getDefaultState().with(CampfireBlock.LIT, true));
-        }
-        return lightEnergyForBlock(soulState);
-    }
-
     /**
      * Whether this block state counts as light “food” for seek / cache / wake fuel. Uses world position when
      * {@link VoidClamConfig#clam_light_detect_dynamic} uses luminance (state is authoritative; {@code world}/{@code pos} reserved).
@@ -976,22 +952,13 @@ public final class VoidClamMod {
         return isLight(block.getDefaultState(), null, BlockPos.ORIGIN);
     }
 
+    /** Energy from {@code config/voidclam/block_loot.json}; pass world/pos when available for dynamic light detection parity. */
     public static int lightEnergyForBlock(BlockState state) {
-        if (isSoulLightSource(state)) {
-            return lightEnergyForSoulCounterpart(state);
-        }
-        Block block = state.getBlock();
-        if (block == Blocks.BEACON) {
-            return 5;
-        }
-        if (fullBlockLightEnergy2.contains(block)) {
-            return 2;
-        }
-        VoidClamConfig cfg = VoidClamConfig.get();
-        if (cfg != null && cfg.clam_light_detect_dynamic && state.getLuminance() >= 15) {
-            return 2;
-        }
-        return 1;
+        return VoidClamBlockLoot.get().resolveEnergy(state, null, BlockPos.ORIGIN);
+    }
+
+    public static int lightEnergyForBlock(BlockState state, @Nullable BlockView world, @Nullable BlockPos pos) {
+        return VoidClamBlockLoot.get().resolveEnergy(state, world, pos);
     }
 
     public static int lightEnergyForBlock(Block block) {
@@ -1770,6 +1737,16 @@ public final class VoidClamMod {
 
     /** Create a new stub at (x,y,z). Returns clam UUID string for commands, or null on failure. */
     public static @Nullable UUID makeStub(ServerWorld world, int x, int y, int z) {
+        return makeStubWithTargetSize(world, x, y, z, 3);
+    }
+
+    /**
+     * Like {@link #makeStub} but after the size-3 stub, grows the shell to {@code targetSize} via {@link CommandToolbox#clamReSize}
+     * when {@code targetSize > 3}.
+     */
+    public static @Nullable UUID makeStubWithTargetSize(ServerWorld world, int x, int y, int z, int targetSize) {
+        VoidClamConfig cfg = VoidClamConfig.get();
+        int t = Math.max(3, Math.min(cfg.clam_size_max, targetSize));
         Clam m = new Clam();
         m.clamId = UUID.randomUUID();
         m.type = 1;
@@ -1781,7 +1758,6 @@ public final class VoidClamMod {
         m.status = 0;
         m.energy = 0;
         m.age = 0;
-        VoidClamConfig cfg = VoidClamConfig.get();
         m.seekLights = cfg.clam_light_flag_default;
         m.seekOres = cfg.clam_ores_flag_default;
         m.protectItself = cfg.clam_protect_itself_default;
@@ -1794,6 +1770,9 @@ public final class VoidClamMod {
         CommandToolbox.buildStub(world, x, y, z);
         m.stubBuilt = true;
         startSeekCachesRebuild(m);
+        if (t > 3) {
+            CommandToolbox.clamReSize(world, m.clamId, t);
+        }
         return m.clamId;
     }
 
@@ -1891,12 +1870,21 @@ public final class VoidClamMod {
     public static boolean isExpectedObsidianShellBlock(int dx, int dy, int dz, int size) {
         int t = Math.max(1, size);
         if (dy == 0) return false; // intentional horizontal gap
-        int yMin = -t / 2 + 1;     // intentional lack of bottom cap
+        int yMin = obsidianShellBottomDy(t); // intentional lack of bottom cap
         int yMax = t - 1;
         if (dy < yMin || dy > yMax) return false;
         int ringRadius = (t - 1) - Math.abs(dy);
         if (ringRadius < 0) return false;
         return Math.abs(dx) + Math.abs(dz) == ringRadius;
+    }
+
+    /**
+     * Relative Y offset from the heart to the lowest ring of the obsidian shell ({@link #isExpectedObsidianShellBlock});
+     * geometry matches {@link CommandToolbox#buildShell}.
+     */
+    public static int obsidianShellBottomDy(int size) {
+        int t = Math.max(1, size);
+        return -t / 2 + 1;
     }
 
     public static ShellDamageStats inspectObsidianShellDamage(ServerWorld world, Clam m) {
@@ -1944,7 +1932,11 @@ public final class VoidClamMod {
         return true;
     }
 
-    private static boolean isNaturalTerrainBlock(BlockState st) {
+    /**
+     * Dirt, stone, logs, sand, crops, etc.—count as “clear” inside a prebuilt shell for size checks
+     * ({@link #isPrebuiltShellInteriorClear}). Path apply discards loot from these when carving tendril paths.
+     */
+    public static boolean isNaturalTerrainBlock(BlockState st) {
         if (st.isOf(VoidClamCoreBlocks.CORE_BLOCK)) {
             return false;
         }

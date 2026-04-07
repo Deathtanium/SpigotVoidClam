@@ -2,6 +2,7 @@ package com.serbanstein.voidclam;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -16,8 +17,9 @@ import java.util.concurrent.Executor;
 
 /**
  * Centralized 6-neighbor BFS over block positions (long-packed {@link BlockPos} keys).
- * Supports full completion on the current thread in steps ({@link ExecutionMode#MAIN_THREAD_BATCHED})
- * or entirely on a background executor ({@link ExecutionMode#BACKGROUND}).
+ * {@link ExecutionMode#MAIN_THREAD_BATCHED}: {@link #step} for explicit batches, or {@link #runToCompletionOnCurrentThread}
+ * (on the server thread, shares {@link Pathfinder}'s per-tick step budget with sync A*). {@link ExecutionMode#BACKGROUND} runs
+ * on an executor via {@link #start}'s {@code backgroundExecutor}.
  */
 public final class BlockBfs {
 
@@ -60,6 +62,8 @@ public final class BlockBfs {
     private boolean earlyGoalNeighborHit;
 
     private boolean finished;
+    /** Distance of the most recently dequeued node in this run, or -1 before the first {@link #step} poll. */
+    private int lastPolledDistance = -1;
 
     /** If non-null and returns true after a node is visited, the search stops immediately (queue cleared). */
     @FunctionalInterface
@@ -119,8 +123,37 @@ public final class BlockBfs {
         return bfs;
     }
 
-    /** Drain the queue in one go (same thread). Only for {@link ExecutionMode#MAIN_THREAD_BATCHED}. */
+    /**
+     * Drain the queue on the caller thread. Only for {@link ExecutionMode#MAIN_THREAD_BATCHED}.
+     * On the server thread, each BFS node dequeue consumes one unit from {@link Pathfinder}'s per-tick step pool
+     * (same budget as {@link Pathfinder#tickSyncMainThreadPathWork}); when the pool is empty, the search resumes next tick via
+     * {@link VoidClamMod#scheduleDelayed} and this method returns early with {@link #isFinished()} still false.
+     * Do not read {@link #distances()} or assume completion until finished unless you control that continuation.
+     * For a single call that must fully drain on the server thread, use {@link #runToCompletionIgnoringSyncMainThreadStepBudget()}.
+     */
     public void runToCompletionOnCurrentThread() {
+        if (mode == ExecutionMode.BACKGROUND) {
+            throw new IllegalStateException("use executor completion callback for BACKGROUND mode");
+        }
+        MinecraftServer server = world.getServer();
+        while (!finished) {
+            if (server.isOnThread()) {
+                if (Pathfinder.consumeSyncMainThreadStepsForBlockBfs(1) < 1) {
+                    VoidClamMod.scheduleDelayed(world, 1, this::runToCompletionOnCurrentThread);
+                    return;
+                }
+            }
+            if (step(1)) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Drain immediately without participating in the per-tick main-thread step pool. Use when the caller must observe a
+     * fully drained queue in one return (e.g. commands, {@link Pathfinder#buildVolatileReachabilityMap}).
+     */
+    public void runToCompletionIgnoringSyncMainThreadStepBudget() {
         if (mode == ExecutionMode.BACKGROUND) {
             throw new IllegalStateException("use executor completion callback for BACKGROUND mode");
         }
@@ -144,6 +177,7 @@ public final class BlockBfs {
             long cur = queue.poll();
             Integer dObj = dist.get(cur);
             int d = dObj != null ? dObj : 0;
+            lastPolledDistance = d;
             for (BfsVisitor v : visitors) {
                 v.visit(world, cur, d);
             }
@@ -167,6 +201,18 @@ public final class BlockBfs {
         return finished;
     }
 
+    /**
+     * Clears the frontier and marks the search finished without visiting more cells. Distances and visitor state for
+     * already-dequeued cells are unchanged (partial flood is valid for reach ranking when neighbors of all candidates are settled).
+     */
+    public void stopEarlyAsFinished() {
+        if (mode == ExecutionMode.BACKGROUND) {
+            throw new IllegalStateException("stopEarlyAsFinished is for MAIN_THREAD_BATCHED only");
+        }
+        queue.clear();
+        finished = true;
+    }
+
     /** Distinct positions assigned a distance (includes start). */
     public int visitedCount() {
         return dist.size();
@@ -174,6 +220,14 @@ public final class BlockBfs {
 
     public Map<Long, Integer> distances() {
         return dist;
+    }
+
+    /**
+     * Distance assigned to the most recently dequeued node. Under FIFO 6-neighbor BFS, dequeue distances are
+     * non-decreasing, so comparing this to the depth of the first “goal witness” dequeue tells when that layer is done.
+     */
+    public int getLastPolledDistance() {
+        return lastPolledDistance;
     }
 
     /**
@@ -190,6 +244,7 @@ public final class BlockBfs {
                 long cur = queue.poll();
                 Integer dObj = dist.get(cur);
                 int d = dObj != null ? dObj : 0;
+                lastPolledDistance = d;
                 for (BfsVisitor v : visitors) {
                     v.visit(world, cur, d);
                 }

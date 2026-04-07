@@ -15,6 +15,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -30,6 +32,8 @@ import java.nio.file.Path;
 
 /** Block building, shell/stub construction, resize/repair, and reach (pathfind trigger). */
 public final class CommandToolbox {
+    private static final Logger REACH_LOG = LoggerFactory.getLogger("voidclam/reach");
+
     /**
      * Shared executor for pathfinding (reach + container scan) so it doesn't block main thread.
      * Replaced after each server session ends so a new pool exists if the JVM loads another world.
@@ -58,6 +62,15 @@ public final class CommandToolbox {
         }
         lines.add("  omniAsyncPulseRunning=" + TendrilPulseManager.isOmniAsyncPulseRunning());
         return lines;
+    }
+
+    /** Gated by {@link VoidClamConfig#reach_process_debug_log}. */
+    static void reachProcessDebug(@Nullable Clam m, String step, String detail) {
+        if (!VoidClamConfig.get().reach_process_debug_log) {
+            return;
+        }
+        String id = m != null && m.clamId != null ? m.clamId.toString() : "-";
+        REACH_LOG.info("[reach] clam={} step={} {}", id, step, detail);
     }
 
     public static void configurePathfinderExecutorSize(int poolSize) {
@@ -513,26 +526,54 @@ public final class CommandToolbox {
     /** Start light/ore search for a clam. Scans box off-thread, pathfinds to closest target. */
     public static void clamReach(ServerWorld world, UUID clamId) {
         Clam m = VoidClamMod.getClamById(clamId);
-        if (m == null || !VoidClamMod.isSearingHeartThermallyActive(world, m)) return;
-        if (!world.getRegistryKey().equals(m.dimensionWorldKey())) return;
-        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        if (m == null || !VoidClamMod.isSearingHeartThermallyActive(world, m)) {
+            reachProcessDebug(null, "skip", "no_clam_or_inactive clamId=" + clamId);
+            return;
+        }
+        if (!world.getRegistryKey().equals(m.dimensionWorldKey())) {
+            reachProcessDebug(m, "skip", "wrong_dimension");
+            return;
+        }
+        if (!world.isChunkLoaded(m.x >> 4, m.z >> 4)) {
+            reachProcessDebug(m, "skip", "heart_chunk_unloaded");
+            return;
+        }
         m.ensureClamId();
-        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) return;
-        if (!VoidClamMod.isPathfindingAllowedYet(world, m)) return;
-        if (VoidClamMod.isGrowRepairPendingForClam(clamId)) return;
-        if (m.mainCycleBusy != 0) return;
+        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) {
+            reachProcessDebug(m, "skip", "async_abort_barrier");
+            return;
+        }
+        if (!VoidClamMod.isPathfindingAllowedYet(world, m)) {
+            reachProcessDebug(m, "skip", "pathfinding_not_allowed_yet");
+            return;
+        }
+        if (VoidClamMod.isGrowRepairPendingForClam(clamId)) {
+            reachProcessDebug(m, "skip", "grow_repair_pending");
+            return;
+        }
+        if (m.mainCycleBusy != 0) {
+            reachProcessDebug(m, "skip", "main_cycle_busy=" + m.mainCycleBusy);
+            return;
+        }
         m.mainCycleBusy = 1;
+        reachProcessDebug(m, "accepted", "queued heart=(" + m.x + "," + m.y + "," + m.z + ") astar="
+            + VoidClamConfig.get().astar_mode);
 
         submitPathfinding(world, m.x, m.z, m.clamId, () -> VoidClamMod.releasePathfindingMainCycle(m), () -> {
             try {
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, m.x, m.z, m.clamId)) {
+                    reachProcessDebug(m, "task_abort", "async_abort_barrier");
                     VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
                 if (!VoidClamMod.isPathfindingAllowedYet(world, m)) {
+                    reachProcessDebug(m, "task_abort", "pathfinding_not_allowed_yet");
                     VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
+                boolean syncReach = VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED;
+                reachProcessDebug(m, "task_begin", "thread=" + Thread.currentThread().getName()
+                    + " sync_batched_inline=" + syncReach);
                 int x = m.x, y = m.y, z = m.z, cSize = Math.max(1, m.currentSize);
                 BlockPos modPos = new BlockPos(x, y, z);
                 BlockPos closestLight = null;
@@ -548,6 +589,9 @@ public final class CommandToolbox {
                 List<BlockPos> reachLightCandidates = useReachMap ? new ArrayList<>() : null;
                 List<BlockPos> reachOreCandidates = useReachMap ? new ArrayList<>() : null;
                 ReachabilityVolatileMap reachMap = null;
+                reachProcessDebug(m, "scan_plan", "seekLights=" + m.seekLights + " seekOres=" + shouldSeekOre
+                    + " volatileReachMap=" + useReachMap + " materialOreFlow=" + materialOreFlow
+                    + " lightCache=" + cfg.lightBlockCacheEnabled() + " oreCache=" + cfg.oreBlockCacheEnabled());
 
                 if (m.seekLights || shouldSeekOre) {
                     if (m.seekLights) {
@@ -657,19 +701,37 @@ public final class CommandToolbox {
                         }
                     }
                     if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+                        reachProcessDebug(m, "task_abort", "during_seek_scan");
                         VoidClamMod.releasePathfindingMainCycle(m);
                         return;
                     }
                 }
+
+                reachProcessDebug(m, "scan_done", (useReachMap
+                    ? "mode=volatile_candidates lights=" + reachLightCandidates.size() + " ores=" + reachOreCandidates.size()
+                    : "mode=direct_euclidean")
+                    + " pickSoFar light=" + (closestLight != null) + " ore=" + (closestOre != null));
 
                 BlockPos closest = null;
                 BlockPos reachPickOre = null;
                 BlockPos reachPickLight = null;
                 if (useReachMap) {
                     if (!reachLightCandidates.isEmpty() || !reachOreCandidates.isEmpty()) {
-                        reachMap = Pathfinder.buildVolatileReachabilityMap(world, m);
+                        if (syncReach) {
+                            reachProcessDebug(m, "reach_flood", "enqueue_incremental lights=" + reachLightCandidates.size()
+                                + " ores=" + reachOreCandidates.size());
+                            Pathfinder.enqueueSyncVolatileReachFloodJob(Pathfinder.newVolatileReachFloodJob(
+                                world, m, reachLightCandidates, reachOreCandidates, materialOreFlow));
+                            return;
+                        }
+                        reachProcessDebug(m, "reach_flood", "start (async) lights=" + reachLightCandidates.size()
+                            + " ores=" + reachOreCandidates.size());
+                        reachMap = Pathfinder.buildVolatileReachabilityMap(world, m, reachLightCandidates, reachOreCandidates);
+                        reachProcessDebug(m, "reach_flood", "done visitedCells=" + reachMap.visitedCount());
                         reachPickOre = pickBestReachCandidate(reachOreCandidates, modPos, world, m, reachMap);
                         reachPickLight = pickBestReachCandidate(reachLightCandidates, modPos, world, m, reachMap);
+                    } else {
+                        reachProcessDebug(m, "reach_flood", "skip (no candidates)");
                     }
                     if (materialOreFlow && reachPickOre != null) {
                         closest = reachPickOre;
@@ -696,10 +758,15 @@ public final class CommandToolbox {
                 }
 
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+                    reachProcessDebug(m, "task_abort", "after_target_pick");
                     VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
                 if (closest != null) {
+                    String goalKind = closestLight != null && closest.equals(closestLight) ? "light"
+                        : (closestOre != null && closest.equals(closestOre) ? "ore" : "mixed");
+                    reachProcessDebug(m, "target_pick", "goal=(" + closest.getX() + "," + closest.getY() + "," + closest.getZ()
+                        + ") kind=" + goalKind + " prebuiltMap=" + (reachMap != null));
                     if (closestLight != null && closest.equals(closestLight)) {
                         long goalPacked = closest.asLong();
                         m.lightsBlackList.add(goalPacked);
@@ -717,9 +784,13 @@ public final class CommandToolbox {
                         m.orePathGoalPacked = null;
                         m.orePathForMaterialHunger = false;
                     }
+                    reachProcessDebug(m, "path_enqueue", "calculatePath start=(" + x + "," + y + "," + z + ") goal=("
+                        + closest.getX() + "," + closest.getY() + "," + closest.getZ() + ")"
+                        + (reachMap != null ? " floodCells=" + reachMap.visitedCount() : ""));
                     Pathfinder.calculatePath(
                         world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ(), reachMap);
                 } else {
+                    reachProcessDebug(m, "done", "no_target release_busy");
                     m.orePathForMaterialHunger = false;
                     VoidClamMod.releasePathfindingMainCycle(m);
                 }
@@ -728,6 +799,74 @@ public final class CommandToolbox {
                 throw t;
             }
         });
+    }
+
+    /**
+     * Final leg of {@code clamReach} after a volatile reach flood finishes ({@link Pathfinder.VolatileReachFloodJob}) —
+     * rank targets, reserve blacklists, {@link Pathfinder#calculatePath}.
+     */
+    static void finishClamReachAfterVolatileFlood(
+        ServerWorld world,
+        Clam m,
+        BlockPos modPos,
+        int x, int y, int z,
+        List<BlockPos> reachLightCandidates,
+        List<BlockPos> reachOreCandidates,
+        boolean materialOreFlow,
+        ReachabilityVolatileMap reachMap
+    ) {
+        BlockPos reachPickOre = pickBestReachCandidate(reachOreCandidates, modPos, world, m, reachMap);
+        BlockPos reachPickLight = pickBestReachCandidate(reachLightCandidates, modPos, world, m, reachMap);
+        BlockPos closest;
+        if (materialOreFlow && reachPickOre != null) {
+            closest = reachPickOre;
+        } else if (materialOreFlow && reachPickLight != null) {
+            closest = reachPickLight;
+        } else if (reachPickLight != null && (reachPickOre == null
+            || compareReachTargets(reachPickLight, reachPickOre, modPos, world, m, reachMap) <= 0)) {
+            closest = reachPickLight;
+        } else {
+            closest = reachPickOre;
+        }
+        BlockPos closestLight = reachPickLight;
+        BlockPos closestOre = reachPickOre;
+
+        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+            reachProcessDebug(m, "task_abort", "after_target_pick");
+            VoidClamMod.releasePathfindingMainCycle(m);
+            return;
+        }
+        if (closest != null) {
+            String goalKind = closestLight != null && closest.equals(closestLight) ? "light"
+                : (closestOre != null && closest.equals(closestOre) ? "ore" : "mixed");
+            reachProcessDebug(m, "target_pick", "goal=(" + closest.getX() + "," + closest.getY() + "," + closest.getZ()
+                + ") kind=" + goalKind + " prebuiltMap=true");
+            if (closestLight != null && closest.equals(closestLight)) {
+                long goalPacked = closest.asLong();
+                m.lightsBlackList.add(goalPacked);
+                m.lightPathGoalPacked = goalPacked;
+                m.orePathGoalPacked = null;
+                m.orePathForMaterialHunger = false;
+            } else if (closestOre != null && closest.equals(closestOre)) {
+                long goalPacked = closest.asLong();
+                m.oresBlackList.add(goalPacked);
+                m.orePathGoalPacked = goalPacked;
+                m.lightPathGoalPacked = null;
+                m.orePathForMaterialHunger = materialOreFlow;
+            } else {
+                m.lightPathGoalPacked = null;
+                m.orePathGoalPacked = null;
+                m.orePathForMaterialHunger = false;
+            }
+            reachProcessDebug(m, "path_enqueue", "calculatePath start=(" + x + "," + y + "," + z + ") goal=("
+                + closest.getX() + "," + closest.getY() + "," + closest.getZ() + ") floodCells=" + reachMap.visitedCount());
+            Pathfinder.calculatePath(
+                world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ(), reachMap);
+        } else {
+            reachProcessDebug(m, "done", "no_target release_busy");
+            m.orePathForMaterialHunger = false;
+            VoidClamMod.releasePathfindingMainCycle(m);
+        }
     }
 
     private static @Nullable BlockPos pickBestReachCandidate(

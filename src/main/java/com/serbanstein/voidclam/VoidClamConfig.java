@@ -56,6 +56,21 @@ public final class VoidClamConfig {
     public double clam_spawn_natural_dungeon_rate = 0.15;
     /** Approximate chance per newly generated overworld chunk for default natural spawn (ignored for dungeon method). */
     public double clam_spawn_natural_default_chunk_chance = 0.003;
+    /**
+     * When {@code true}, {@link NaturalSpawnHandler} logs each default-method chunk roll to {@code voidclam/natural_spawn}
+     * at INFO (world, chunk, roll vs threshold, pass/fail). Off by default.
+     */
+    public boolean clam_spawn_natural_debug_log = false;
+    /**
+     * Default natural spawn: top of the cleared sphere must be at least this many blocks below {@link net.minecraft.world.World#getSeaLevel()}.
+     */
+    public int clam_spawn_natural_min_blocks_below_sea = 24;
+    /**
+     * Default natural spawn: top of the clam shell must be at least this many blocks below local {@code WORLD_SURFACE_WG} height.
+     */
+    public int clam_spawn_natural_min_blocks_below_surface = 10;
+    /** Extra blocks beyond {@link CommandToolbox#clamOctahedronCircumsphereRadius} for the pre-carve cavity. */
+    public int clam_spawn_natural_sphere_padding = 2;
 
     public boolean clam_light_flag_default = false;
     public boolean clam_ores_flag_default = false;
@@ -130,6 +145,11 @@ public final class VoidClamConfig {
      * {@code 1} = always; {@code 0} = never.
      */
     public double clam_seek_attempt_probability = 1.0;
+    /**
+     * When {@code true}, {@link CommandToolbox#clamReach} logs each pipeline phase to the {@code voidclam/reach} logger at INFO
+     * (light/ore scan, volatile reach map, target choice, path enqueue). Off by default.
+     */
+    public boolean reach_process_debug_log = false;
     /** Player defense check cadence in seconds; keep at or above goat-horn sound length to avoid overlap. */
     public int clam_defense_detection_interval_seconds = 8;
     /**
@@ -218,6 +238,9 @@ public final class VoidClamConfig {
         if (clam_spawn_natural_dungeon_rate > 1) clam_spawn_natural_dungeon_rate = 1;
         if (clam_spawn_natural_default_chunk_chance < 0) clam_spawn_natural_default_chunk_chance = 0;
         if (clam_spawn_natural_default_chunk_chance > 1) clam_spawn_natural_default_chunk_chance = 1;
+        if (clam_spawn_natural_min_blocks_below_sea < 0) clam_spawn_natural_min_blocks_below_sea = 0;
+        if (clam_spawn_natural_min_blocks_below_surface < 0) clam_spawn_natural_min_blocks_below_surface = 0;
+        if (clam_spawn_natural_sphere_padding < 0) clam_spawn_natural_sphere_padding = 0;
         if (clam_size_max < 1) clam_size_max = 1;
         if (clam_grow_energymultiplier < 1) clam_grow_energymultiplier = 1;
         if (clam_grow_material_cost < 0) clam_grow_material_cost = 0;

@@ -1,0 +1,51 @@
+{
+  "readme": "Each blocks entry uses a registry id (namespace:path). energy/material/soul are integers (default 0). drops lists item stacks to route to clam storage when the block is consumed as loot (use modded ids e.g. ae2:certus_quartz_crystal). When seekLights + low material consumes ores, material is added instead of drops. defaults.* applies to lights detected via luminance/tags but not listed here.",
+  "defaults": {
+    "energy_for_unknown_light": 1,
+    "energy_for_bright_light": 2,
+    "bright_light_min_luminance": 15
+  },
+  "blocks": {
+    "minecraft:beacon": {
+      "energy": 5,
+      "material": 0,
+      "soul": 0,
+      "drops": [{ "item": "minecraft:nether_star", "count": 1 }]
+    },
+    "minecraft:torch": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:wall_torch": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:soul_torch": { "energy": 1, "material": 0, "soul": 1, "drops": [] },
+    "minecraft:soul_wall_torch": { "energy": 1, "material": 0, "soul": 1, "drops": [] },
+    "minecraft:lantern": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:soul_lantern": { "energy": 1, "material": 0, "soul": 1, "drops": [] },
+    "minecraft:glowstone": { "energy": 2, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:jack_o_lantern": { "energy": 2, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:sea_lantern": { "energy": 2, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:shroomlight": { "energy": 2, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:end_rod": { "energy": 2, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:sea_pickle": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:lava": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:fire": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:soul_fire": { "energy": 1, "material": 0, "soul": 1, "drops": [] },
+    "minecraft:campfire": { "energy": 1, "material": 0, "soul": 0, "drops": [] },
+    "minecraft:soul_campfire": { "energy": 1, "material": 0, "soul": 1, "drops": [] },
+    "minecraft:coal_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:coal", "count": 4 }] },
+    "minecraft:deepslate_coal_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:coal", "count": 4 }] },
+    "minecraft:iron_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:iron_ingot", "count": 4 }] },
+    "minecraft:deepslate_iron_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:iron_ingot", "count": 4 }] },
+    "minecraft:gold_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:gold_ingot", "count": 4 }] },
+    "minecraft:deepslate_gold_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:gold_ingot", "count": 4 }] },
+    "minecraft:copper_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:copper_ingot", "count": 4 }] },
+    "minecraft:deepslate_copper_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:copper_ingot", "count": 4 }] },
+    "minecraft:nether_gold_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:gold_nugget", "count": 24 }] },
+    "minecraft:diamond_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:diamond", "count": 1 }] },
+    "minecraft:deepslate_diamond_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:diamond", "count": 1 }] },
+    "minecraft:lapis_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:lapis_lazuli", "count": 25 }] },
+    "minecraft:deepslate_lapis_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:lapis_lazuli", "count": 25 }] },
+    "minecraft:redstone_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:redstone", "count": 36 }] },
+    "minecraft:deepslate_redstone_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:redstone", "count": 36 }] },
+    "minecraft:emerald_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:emerald", "count": 25 }] },
+    "minecraft:deepslate_emerald_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:emerald", "count": 25 }] },
+    "minecraft:nether_quartz_ore": { "energy": 0, "material": 1, "soul": 0, "drops": [{ "item": "minecraft:quartz", "count": 4 }] }
+  }
+}

@@ -63,8 +63,19 @@ public final class Pathfinder {
     /** Main-thread A* jobs when {@link VoidClamConfig.AstarMode#SYNC_BATCHED} is active. */
     private static final ConcurrentLinkedQueue<AStarJob> syncAStarJobs = new ConcurrentLinkedQueue<>();
     private static final Deque<AStarJob> syncAStarFairness = new ArrayDeque<>();
+    /**
+     * Incremental volatile reach floods for {@link CommandToolbox#clamReach} when {@code clam_reachability_volatile_map}
+     * and sync-batched A* are on. Steps share {@link #syncMainThreadStepBudgetRemaining} with {@link AStarJob} work.
+     */
+    private static final Deque<VolatileReachFloodJob> syncVolatileReachFloodJobs = new ArrayDeque<>();
 
     public static void clearSyncPathJobsForSessionEnd() {
+        while (!syncVolatileReachFloodJobs.isEmpty()) {
+            VolatileReachFloodJob j = syncVolatileReachFloodJobs.pollFirst();
+            if (j != null) {
+                j.releaseBusyAndFinishAborted();
+            }
+        }
         syncAStarJobs.clear();
         syncAStarFairness.clear();
     }
@@ -113,6 +124,13 @@ public final class Pathfinder {
         } else {
             out.addAll(jobLines);
         }
+        for (VolatileReachFloodJob v : syncVolatileReachFloodJobs) {
+            if (clamId.equals(v.clamId)) {
+                out.add(String.format(
+                    "  volatile reach flood: finished=%s visited=%d candidates lights=%d ores=%d",
+                    v.bfs.isFinished(), v.bfs.visitedCount(), v.reachLightCandidates.size(), v.reachOreCandidates.size()));
+            }
+        }
         return out;
     }
 
@@ -120,6 +138,11 @@ public final class Pathfinder {
     public static boolean hasSyncAStarWorkForClam(@org.jetbrains.annotations.Nullable UUID clamId) {
         if (clamId == null) {
             return false;
+        }
+        for (VolatileReachFloodJob v : syncVolatileReachFloodJobs) {
+            if (clamId.equals(v.clamId)) {
+                return true;
+            }
         }
         for (AStarJob j : syncAStarJobs) {
             if (clamId.equals(j.clamId)) {
@@ -139,12 +162,19 @@ public final class Pathfinder {
         if (clamId == null) {
             return;
         }
+        syncVolatileReachFloodJobs.removeIf(job -> {
+            if (clamId.equals(job.clamId)) {
+                job.releaseBusyAndFinishAborted();
+                return true;
+            }
+            return false;
+        });
         syncAStarJobs.removeIf(job -> clamId.equals(job.clamId));
         syncAStarFairness.removeIf(job -> clamId.equals(job.clamId));
     }
 
     /**
-     * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncAStarJobs}.
+     * Enqueue a path job for sync batched mode (server thread). Prepass and A* steps run across ticks via {@link #tickSyncMainThreadPathWork}.
      */
     public static void enqueueSyncAStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
         enqueueSyncAStarJob(world, clamId, sx, sy, sz, gx, gy, gz, null);
@@ -167,16 +197,223 @@ public final class Pathfinder {
     }
 
     /**
-     * Spread {@code globalStepBudget} expansions across queued sync jobs (round-robin).
+     * Per-tick pool for server-thread path expansions ({@link VoidClamConfig#effectiveSyncMaxStepsPerTick}).
+     * Shared between {@link #tickSyncMainThreadPathWork} (volatile floods + A*) and {@link BlockBfs#runToCompletionOnCurrentThread}.
      */
-    public static void tickSyncAStarJobs(int globalStepBudget) {
-        if (globalStepBudget <= 0 || syncAStarJobs.isEmpty()) return;
+    private static int syncMainThreadStepBudgetRemaining;
+
+    public static void resetSyncMainThreadStepBudgetForTick(int budget) {
+        syncMainThreadStepBudgetRemaining = Math.max(0, budget);
+    }
+
+    /**
+     * Consume up to {@code requested} steps from this tick’s main-thread pool (BFS node dequeues / sync job steps).
+     *
+     * @return how many were actually taken (may be less than {@code requested} when the pool is exhausted)
+     */
+    static int consumeSyncMainThreadStepsForBlockBfs(int requested) {
+        if (requested <= 0) return 0;
+        int take = Math.min(requested, syncMainThreadStepBudgetRemaining);
+        syncMainThreadStepBudgetRemaining -= take;
+        return take;
+    }
+
+    /**
+     * Drains {@linkplain #syncMainThreadStepBudgetRemaining} for sync-batched work: first incremental volatile reach floods
+     * ({@link #syncVolatileReachFloodJobs}), then sync A* / prepass jobs. Call once per server tick after work that may enqueue
+     * floods (e.g. {@link VoidClamMod#tickLoadedClamCores}).
+     */
+    public static void tickSyncMainThreadPathWork() {
+        if (VoidClamConfig.get().astarModeEnum() != VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            return;
+        }
+        tickVolatileReachFloodJobsRoundRobin();
+        tickSyncAStarJobsConsumeBudget();
+    }
+
+    private static void tickVolatileReachFloodJobsRoundRobin() {
+        if (syncVolatileReachFloodJobs.isEmpty() || syncMainThreadStepBudgetRemaining <= 0) {
+            return;
+        }
+        int safety = Math.max(512, syncVolatileReachFloodJobs.size() * 64 + 64);
+        while (syncMainThreadStepBudgetRemaining > 0 && safety-- > 0) {
+            VolatileReachFloodJob job = syncVolatileReachFloodJobs.pollFirst();
+            if (job == null) {
+                break;
+            }
+            if (job.shouldAbort()) {
+                job.releaseBusyAndFinishAborted();
+                continue;
+            }
+            if (job.bfs.isFinished()) {
+                job.completePostFlood();
+                continue;
+            }
+            job.bfs.step(1);
+            syncMainThreadStepBudgetRemaining--;
+            int vis = job.bfs.visitedCount();
+            if (VoidClamConfig.get().reach_process_debug_log && (vis <= 1 || vis % 256 == 0)) {
+                CommandToolbox.reachProcessDebug(VoidClamMod.getClamById(job.clamId), "reach_flood_tick", "visited=" + vis);
+            }
+            boolean reachSettled = volatileReachFloodCandidatesFullyDecided(job);
+            boolean reachLayerDone = volatileReachMinReachLayerDrained(job.bfs, job.reachEntryLayerDStarRef);
+            if (!job.bfs.isFinished() && (reachSettled || reachLayerDone)) {
+                CommandToolbox.reachProcessDebug(
+                    VoidClamMod.getClamById(job.clamId),
+                    "reach_flood",
+                    "early_stop visited=" + vis + " reason=" + (reachSettled && reachLayerDone ? "settled+layer" : reachSettled ? "settled" : "first_reach_layer")
+                );
+                job.bfs.stopEarlyAsFinished();
+            }
+            if (job.bfs.isFinished()) {
+                job.completePostFlood();
+            } else {
+                syncVolatileReachFloodJobs.addLast(job);
+            }
+        }
+    }
+
+    /**
+     * After the first dequeued “entry witness” cell (see {@link #buildReachEntryWitnessPackedSet}) at depth {@code dStar},
+     * all candidates’ {@link #adjacentReachBfsStepsToGoal} minima are known once the BFS has started dequeuing a deeper layer.
+     */
+    private static boolean volatileReachMinReachLayerDrained(BlockBfs bfs, @Nullable int[] reachEntryLayerDStarRef) {
+        if (reachEntryLayerDStarRef == null || reachEntryLayerDStarRef[0] < 0) {
+            return false;
+        }
+        return bfs.getLastPolledDistance() > reachEntryLayerDStarRef[0];
+    }
+
+    /** Union of 6-neighbor cells from which the clam may enter a reach candidate (flood interior + goal-entry rule). */
+    private static HashSet<Long> buildReachEntryWitnessPackedSet(
+        ServerWorld world,
+        Clam mod,
+        List<BlockPos> lights,
+        List<BlockPos> ores
+    ) {
+        HashSet<Long> out = new HashSet<>();
+        PathfindChunkCache base = new PathfindChunkCache(world, mod, null);
+        for (BlockPos g : lights) {
+            addReachEntryWitnessesForGoal(world, mod, base, g, out);
+        }
+        for (BlockPos g : ores) {
+            addReachEntryWitnessesForGoal(world, mod, base, g, out);
+        }
+        return out;
+    }
+
+    private static void addReachEntryWitnessesForGoal(
+        ServerWorld world,
+        Clam mod,
+        PathfindChunkCache base,
+        BlockPos g,
+        HashSet<Long> out
+    ) {
+        for (Cursor c : xc) {
+            int nx = g.getX() + c.x, ny = g.getY() + c.y, nz = g.getZ() + c.z;
+            if (!inPathfindSearchBounds(mod, nx, ny, nz)) {
+                continue;
+            }
+            BlockPos n = new BlockPos(nx, ny, nz);
+            if (!isPassibleForAStarStep(world, base, n, false)) {
+                continue;
+            }
+            if (!isPassibleForAStarStep(world, base, g, true)) {
+                continue;
+            }
+            out.add(n.asLong());
+        }
+    }
+
+    /**
+     * Whether {@link #adjacentReachBfsStepsToGoal} results are final for every reach candidate: each in-bounds,
+     * passible neighbor of each candidate is either already in {@code dist} or cannot appear because the BFS has ended.
+     */
+    private static boolean volatileReachFloodCandidatesFullyDecided(VolatileReachFloodJob job) {
+        if (job.reachLightCandidates.isEmpty() && job.reachOreCandidates.isEmpty()) {
+            return false;
+        }
+        Clam mod = VoidClamMod.getClamById(job.clamId);
+        if (mod == null) {
+            return false;
+        }
+        return volatileReachCandidatesNeighborsAllSettled(
+            job.world,
+            mod,
+            job.bfs.distances(),
+            !job.bfs.isFinished(),
+            job.reachLightCandidates,
+            job.reachOreCandidates
+        );
+    }
+
+    private static boolean volatileReachCandidatesNeighborsAllSettled(
+        ServerWorld world,
+        Clam mod,
+        Map<Long, Integer> dist,
+        boolean bfsMayStillExpand,
+        List<BlockPos> lights,
+        List<BlockPos> ores
+    ) {
+        if (lights.isEmpty() && ores.isEmpty()) {
+            return false;
+        }
+        PathfindChunkCache base = new PathfindChunkCache(world, mod, null);
+        for (BlockPos p : lights) {
+            if (!volatileReachCandidateNeighborsAllSettled(world, mod, base, dist, bfsMayStillExpand, p)) {
+                return false;
+            }
+        }
+        for (BlockPos p : ores) {
+            if (!volatileReachCandidateNeighborsAllSettled(world, mod, base, dist, bfsMayStillExpand, p)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean volatileReachCandidateNeighborsAllSettled(
+        ServerWorld world,
+        Clam mod,
+        PathfindChunkCache base,
+        Map<Long, Integer> dist,
+        boolean bfsMayStillExpand,
+        BlockPos p
+    ) {
+        for (Cursor c : xc) {
+            int nx = p.getX() + c.x, ny = p.getY() + c.y, nz = p.getZ() + c.z;
+            if (!inPathfindSearchBounds(mod, nx, ny, nz)) {
+                continue;
+            }
+            BlockPos n = new BlockPos(nx, ny, nz);
+            long nl = n.asLong();
+            if (dist.containsKey(nl)) {
+                continue;
+            }
+            if (!isPassibleForAStarStep(world, base, n, false)) {
+                continue;
+            }
+            if (!bfsMayStillExpand) {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Spread remaining {@linkplain #syncMainThreadStepBudgetRemaining main-thread step budget} across queued sync A* jobs (round-robin).
+     */
+    private static void tickSyncAStarJobsConsumeBudget() {
+        if (syncMainThreadStepBudgetRemaining <= 0 || syncAStarJobs.isEmpty()) {
+            return;
+        }
         if (syncAStarFairness.isEmpty()) {
             syncAStarFairness.addAll(syncAStarJobs);
         }
         // Generous cap so many “paused” jobs (resize cooldown) in the round-robin do not burn the budget before an eligible job runs.
         int safety = Math.max(4096, syncAStarFairness.size() * 4 + syncAStarJobs.size() * 4 + 64);
-        while (globalStepBudget > 0 && safety-- > 0) {
+        while (syncMainThreadStepBudgetRemaining > 0 && safety-- > 0) {
             AStarJob job = syncAStarFairness.pollFirst();
             if (job == null) {
                 if (syncAStarJobs.isEmpty()) break;
@@ -191,13 +428,175 @@ public final class Pathfinder {
                 syncAStarFairness.addLast(job);
                 continue;
             }
-            int used = job.step(job.worldRef, globalStepBudget);
-            globalStepBudget -= used;
+            int used = job.step(job.worldRef, syncMainThreadStepBudgetRemaining);
+            syncMainThreadStepBudgetRemaining -= used;
             if (job.isFinished()) {
                 syncAStarJobs.remove(job);
             } else {
                 syncAStarFairness.addLast(job);
             }
+        }
+    }
+
+    /** Enqueue incremental flood; {@link Clam#mainCycleBusy} must already be owned by this reach session. */
+    public static void enqueueSyncVolatileReachFloodJob(VolatileReachFloodJob job) {
+        if (VoidClamConfig.get().astarModeEnum() != VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            throw new IllegalStateException("volatile flood queue requires astar_mode sync_batched");
+        }
+        syncVolatileReachFloodJobs.removeIf(existing -> {
+            if (!existing.clamId.equals(job.clamId)) {
+                return false;
+            }
+            LOGGER.warn("voidclam: replacing stale volatile reach flood for clam {} (dropping partial flood)", job.clamId);
+            return true;
+        });
+        syncVolatileReachFloodJobs.addLast(job);
+    }
+
+    public static VolatileReachFloodJob newVolatileReachFloodJob(
+        ServerWorld world,
+        Clam mod,
+        List<BlockPos> reachLightCandidates,
+        List<BlockPos> reachOreCandidates,
+        boolean materialOreFlow
+    ) {
+        mod.ensureClamId();
+        HashMap<Long, BlockState> states = new HashMap<>();
+        boolean trackReachLayer = !reachLightCandidates.isEmpty() || !reachOreCandidates.isEmpty();
+        HashSet<Long> witnessPacked = trackReachLayer
+            ? buildReachEntryWitnessPackedSet(world, mod, reachLightCandidates, reachOreCandidates)
+            : null;
+        int[] reachEntryLayerDStarRef = trackReachLayer ? new int[] { -1 } : null;
+        BlockBfs bfs = startVolatileReachBfs(world, mod, states, witnessPacked, reachEntryLayerDStarRef);
+        return new VolatileReachFloodJob(
+            world,
+            mod.clamId,
+            mod.x,
+            mod.y,
+            mod.z,
+            new ArrayList<>(reachLightCandidates),
+            new ArrayList<>(reachOreCandidates),
+            materialOreFlow,
+            bfs,
+            states,
+            reachEntryLayerDStarRef
+        );
+    }
+
+    private static BlockBfs startVolatileReachBfs(
+        ServerWorld world,
+        Clam mod,
+        HashMap<Long, BlockState> states,
+        @Nullable HashSet<Long> reachEntryWitnessPacked,
+        @Nullable int[] reachEntryLayerDStarRef
+    ) {
+        mod.ensureClamId();
+        PathfindChunkCache base = new PathfindChunkCache(world, mod, null);
+        long startLong = BlockPos.asLong(mod.x, mod.y, mod.z);
+        BlockBfs.EdgePolicy policy = (w, fromLong, toLong, fromDist) -> {
+            BlockPos nextPos = BlockPos.fromLong(toLong);
+            if (!inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())) {
+                return false;
+            }
+            return isPassibleForAStarStep(w, base, nextPos, false);
+        };
+        if (reachEntryWitnessPacked != null && reachEntryLayerDStarRef != null) {
+            return BlockBfs.start(
+                world,
+                startLong,
+                policy,
+                Integer.MAX_VALUE,
+                BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
+                null,
+                null,
+                asyncPathfindingAbortChecker(world, mod.x, mod.z, mod.clamId),
+                BlockBfs.NO_EARLY_GOAL,
+                (w, cur, d) -> states.put(cur, base.getBlockState(BlockPos.fromLong(cur))),
+                (w, cur, d) -> {
+                    if (reachEntryLayerDStarRef[0] < 0 && reachEntryWitnessPacked.contains(cur)) {
+                        reachEntryLayerDStarRef[0] = d;
+                    }
+                }
+            );
+        }
+        return BlockBfs.start(
+            world,
+            startLong,
+            policy,
+            Integer.MAX_VALUE,
+            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
+            null,
+            null,
+            asyncPathfindingAbortChecker(world, mod.x, mod.z, mod.clamId),
+            BlockBfs.NO_EARLY_GOAL,
+            (w, cur, d) -> states.put(cur, base.getBlockState(BlockPos.fromLong(cur)))
+        );
+    }
+
+    /** One clamReach volatile reach flood, stepped across ticks until {@link BlockBfs#isFinished()}. */
+    public static final class VolatileReachFloodJob {
+        final ServerWorld world;
+        final UUID clamId;
+        final int heartX, heartY, heartZ;
+        final List<BlockPos> reachLightCandidates;
+        final List<BlockPos> reachOreCandidates;
+        final boolean materialOreFlow;
+        final BlockBfs bfs;
+        final HashMap<Long, BlockState> states;
+        /** First dequeue depth in {@link #buildReachEntryWitnessPackedSet}; {@code null} when not tracking. */
+        final @Nullable int[] reachEntryLayerDStarRef;
+
+        VolatileReachFloodJob(
+            ServerWorld world,
+            UUID clamId,
+            int heartX, int heartY, int heartZ,
+            List<BlockPos> reachLightCandidates,
+            List<BlockPos> reachOreCandidates,
+            boolean materialOreFlow,
+            BlockBfs bfs,
+            HashMap<Long, BlockState> states,
+            @Nullable int[] reachEntryLayerDStarRef
+        ) {
+            this.world = world;
+            this.clamId = clamId;
+            this.heartX = heartX;
+            this.heartY = heartY;
+            this.heartZ = heartZ;
+            this.reachLightCandidates = reachLightCandidates;
+            this.reachOreCandidates = reachOreCandidates;
+            this.materialOreFlow = materialOreFlow;
+            this.bfs = bfs;
+            this.states = states;
+            this.reachEntryLayerDStarRef = reachEntryLayerDStarRef;
+        }
+
+        boolean shouldAbort() {
+            if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, heartX, heartZ, clamId)) {
+                return true;
+            }
+            Clam m = VoidClamMod.getClamById(clamId);
+            return m == null || !VoidClamMod.isPathfindingAllowedYet(world, m);
+        }
+
+        void releaseBusyAndFinishAborted() {
+            Clam m = VoidClamMod.getClamById(clamId);
+            if (m != null) {
+                CommandToolbox.reachProcessDebug(m, "reach_flood", "aborted release_busy");
+                VoidClamMod.releasePathfindingMainCycle(m);
+            }
+        }
+
+        void completePostFlood() {
+            Clam m = VoidClamMod.getClamById(clamId);
+            if (m == null || shouldAbort()) {
+                releaseBusyAndFinishAborted();
+                return;
+            }
+            ReachabilityVolatileMap map = new ReachabilityVolatileMap(states, new HashMap<>(bfs.distances()));
+            CommandToolbox.reachProcessDebug(m, "reach_flood", "done visitedCells=" + map.visitedCount());
+            CommandToolbox.finishClamReachAfterVolatileFlood(
+                world, m, new BlockPos(heartX, heartY, heartZ), heartX, heartY, heartZ,
+                reachLightCandidates, reachOreCandidates, materialOreFlow, map);
         }
     }
 
@@ -698,16 +1097,6 @@ public final class Pathfinder {
 
     static final List<Cursor> xc = new ArrayList<>();
     static final List<Cursor> yc = new ArrayList<>();
-    private static final Map<net.minecraft.block.Block, List<ItemStack>> FORTUNE3_DROPS = new HashMap<>();
-
-    private static void putFortune3(net.minecraft.block.Block block, net.minecraft.item.Item item, int count) {
-        FORTUNE3_DROPS.put(block, Collections.singletonList(new ItemStack(item, count)));
-    }
-
-    static List<ItemStack> getFortune3Drops(net.minecraft.block.Block block) {
-        List<ItemStack> list = FORTUNE3_DROPS.get(block);
-        return list != null ? list.stream().map(ItemStack::copy).toList() : new ArrayList<>();
-    }
 
     static {
         xc.add(new Cursor(1, 0, 0));
@@ -716,24 +1105,6 @@ public final class Pathfinder {
         xc.add(new Cursor(0, -1, 0));
         xc.add(new Cursor(0, 0, 1));
         xc.add(new Cursor(0, 0, -1));
-        putFortune3(Blocks.COAL_ORE, Items.COAL, 4);
-        putFortune3(Blocks.DEEPSLATE_COAL_ORE, Items.COAL, 4);
-        putFortune3(Blocks.IRON_ORE, Items.IRON_INGOT, 4);
-        putFortune3(Blocks.DEEPSLATE_IRON_ORE, Items.IRON_INGOT, 4);
-        putFortune3(Blocks.GOLD_ORE, Items.GOLD_INGOT, 4);
-        putFortune3(Blocks.DEEPSLATE_GOLD_ORE, Items.GOLD_INGOT, 4);
-        putFortune3(Blocks.COPPER_ORE, Items.COPPER_INGOT, 4);
-        putFortune3(Blocks.DEEPSLATE_COPPER_ORE, Items.COPPER_INGOT, 4);
-        putFortune3(Blocks.NETHER_GOLD_ORE, Items.GOLD_NUGGET, 24);
-        putFortune3(Blocks.DIAMOND_ORE, Items.DIAMOND, 1);
-        putFortune3(Blocks.DEEPSLATE_DIAMOND_ORE, Items.DIAMOND, 1);
-        putFortune3(Blocks.LAPIS_ORE, Items.LAPIS_LAZULI, 25);
-        putFortune3(Blocks.DEEPSLATE_LAPIS_ORE, Items.LAPIS_LAZULI, 25);
-        putFortune3(Blocks.REDSTONE_ORE, Items.REDSTONE, 36);
-        putFortune3(Blocks.DEEPSLATE_REDSTONE_ORE, Items.REDSTONE, 36);
-        putFortune3(Blocks.EMERALD_ORE, Items.EMERALD, 25);
-        putFortune3(Blocks.DEEPSLATE_EMERALD_ORE, Items.EMERALD, 25);
-        putFortune3(Blocks.NETHER_QUARTZ_ORE, Items.QUARTZ, 4);
         yc.add(new Cursor(1, 0, 0));
         yc.add(new Cursor(-1, 0, 0));
         yc.add(new Cursor(0, 1, 0));
@@ -810,35 +1181,49 @@ public final class Pathfinder {
     }
 
     /**
-     * Full 6-neighbor flood from the clam heart (no early goal), same edge rule as reachability prepass but without a goal exception
-     * on interior steps. Snapshots {@link BlockState} at each visited cell. Bounded by {@link VoidClamConfig#effectiveSyncMaxTotalExpansionsPerJob}.
+     * Full 6-neighbor flood from the clam heart within pathfind bounds (no visit cap). Same edge rule as reachability prepass
+     * without a goal exception on interior steps. Snapshots {@link BlockState} at each visited cell.
+     * <p>
+     * With {@code earlyExitLights} and {@code earlyExitOres} both non-null and not both empty, stops early when every
+     * candidate’s neighbors are settled, or when the BFS layer of the first reachable entry witness completes (global
+     * minimum hop depth to any candidate). Otherwise runs until the passible component in range is exhausted.
+     * <p>
+     * Async {@link CommandToolbox#clamReach} passes candidate lists; sync-batched reach uses {@link #enqueueSyncVolatileReachFloodJob}.
      */
     public static ReachabilityVolatileMap buildVolatileReachabilityMap(ServerWorld world, Clam mod) {
-        mod.ensureClamId();
-        PathfindChunkCache base = new PathfindChunkCache(world, mod, null);
+        return buildVolatileReachabilityMap(world, mod, null, null);
+    }
+
+    /** @param earlyExitLights / {@code earlyExitOres} pass {@code null} to disable early exit (full flood only). */
+    public static ReachabilityVolatileMap buildVolatileReachabilityMap(
+        ServerWorld world,
+        Clam mod,
+        @Nullable List<BlockPos> earlyExitLights,
+        @Nullable List<BlockPos> earlyExitOres
+    ) {
         HashMap<Long, BlockState> states = new HashMap<>();
-        long startLong = BlockPos.asLong(mod.x, mod.y, mod.z);
-        BlockBfs.EdgePolicy policy = (w, fromLong, toLong, fromDist) -> {
-            BlockPos nextPos = BlockPos.fromLong(toLong);
-            if (!inPathfindSearchBounds(mod, nextPos.getX(), nextPos.getY(), nextPos.getZ())) {
-                return false;
+        boolean useEarlyExit = earlyExitLights != null && earlyExitOres != null
+            && (!earlyExitLights.isEmpty() || !earlyExitOres.isEmpty());
+        HashSet<Long> witnessPacked = useEarlyExit
+            ? buildReachEntryWitnessPackedSet(world, mod, earlyExitLights, earlyExitOres)
+            : null;
+        int[] reachEntryLayerDStarRef = useEarlyExit ? new int[] { -1 } : null;
+        BlockBfs bfs = startVolatileReachBfs(world, mod, states, witnessPacked, reachEntryLayerDStarRef);
+        final int asyncStepBatch = 8192;
+        while (!bfs.isFinished()) {
+            if (useEarlyExit) {
+                if (volatileReachCandidatesNeighborsAllSettled(
+                    world, mod, bfs.distances(), true, earlyExitLights, earlyExitOres)) {
+                    bfs.stopEarlyAsFinished();
+                    break;
+                }
+                if (volatileReachMinReachLayerDrained(bfs, reachEntryLayerDStarRef)) {
+                    bfs.stopEarlyAsFinished();
+                    break;
+                }
             }
-            return isPassibleForAStarStep(w, base, nextPos, false);
-        };
-        long jobExpCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
-        BlockBfs bfs = BlockBfs.start(
-            world,
-            startLong,
-            policy,
-            blockBfsMaxVisited(jobExpCap),
-            BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED,
-            null,
-            null,
-            asyncPathfindingAbortChecker(world, mod.x, mod.z, mod.clamId),
-            BlockBfs.NO_EARLY_GOAL,
-            (w, cur, d) -> states.put(cur, base.getBlockState(BlockPos.fromLong(cur)))
-        );
-        bfs.runToCompletionOnCurrentThread();
+            bfs.step(asyncStepBatch);
+        }
         return new ReachabilityVolatileMap(states, new HashMap<>(bfs.distances()));
     }
 
@@ -1179,7 +1564,10 @@ public final class Pathfinder {
             }
         );
         if (mode == BlockBfs.ExecutionMode.MAIN_THREAD_BATCHED) {
-            bfs.runToCompletionOnCurrentThread();
+            // Must not use runToCompletionOnCurrentThread: when the sync step pool is empty it returns early while the BFS
+            // is still running, and we would invoke onComplete with a partial (often empty) container list — every solid
+            // break would place a barrel instead of using reachable storage (see BlockBfs javadoc).
+            bfs.runToCompletionIgnoringSyncMainThreadStepBudget();
             world.getServer().execute(onCompleteOnServerThread);
         }
     }
@@ -1235,7 +1623,7 @@ public final class Pathfinder {
                 }
             }
         );
-        bfs.runToCompletionOnCurrentThread();
+        bfs.runToCompletionIgnoringSyncMainThreadStepBudget();
         return containersOut.size();
     }
 
@@ -1372,6 +1760,57 @@ public final class Pathfinder {
         );
     }
 
+    /**
+     * Before consuming the goal cell (hardness bypass), ensure the block still matches what this path session aimed at
+     * ({@link Clam#lightPathGoalPacked} / {@link Clam#orePathGoalPacked}; legacy: seek flags when both null).
+     */
+    private static boolean goalDigTargetStillExpected(Clam m, BlockPos pos, BlockState mat, ServerWorld world) {
+        if (m == null) {
+            return false;
+        }
+        long packed = pos.asLong();
+        Long lightPacked = m.lightPathGoalPacked;
+        Long orePacked = m.orePathGoalPacked;
+        if (lightPacked != null && lightPacked == packed) {
+            return VoidClamMod.isLight(mat, world, pos);
+        }
+        if (orePacked != null && orePacked == packed) {
+            return VoidClamMod.isOre(mat.getBlock());
+        }
+        return (m.seekLights && VoidClamMod.isLight(mat, world, pos))
+            || ((m.seekOres || pathApplyOreCountsAsMaterialHunger(m)) && VoidClamMod.isOre(mat.getBlock()));
+    }
+
+    /**
+     * When true, ore broken during path apply feeds {@link VoidClamMod#addMaterial} instead of fortune loot to storage.
+     * Matches {@link CommandToolbox} “material ore flow”: {@link Clam#orePathForMaterialHunger}, low material while seeking light,
+     * or {@link Clam#prioritizeRepairOreSeek}.
+     */
+    private static boolean pathApplyOreCountsAsMaterialHunger(@Nullable Clam m) {
+        if (m == null) {
+            return false;
+        }
+        if (m.orePathForMaterialHunger) {
+            return true;
+        }
+        if (!m.seekLights) {
+            return false;
+        }
+        return m.material < m.materialSeekThreshold || m.prioritizeRepairOreSeek;
+    }
+
+    private static void lightsEatenDuringPathApply(UUID pathClamId, BlockState mat, ServerWorld world, BlockPos pos) {
+        if (!VoidClamMod.isLight(mat, world, pos)) {
+            return;
+        }
+        VoidClamBlockLoot loot = VoidClamBlockLoot.get();
+        VoidClamMod.addEnergy(pathClamId, loot.resolveEnergy(mat, world, pos));
+        int soul = loot.resolveSoul(mat, world, pos);
+        if (soul > 0) {
+            VoidClamMod.addSoul(pathClamId, soul);
+        }
+    }
+
     public static void buildPath(ServerWorld world, Node gnode) {
         if (gnode.clamId == null) return;
         Clam mod = VoidClamMod.getClamById(gnode.clamId);
@@ -1399,7 +1838,7 @@ public final class Pathfinder {
         BlockPos goalPos = new BlockPos(gnode.x, gnode.y, gnode.z);
         BlockState goalState = world.getBlockState(goalPos);
         net.minecraft.block.Block goalBlock = goalState.getBlock();
-        if (VoidClamMod.isOre(goalBlock) && !mod.seekOres && !mod.orePathForMaterialHunger) {
+        if (VoidClamMod.isOre(goalBlock) && !mod.seekOres && !pathApplyOreCountsAsMaterialHunger(mod)) {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
@@ -1463,6 +1902,20 @@ public final class Pathfinder {
                     VoidClamMod.releasePathfindingMainCycle(modForFlag);
                     return;
                 }
+                if (refNode == gnode && !goalDigTargetStillExpected(thermalClam, pos, mat, world)) {
+                    sliceState.blocked = true;
+                    if (!(mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA))) {
+                        long gPacked = pos.asLong();
+                        if (thermalClam.lightPathGoalPacked != null && thermalClam.lightPathGoalPacked == gPacked) {
+                            VoidClamMod.removeLightFromClamCacheAfterFailedPath(pathClamId, pos);
+                        }
+                        if (thermalClam.orePathGoalPacked != null && thermalClam.orePathGoalPacked == gPacked) {
+                            VoidClamMod.removeOreFromClamCacheAfterFailedPath(pathClamId, pos);
+                        }
+                    }
+                    VoidClamMod.releasePathfindingMainCycle(modForFlag);
+                    return;
+                }
                 int cst;
                 float breakHard = getHardness(world, pos, mat);
                 if (mat.isOf(Blocks.NETHER_WART_BLOCK)) cst = 0;
@@ -1476,31 +1929,30 @@ public final class Pathfinder {
                     cst = 1_000_000;
                 }
 
-                // Beacon at goal: preserve the nether star and route it through container BFS (barrel fallback if needed).
+                // Beacon at goal: loot + energy from block_loot.json (default: nether star + high energy).
                 if (refNode == gnode && mat.isOf(Blocks.BEACON)) {
-                    ItemStack starDrop = new ItemStack(Items.NETHER_STAR, 1);
+                    List<ItemStack> beaconLoot = new ArrayList<>(VoidClamBlockLoot.get().resolveDrops(mat.getBlock()));
                     BlockPos breakPos = pos.toImmutable();
                     enqueueGoalLootContainerRouting(
-                        world, mod, modForFlag, cSize, pathClamId, breakPos,
-                        Collections.singletonList(starDrop),
+                        world, mod, modForFlag, cSize, pathClamId, breakPos, beaconLoot,
                         () -> {
-                            VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(Blocks.BEACON));
+                            VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat, world, pos));
                             VoidClamMod.completeOnePathApplyStep(modForFlag);
                         });
                     return;
                 }
 
-                // Ore at goal: fortune-3 drops, store in containers, replace with wart
-                if (refNode == gnode && VoidClamMod.isOre(mat.getBlock()) && modForFlag.orePathForMaterialHunger) {
+                // Ore at goal: material when hungry, else fortune-3 to storage
+                if (refNode == gnode && VoidClamMod.isOre(mat.getBlock()) && pathApplyOreCountsAsMaterialHunger(thermalClam)) {
                     replaceWithWartAndPulse(world, pos);
-                    VoidClamMod.addMaterial(pathClamId, 1);
+                    VoidClamMod.addMaterial(pathClamId, VoidClamBlockLoot.get().resolveMaterial(mat.getBlock()));
                     VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
 
                 // Ore at goal: fortune-3 drops, store in containers, replace with wart
                 if (refNode == gnode && VoidClamMod.isOre(mat.getBlock())) {
-                    List<ItemStack> drops = getFortune3Drops(mat.getBlock());
+                    List<ItemStack> drops = new ArrayList<>(VoidClamBlockLoot.get().resolveDrops(mat.getBlock()));
                     if (!drops.isEmpty()) {
                         BlockPos breakPos = pos.toImmutable();
                         enqueueGoalLootContainerRouting(
@@ -1529,10 +1981,57 @@ public final class Pathfinder {
                 }
                 sliceState.stamina -= cst;
 
+                // Ore along the path (non-goal): same hunger vs fortune+storage as goal ores
+                if (refNode != gnode && VoidClamMod.isOre(mat.getBlock())) {
+                    if (pathApplyOreCountsAsMaterialHunger(thermalClam)) {
+                        replaceWithWartAndPulse(world, pos);
+                        VoidClamMod.addMaterial(pathClamId, VoidClamBlockLoot.get().resolveMaterial(mat.getBlock()));
+                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                        return;
+                    }
+                    List<ItemStack> oreDrops = new ArrayList<>(VoidClamBlockLoot.get().resolveDrops(mat.getBlock()));
+                    if (!oreDrops.isEmpty()) {
+                        BlockPos breakPos = pos.toImmutable();
+                        enqueueGoalLootContainerRouting(
+                            world, mod, modForFlag, cSize, pathClamId, breakPos, oreDrops,
+                            () -> VoidClamMod.completeOnePathApplyStep(modForFlag));
+                    } else {
+                        replaceWithWartAndPulse(world, pos);
+                        VoidClamMod.completeOnePathApplyStep(modForFlag);
+                    }
+                    return;
+                }
+
+                if (refNode != gnode && mat.isOf(Blocks.BEACON)) {
+                    List<ItemStack> beaconLoot = new ArrayList<>(VoidClamBlockLoot.get().resolveDrops(mat.getBlock()));
+                    BlockPos breakPos = pos.toImmutable();
+                    enqueueGoalLootContainerRouting(
+                        world, mod, modForFlag, cSize, pathClamId, breakPos, beaconLoot,
+                        () -> {
+                            VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat, world, pos));
+                            VoidClamMod.completeOnePathApplyStep(modForFlag);
+                        });
+                    return;
+                }
+
+                // Solid light blocks would otherwise use the generic container branch; eat in place and grant energy (no drop).
+                if (refNode != gnode && VoidClamMod.isLight(mat, world, pos)) {
+                    int packedBr = TendrilPulseManager.getPackedBrightnessAt(world, pos);
+                    world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
+                    VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
+                    lightsEatenDuringPathApply(pathClamId, mat, world, pos);
+                    TendrilPulseManager.startPulse(world, pos, packedBr, () -> {});
+                    VoidClamMod.completeOnePathApplyStep(modForFlag);
+                    return;
+                }
+
                 boolean isReplacingBlock = !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat));
+                // Soft blocks (!solid) and natural terrain never spawn drops or barrel/chest routing—wart replaces in place.
+                boolean pathBreakSuppressesLoot = VoidClamMod.isNaturalTerrainBlock(mat) || !isSolidForTendrilPath(world, pos, mat);
                 // Stop further dig steps only after a "solid" break (same hardness heuristic as pathfinding stickiness).
                 // Soft plants, torches, etc. are consumed in-place without ending the path early.
-                if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR && isSolidForTendrilPath(world, pos, mat)) {
+                if (isReplacingBlock && mat.getBlock().asItem() != Items.AIR && isSolidForTendrilPath(world, pos, mat)
+                    && !VoidClamMod.isNaturalTerrainBlock(mat)) {
                     sliceState.pathStopped = true;
                     sliceState.pathStoppedAwaitingContainer = true;
                     ItemStack toStore = new ItemStack(mat.getBlock().asItem(), 1);
@@ -1570,13 +2069,8 @@ public final class Pathfinder {
                 int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, pos);
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
-                if (refNode == gnode && VoidClamMod.isLight(mat, world, pos)) {
-                    VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat));
-                    if (VoidClamMod.isSoulLightSource(mat)) {
-                        VoidClamMod.addSoul(pathClamId, 1);
-                    }
-                }
-                if (!(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat))) {
+                lightsEatenDuringPathApply(pathClamId, mat, world, pos);
+                if (!pathBreakSuppressesLoot && !(refNode == gnode || mat.isAir() || mat.isOf(Blocks.WATER) || mat.isOf(Blocks.LAVA) || VoidClamCoreBlocks.isWartOrCore(mat))) {
                     if (mat.getBlock().asItem() != Items.AIR)
                         net.minecraft.block.Block.dropStack(world, pos, new ItemStack(mat.getBlock().asItem(), 1));
                 }

@@ -88,6 +88,7 @@ public class VoidClamModEntry implements ModInitializer {
             return ActionResult.PASS;
         });
         VoidClamConfig.loadFromDisk();
+        VoidClamBlockLoot.loadFromDisk();
         ServerChunkEvents.CHUNK_GENERATE.register(NaturalSpawnHandler::onChunkGenerated);
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(this::onServerStopping);
@@ -97,6 +98,7 @@ public class VoidClamModEntry implements ModInitializer {
 
     private void onServerStarted(MinecraftServer server) {
         VoidClamConfig.loadFromDisk();
+        VoidClamBlockLoot.loadFromDisk();
         VoidClamMod.onAsyncPathfindingSessionStart();
         VoidClamMod.migrateLoadedClamsToHeartBlocks(server);
         for (ServerWorld w : server.getWorlds()) {
@@ -109,13 +111,11 @@ public class VoidClamModEntry implements ModInitializer {
     }
 
     private void onServerTick(MinecraftServer server) {
+        Pathfinder.resetSyncMainThreadStepBudgetForTick(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
         VoidClamMod.tickSeekEphemeralExpiry(server);
         VoidClamMod.drainPendingLightCacheDeltas();
         for (ServerWorld w : server.getWorlds()) {
             VoidClamMod.cancelActivePathfindingForFullyIceEncasedClams(w);
-        }
-        if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
-            Pathfinder.tickSyncAStarJobs(VoidClamConfig.get().effectiveSyncMaxStepsPerTick());
         }
         for (ServerWorld w : server.getWorlds()) {
             VoidClamMod.tickLoadedClamCores(w);
@@ -123,6 +123,9 @@ public class VoidClamModEntry implements ModInitializer {
             TendrilPulseManager.tick(w);
             VoidClamModScheduler.tick(w);
             TendrilPulseManager.tickOmniPulseJob(w);
+        }
+        if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
+            Pathfinder.tickSyncMainThreadPathWork();
         }
         VoidClamMod.tickTargets(server);
         VoidClamMod.tickOrphanedClamActivityWarnings(server);
