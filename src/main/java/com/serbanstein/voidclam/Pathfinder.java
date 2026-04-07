@@ -222,6 +222,11 @@ public final class Pathfinder {
         DONE
     }
 
+    private enum MidPrepassRefreshPhase {
+        NONE,
+        BFS_RUNNING
+    }
+
     private static final class AStarJob {
         final ServerWorld worldRef;
         final UUID clamId;
@@ -237,6 +242,9 @@ public final class Pathfinder {
         long totalSyncExpansions;
         /** Refreshed at the start of each {@link #step}; prepass policy reads this field each expansion (not a stale closure). */
         PathfindChunkCache activePathChunkCache;
+        MidPrepassRefreshPhase midPrepassRefreshPhase = MidPrepassRefreshPhase.NONE;
+        @Nullable BlockBfs midPrepassRefreshBfs;
+        @Nullable PathfindChunkCache midPrepassRefreshCache;
 
         AStarJob(ServerWorld world, UUID clamId, int sx, int sy, int sz, int gx, int gy, int gz) {
             this(world, clamId, sx, sy, sz, gx, gy, gz, null, null);
@@ -384,13 +392,78 @@ public final class Pathfinder {
             int used = 0;
             long expandCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
             while (used < budget) {
+                if (midPrepassRefreshPhase == MidPrepassRefreshPhase.BFS_RUNNING && midPrepassRefreshBfs != null) {
+                    while (used < budget && !midPrepassRefreshBfs.isFinished()) {
+                        if (totalSyncExpansions >= expandCap) {
+                            finishFail(modForFlag);
+                            return used;
+                        }
+                        midPrepassRefreshBfs.step(1);
+                        totalSyncExpansions++;
+                        used++;
+                    }
+                    if (!midPrepassRefreshBfs.isFinished()) {
+                        return used;
+                    }
+                    PrepassBfsSnapshot refreshed = completePrepassSnapshotFromBfs(
+                        midPrepassRefreshBfs, modForFlag, midPrepassRefreshCache, gx, gy, gz,
+                        BlockPos.asLong(sx, sy, sz));
+                    midPrepassRefreshBfs = null;
+                    midPrepassRefreshCache = null;
+                    midPrepassRefreshPhase = MidPrepassRefreshPhase.NONE;
+                    if (refreshed != null) {
+                        prepassSnapshotRef.set(refreshed);
+                        continue;
+                    }
+                    Node partialTip = astarFrontier.peekCheapestOpen();
+                    if (partialTip == null) {
+                        finishFail(modForFlag);
+                        return used;
+                    }
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, clamId)) {
+                        finishFail(modForFlag);
+                        return used;
+                    }
+                    if (modForFlag.mainCycleBusy == 0) {
+                        finishFail(modForFlag);
+                        return used;
+                    }
+                    VoidClamMod.enqueueTarget(partialTip);
+                    phase = AStarPhase.DONE;
+                    return used;
+                }
+
                 if (totalSyncExpansions >= expandCap) {
                     finishFail(modForFlag);
                     return used;
                 }
+                int sanityIv = VoidClamConfig.get().effectiveMidPrepassSanityInterval();
+                PrepassBfsSnapshot snap = prepassSnapshotRef.get();
+                if (sanityIv > 0
+                    && snap != null
+                    && astarIterations > 0
+                    && astarIterations % sanityIv == 0
+                    && snap.hasLiveWorldDiscrepancy(world)
+                    && midPrepassRefreshPhase == MidPrepassRefreshPhase.NONE) {
+                    midPrepassRefreshCache = new PathfindChunkCache(world, modForFlag, null);
+                    if (sx == gx && sy == gy && sz == gz) {
+                        PrepassBfsSnapshot trivial = tryBuildPrepassSnapshot(
+                            world, sx, sy, sz, gx, gy, gz, modForFlag, midPrepassRefreshCache);
+                        if (trivial != null) {
+                            prepassSnapshotRef.set(trivial);
+                        }
+                        midPrepassRefreshCache = null;
+                        continue;
+                    }
+                    midPrepassRefreshBfs = startPrepassBfs(
+                        world, sx, sy, sz, gx, gy, gz, modForFlag, midPrepassRefreshCache);
+                    midPrepassRefreshPhase = MidPrepassRefreshPhase.BFS_RUNNING;
+                    continue;
+                }
+
                 AStarExpandResult r = expandOneAStarIteration(
                     world, clamId, gx, gy, gz, modForFlag, astarFrontier, astarIterations, activePathChunkCache,
-                    prepassSnapshotRef, sx, sy, sz);
+                    prepassSnapshotRef, sx, sy, sz, false);
                 astarIterations++;
                 totalSyncExpansions++;
                 if (r == AStarExpandResult.ABORT) {
@@ -648,19 +721,23 @@ public final class Pathfinder {
         @Nullable AtomicReference<PrepassBfsSnapshot> prepassSnapshotRef,
         int sx,
         int sy,
-        int sz
+        int sz,
+        boolean syncBatchedAstarMode
     ) {
         UUID effectiveClamId = pathClamId != null ? pathClamId : modForFlag.clamId;
         if ((astarIterationsBeforeStep & 0x3FF) == 0 && VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
             return AStarExpandResult.ABORT;
         }
         int sanityIv = VoidClamConfig.get().effectiveMidPrepassSanityInterval();
-        if (sanityIv > 0 && prepassSnapshotRef != null) {
+        if (!syncBatchedAstarMode && sanityIv > 0 && prepassSnapshotRef != null) {
             PrepassBfsSnapshot snap = prepassSnapshotRef.get();
             if (snap != null && astarIterationsBeforeStep > 0 && astarIterationsBeforeStep % sanityIv == 0) {
                 if (snap.hasLiveWorldDiscrepancy(world)) {
                     PathfindChunkCache liveCache = new PathfindChunkCache(world, modForFlag, null);
-                    PrepassBfsSnapshot refreshed = tryBuildPrepassSnapshot(world, sx, sy, sz, gx, gy, gz, modForFlag, liveCache);
+                    BlockBfs refreshBfs = startPrepassBfs(world, sx, sy, sz, gx, gy, gz, modForFlag, liveCache);
+                    refreshBfs.runToCompletionOnCurrentThread();
+                    PrepassBfsSnapshot refreshed = completePrepassSnapshotFromBfs(
+                        refreshBfs, modForFlag, liveCache, gx, gy, gz, BlockPos.asLong(sx, sy, sz));
                     if (refreshed != null) {
                         prepassSnapshotRef.set(refreshed);
                     } else {
@@ -668,7 +745,6 @@ public final class Pathfinder {
                         if (partialTip == null) {
                             return AStarExpandResult.NO_PATH;
                         }
-                        partialTip.partialPathApply = true;
                         if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, modForFlag.x, modForFlag.z, effectiveClamId)) {
                             return AStarExpandResult.ABORT;
                         }
@@ -738,7 +814,6 @@ public final class Pathfinder {
                 if (modForFlag.mainCycleBusy == 0) {
                     return AStarExpandResult.ABORT;
                 }
-                nextNode.partialPathApply = false;
                 VoidClamMod.enqueueTarget(nextNode);
                 return AStarExpandResult.SUCCESS;
             }
@@ -785,6 +860,29 @@ public final class Pathfinder {
                 gx, gy, gz,
                 pathChunkCache.getBlockState(g));
         }
+        BlockBfs bfs = startPrepassBfs(world, sx, sy, sz, gx, gy, gz, mod, pathChunkCache);
+        if (bfs == null) {
+            return null;
+        }
+        bfs.runToCompletionOnCurrentThread();
+        return completePrepassSnapshotFromBfs(
+            bfs, mod, pathChunkCache, gx, gy, gz, BlockPos.asLong(sx, sy, sz));
+    }
+
+    static @Nullable BlockBfs startPrepassBfs(
+        ServerWorld world,
+        int sx,
+        int sy,
+        int sz,
+        int gx,
+        int gy,
+        int gz,
+        Clam mod,
+        PathfindChunkCache pathChunkCache
+    ) {
+        if (mod == null || (sx == gx && sy == gy && sz == gz)) {
+            return null;
+        }
         long startLong = BlockPos.asLong(sx, sy, sz);
         long goalLong = BlockPos.asLong(gx, gy, gz);
         BlockBfs.EdgePolicy prepassPolicy = (w, fromLong, toLong, fromDist) -> {
@@ -796,7 +894,7 @@ public final class Pathfinder {
             return isPassibleForAStarStep(w, pathChunkCache, nextPos, stepOntoGoal);
         };
         long jobExpCap = VoidClamConfig.get().effectiveSyncMaxTotalExpansionsPerJob();
-        BlockBfs bfs = BlockBfs.start(
+        return BlockBfs.start(
             world,
             startLong,
             prepassPolicy,
@@ -807,7 +905,20 @@ public final class Pathfinder {
             asyncPathfindingAbortChecker(world, mod.x, mod.z, mod.clamId),
             goalLong
         );
-        bfs.runToCompletionOnCurrentThread();
+    }
+
+    static @Nullable PrepassBfsSnapshot completePrepassSnapshotFromBfs(
+        BlockBfs bfs,
+        Clam mod,
+        PathfindChunkCache pathChunkCache,
+        int gx,
+        int gy,
+        int gz,
+        long startLong
+    ) {
+        if (bfs == null || mod == null) {
+            return null;
+        }
         if (!bfs.isEarlyGoalNeighborHit()) {
             return null;
         }
@@ -1110,7 +1221,7 @@ public final class Pathfinder {
             }
             AStarExpandResult r = expandOneAStarIteration(
                 world, pathCid, gx, gy, gz, modForFlag, af, astarIterations, asyncPathCache,
-                prepassRef, sx, sy, sz);
+                prepassRef, sx, sy, sz, false);
             astarIterations++;
             if (r == AStarExpandResult.ABORT) {
                 VoidClamMod.releasePathfindingMainCycle(modForFlag);
@@ -1510,7 +1621,6 @@ public final class Pathfinder {
             VoidClamMod.releasePathfindingMainCycle(modForFlag);
             return;
         }
-        boolean partialApply = gnode.partialPathApply;
         modForFlag.pathApplyPendingSteps = pathSteps;
 
         Node firstNode = gnode;
@@ -1574,15 +1684,6 @@ public final class Pathfinder {
 
                 // Beacon at goal: preserve the nether star and route it through container BFS (barrel fallback if needed).
                 if (refNode == gnode && mat.isOf(Blocks.BEACON)) {
-                    if (partialApply) {
-                        ItemStack starDrop = new ItemStack(Items.NETHER_STAR, 1);
-                        BlockPos breakPos = pos.toImmutable();
-                        enqueueGoalLootContainerRouting(
-                            world, mod, modForFlag, cSize, pathClamId, breakPos,
-                            Collections.singletonList(starDrop),
-                            () -> VoidClamMod.completeOnePathApplyStep(modForFlag));
-                        return;
-                    }
                     ItemStack starDrop = new ItemStack(Items.NETHER_STAR, 1);
                     BlockPos breakPos = pos.toImmutable();
                     enqueueGoalLootContainerRouting(
@@ -1598,20 +1699,13 @@ public final class Pathfinder {
                 // Ore at goal: fortune-3 drops, store in containers, replace with wart
                 if (refNode == gnode && VoidClamMod.isOre(mat.getBlock()) && modForFlag.orePathForMaterialHunger) {
                     replaceWithWartAndPulse(world, pos);
-                    if (!partialApply) {
-                        VoidClamMod.addMaterial(pathClamId, 1);
-                    }
+                    VoidClamMod.addMaterial(pathClamId, 1);
                     VoidClamMod.completeOnePathApplyStep(modForFlag);
                     return;
                 }
 
                 // Ore at goal: fortune-3 drops, store in containers, replace with wart
                 if (refNode == gnode && VoidClamMod.isOre(mat.getBlock())) {
-                    if (partialApply) {
-                        replaceWithWartAndPulse(world, pos);
-                        VoidClamMod.completeOnePathApplyStep(modForFlag);
-                        return;
-                    }
                     List<ItemStack> drops = getFortune3Drops(mat.getBlock());
                     if (!drops.isEmpty()) {
                         BlockPos breakPos = pos.toImmutable();
@@ -1682,7 +1776,7 @@ public final class Pathfinder {
                 int packedBrightness = TendrilPulseManager.getPackedBrightnessAt(world, pos);
                 world.setBlockState(pos, Blocks.NETHER_WART_BLOCK.getDefaultState());
                 VoidClamSfx.playBlockSound(world, pos, SoundEvents.BLOCK_CHORUS_FLOWER_GROW, SoundCategory.BLOCKS, 1f, 0.01f);
-                if (refNode == gnode && VoidClamMod.isLight(mat, world, pos) && !partialApply) {
+                if (refNode == gnode && VoidClamMod.isLight(mat, world, pos)) {
                     VoidClamMod.addEnergy(pathClamId, VoidClamMod.lightEnergyForBlock(mat));
                     if (VoidClamMod.isSoulLightSource(mat)) {
                         VoidClamMod.addSoul(pathClamId, 1);

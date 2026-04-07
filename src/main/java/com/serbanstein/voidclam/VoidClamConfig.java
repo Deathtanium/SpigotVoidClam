@@ -82,7 +82,8 @@ public final class VoidClamConfig {
 
     /**
      * Every N A* expansions (after the first), the prepass route is compared to the live world; on mismatch a prepass
-     * refresh runs. {@code 0} disables. Uses the same thread as A* ({@link com.serbanstein.voidclam.VoidClamConfig.AstarMode}).
+     * refresh runs. {@code 0} disables. Uses the same thread as A*; in {@link AstarMode#SYNC_BATCHED} each BFS node
+     * expansion counts against the same per-tick budget as A* prepass/expansions.
      */
     public int astar_mid_prepass_sanity_interval = 4096;
 

@@ -15,8 +15,6 @@ public class Node {
     /** Stable clam identity (matches {@link Clam#clamId}); path build and kill barrier use this only. */
     public final UUID clamId;
     public Node parent;
-    /** When true, path apply expends stamina for digs but skips goal rewards (light energy, ore feeding, etc.). */
-    public boolean partialPathApply;
 
     public Node(int x, int y, int z, Node parent, UUID clamId) {
         this.x = x;
