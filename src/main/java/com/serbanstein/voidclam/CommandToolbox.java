@@ -17,6 +17,8 @@ import net.minecraft.util.math.Box;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -535,19 +537,14 @@ public final class CommandToolbox {
                 }
                 int x = m.x, y = m.y, z = m.z, cSize = Math.max(1, m.currentSize);
                 BlockPos modPos = new BlockPos(x, y, z);
-                BlockPos closestLight = null;
-                double closestLightDist = Double.MAX_VALUE;
-                BlockPos closestOre = null;
-                double closestOreDist = Double.MAX_VALUE;
                 VoidClamConfig cfg = VoidClamConfig.get();
                 boolean oreHunger = m.seekLights && m.material < m.materialSeekThreshold;
                 boolean oreRepairPriority = m.seekLights && m.prioritizeRepairOreSeek;
                 boolean materialOreFlow = oreHunger || oreRepairPriority;
                 boolean shouldSeekOre = m.seekOres || materialOreFlow;
-                boolean useReachMap = cfg.clam_reachability_volatile_map;
-                List<BlockPos> reachLightCandidates = useReachMap ? new ArrayList<>() : null;
-                List<BlockPos> reachOreCandidates = useReachMap ? new ArrayList<>() : null;
-                ReachabilityVolatileMap reachMap = null;
+                boolean useReachMapOrdering = cfg.clam_reachability_volatile_map;
+                List<BlockPos> reachLightCandidates = new ArrayList<>();
+                List<BlockPos> reachOreCandidates = new ArrayList<>();
 
                 if (m.seekLights || shouldSeekOre) {
                     if (m.seekLights) {
@@ -560,13 +557,7 @@ public final class CommandToolbox {
                                 if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
                                 net.minecraft.block.BlockState lst = world.getBlockState(pos);
                                 if (!VoidClamMod.isLight(lst, world, pos)) continue;
-                                double dist = modPos.getSquaredDistance(pos);
-                                if (useReachMap) {
-                                    reachLightCandidates.add(pos.toImmutable());
-                                } else if (dist < closestLightDist) {
-                                    closestLightDist = dist;
-                                    closestLight = pos.toImmutable();
-                                }
+                                reachLightCandidates.add(pos.toImmutable());
                             }
                         } else {
                             int e = VoidClamMod.lightSeekHalfExtent(m.currentSize);
@@ -589,13 +580,7 @@ public final class CommandToolbox {
                                         }
                                         net.minecraft.block.BlockState lst = world.getBlockState(pos);
                                         if (!VoidClamMod.isLight(lst, world, pos)) continue;
-                                        double dist = modPos.getSquaredDistance(pos);
-                                        if (useReachMap) {
-                                            reachLightCandidates.add(pos.toImmutable());
-                                        } else if (dist < closestLightDist) {
-                                            closestLightDist = dist;
-                                            closestLight = pos.toImmutable();
-                                        }
+                                        reachLightCandidates.add(pos.toImmutable());
                                     }
                                 }
                             }
@@ -613,13 +598,7 @@ public final class CommandToolbox {
                                 if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
                                 net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
                                 if (!VoidClamMod.isOre(block)) continue;
-                                double dist = modPos.getSquaredDistance(pos);
-                                if (useReachMap) {
-                                    reachOreCandidates.add(pos.toImmutable());
-                                } else if (dist < closestOreDist) {
-                                    closestOreDist = dist;
-                                    closestOre = pos.toImmutable();
-                                }
+                                reachOreCandidates.add(pos.toImmutable());
                             }
                         } else {
                             int e = VoidClamMod.lightSeekHalfExtent(m.currentSize);
@@ -641,16 +620,10 @@ public final class CommandToolbox {
                                             continue;
                                         }
                                         net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
-                                        double dist = modPos.getSquaredDistance(pos);
                                         if (!VoidClamMod.isOre(block)) {
                                             continue;
                                         }
-                                        if (useReachMap) {
-                                            reachOreCandidates.add(pos.toImmutable());
-                                        } else if (dist < closestOreDist) {
-                                            closestOreDist = dist;
-                                            closestOre = pos.toImmutable();
-                                        }
+                                        reachOreCandidates.add(pos.toImmutable());
                                     }
                                 }
                             }
@@ -662,67 +635,71 @@ public final class CommandToolbox {
                     }
                 }
 
-                BlockPos closest = null;
-                BlockPos reachPickOre = null;
-                BlockPos reachPickLight = null;
-                if (useReachMap) {
-                    if (!reachLightCandidates.isEmpty() || !reachOreCandidates.isEmpty()) {
-                        reachMap = Pathfinder.buildVolatileReachabilityMap(world, m);
-                        reachPickOre = pickBestReachCandidate(reachOreCandidates, modPos, world, m, reachMap);
-                        reachPickLight = pickBestReachCandidate(reachLightCandidates, modPos, world, m, reachMap);
-                    }
-                    if (materialOreFlow && reachPickOre != null) {
-                        closest = reachPickOre;
-                    } else if (materialOreFlow && reachPickLight != null) {
-                        closest = reachPickLight;
-                    } else if (reachPickLight != null && (reachPickOre == null
-                        || compareReachTargets(reachPickLight, reachPickOre, modPos, world, m, reachMap) <= 0)) {
-                        closest = reachPickLight;
-                    } else {
-                        closest = reachPickOre;
-                    }
-                    closestLight = reachPickLight;
-                    closestOre = reachPickOre;
+                Comparator<BlockPos> byDist = Comparator.comparingDouble(modPos::getSquaredDistance);
+                Collections.sort(reachLightCandidates, byDist);
+                Collections.sort(reachOreCandidates, byDist);
+                List<BlockPos> orderedGoals = new ArrayList<>();
+                if (useReachMapOrdering && (!reachLightCandidates.isEmpty() || !reachOreCandidates.isEmpty())) {
+                    ReachabilityVolatileMap ordMap = Pathfinder.buildVolatileReachabilityMap(world, m);
+                    List<BlockPos> lightsOrd = orderCandidatesByReachDepth(reachLightCandidates, modPos, world, m, ordMap);
+                    List<BlockPos> oresOrd = orderCandidatesByReachDepth(reachOreCandidates, modPos, world, m, ordMap);
+                    orderedGoals.addAll(buildOrderedGoalList(materialOreFlow, lightsOrd, oresOrd, modPos));
                 } else {
-                    if (materialOreFlow && closestOre != null) {
-                        closest = closestOre;
-                    } else if (materialOreFlow && closestLight != null) {
-                        closest = closestLight;
-                    } else if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
-                        closest = closestLight;
-                    } else if (closestOre != null) {
-                        closest = closestOre;
-                    }
+                    orderedGoals.addAll(buildOrderedGoalList(materialOreFlow, reachLightCandidates, reachOreCandidates, modPos));
                 }
 
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
                     VoidClamMod.releasePathfindingMainCycle(m);
                     return;
                 }
-                if (closest != null) {
-                    if (closestLight != null && closest.equals(closestLight)) {
-                        long goalPacked = closest.asLong();
-                        m.lightsBlackList.add(goalPacked);
-                        m.lightPathGoalPacked = goalPacked;
-                        m.orePathGoalPacked = null;
-                        m.orePathForMaterialHunger = false;
-                    } else if (closestOre != null && closest.equals(closestOre)) {
-                        long goalPacked = closest.asLong();
+                BlockPos chosen = null;
+                boolean chosenIsOre = false;
+                PathfindChunkCache prepassCache = new PathfindChunkCache(world, m, null);
+                for (BlockPos goal : orderedGoals) {
+                    if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
+                        VoidClamMod.releasePathfindingMainCycle(m);
+                        return;
+                    }
+                    PrepassBfsSnapshot snap = Pathfinder.tryBuildPrepassSnapshot(
+                        world, x, y, z, goal.getX(), goal.getY(), goal.getZ(), m, prepassCache);
+                    if (snap == null) {
+                        continue;
+                    }
+                    boolean goalIsOre = VoidClamMod.isOre(world.getBlockState(goal).getBlock());
+                    boolean goalIsLight = VoidClamMod.isLight(world.getBlockState(goal), world, goal);
+                    if (goalIsOre) {
+                        if (!m.seekOres && !materialOreFlow) {
+                            continue;
+                        }
+                    } else if (goalIsLight) {
+                        if (!m.seekLights) {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                    chosen = goal;
+                    chosenIsOre = goalIsOre;
+                    long goalPacked = goal.asLong();
+                    if (chosenIsOre) {
                         m.oresBlackList.add(goalPacked);
                         m.orePathGoalPacked = goalPacked;
                         m.lightPathGoalPacked = null;
                         m.orePathForMaterialHunger = materialOreFlow;
                     } else {
-                        m.lightPathGoalPacked = null;
+                        m.lightsBlackList.add(goalPacked);
+                        m.lightPathGoalPacked = goalPacked;
                         m.orePathGoalPacked = null;
                         m.orePathForMaterialHunger = false;
                     }
-                    Pathfinder.calculatePath(
-                        world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ(), reachMap);
-                } else {
-                    m.orePathForMaterialHunger = false;
-                    VoidClamMod.releasePathfindingMainCycle(m);
+                    Pathfinder.calculatePath(world, m.clamId, x, y, z, goal.getX(), goal.getY(), goal.getZ(), null, snap);
+                    return;
                 }
+
+                m.orePathForMaterialHunger = false;
+                m.lightPathGoalPacked = null;
+                m.orePathGoalPacked = null;
+                VoidClamMod.releasePathfindingMainCycle(m);
             } catch (Throwable t) {
                 VoidClamMod.releasePathfindingMainCycle(m);
                 throw t;
@@ -730,7 +707,7 @@ public final class CommandToolbox {
         });
     }
 
-    private static @Nullable BlockPos pickBestReachCandidate(
+    private static List<BlockPos> orderCandidatesByReachDepth(
         List<BlockPos> candidates,
         BlockPos modPos,
         ServerWorld world,
@@ -738,41 +715,51 @@ public final class CommandToolbox {
         ReachabilityVolatileMap map
     ) {
         if (candidates.isEmpty()) {
-            return null;
+            return List.of();
         }
-        BlockPos best = null;
-        int bestR = Integer.MAX_VALUE;
-        double bestEu = Double.MAX_VALUE;
-        for (BlockPos p : candidates) {
-            int r = Pathfinder.adjacentReachBfsStepsToGoal(map, p, world, m);
-            if (r == Integer.MAX_VALUE) {
-                continue;
-            }
-            double eu = modPos.getSquaredDistance(p);
-            if (r < bestR || (r == bestR && eu < bestEu)) {
-                bestR = r;
-                bestEu = eu;
-                best = p;
-            }
-        }
-        return best;
+        List<BlockPos> out = new ArrayList<>(candidates);
+        out.sort(Comparator
+            .comparingInt((BlockPos p) -> Pathfinder.adjacentReachBfsStepsToGoal(map, p, world, m))
+            .thenComparingDouble(modPos::getSquaredDistance));
+        return out;
     }
 
-    /** Reach-depth primary, Euclidean secondary; negative/zero if {@code a} is at least as good as {@code b}. */
-    private static int compareReachTargets(
-        BlockPos a,
-        BlockPos b,
-        BlockPos modPos,
-        ServerWorld world,
-        Clam m,
-        ReachabilityVolatileMap map
+    /**
+     * Order of goals to try prepass + A* on. Material hunger prioritizes all ores (reach order) then lights; otherwise
+     * merge lights and ores by increasing Euclidean distance from the heart.
+     */
+    private static List<BlockPos> buildOrderedGoalList(
+        boolean materialOreFlow,
+        List<BlockPos> lightsOrdered,
+        List<BlockPos> oresOrdered,
+        BlockPos modPos
     ) {
-        int ra = Pathfinder.adjacentReachBfsStepsToGoal(map, a, world, m);
-        int rb = Pathfinder.adjacentReachBfsStepsToGoal(map, b, world, m);
-        if (ra != rb) {
-            return Integer.compare(ra, rb);
+        if (materialOreFlow) {
+            List<BlockPos> out = new ArrayList<>(oresOrdered);
+            out.addAll(lightsOrdered);
+            return out;
         }
-        return Double.compare(modPos.getSquaredDistance(a), modPos.getSquaredDistance(b));
+        List<BlockPos> out = new ArrayList<>();
+        int i = 0;
+        int j = 0;
+        while (i < lightsOrdered.size() && j < oresOrdered.size()) {
+            BlockPos l = lightsOrdered.get(i);
+            BlockPos o = oresOrdered.get(j);
+            if (modPos.getSquaredDistance(l) <= modPos.getSquaredDistance(o)) {
+                out.add(l);
+                i++;
+            } else {
+                out.add(o);
+                j++;
+            }
+        }
+        while (i < lightsOrdered.size()) {
+            out.add(lightsOrdered.get(i++));
+        }
+        while (j < oresOrdered.size()) {
+            out.add(oresOrdered.get(j++));
+        }
+        return out;
     }
 
     /**
