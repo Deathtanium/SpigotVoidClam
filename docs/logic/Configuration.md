@@ -7,9 +7,25 @@ Authoritative schema: `VoidClamConfig.java` (Gson loads **`config/voidclam.json`
 | Key | Meaning |
 |-----|---------|
 | `clam_spawn_natural` | If `true`, try to place clams in newly generated chunks. |
-| `clam_spawn_natural_method` | `"default"` (overworld chunk roll) or `"dungeon"` (mob spawner replacement). |
-| `clam_spawn_natural_dungeon_rate` | Per-spawner chance when method is dungeon (0–1). |
-| `clam_spawn_natural_default_chunk_chance` | Per overworld chunk for default method (0–1). |
+| `clam_spawn_natural_worlds` | Map of namespaced world ids (`namespace:path`) to natural-spawn settings. If missing in older configs, it is auto-written with `minecraft:overworld` migrated from legacy top-level keys. |
+
+`clam_spawn_natural_worlds` entry fields:
+
+| Field | Meaning |
+|---|---|
+| `world` | Namespaced world id this entry applies to, e.g. `minecraft:overworld`, `minecraft:the_nether`, or modded dimensions. |
+| `enabled` | Enables natural spawn for that world entry. |
+| `method` | `"default"` (chunk roll) or `"dungeon"` (mob spawner replacement). |
+| `dungeon_rate` | Per-spawner chance when method is dungeon (0–1). |
+| `default_chunk_chance` | Per-chunk chance for default method (0–1). |
+| `debug_log` | Logs natural-spawn chunk roll diagnostics for this world. |
+| `min_blocks_below_sea` | Default-method depth constraint (legacy-compatible field retained). |
+| `min_blocks_below_surface` | Default-method depth constraint (legacy-compatible field retained). |
+| `sphere_padding` | Extra carve radius beyond clam circumsphere. |
+
+Notes:
+- World selection is exact by namespaced id; if no exact entry exists, the `minecraft:overworld` entry is used as fallback.
+- Default-method RNG is now mixed from world seed + chunk coordinates + dimension-derived salt, so patterns are world-seed and dimension specific.
 
 ## New-clam defaults
 

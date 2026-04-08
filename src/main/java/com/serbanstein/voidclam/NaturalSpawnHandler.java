@@ -27,19 +27,21 @@ public final class NaturalSpawnHandler {
 
     public static void onChunkGenerated(ServerWorld world, WorldChunk chunk) {
         VoidClamConfig cfg = VoidClamConfig.get();
-        if (!cfg.clam_spawn_natural) return;
+        VoidClamConfig.NaturalSpawnWorldSettings worldCfg = cfg.naturalSpawnWorldSettings(world.getRegistryKey());
+        if (worldCfg == null || !worldCfg.enabled) return;
         ChunkPos cp = chunk.getPos();
-        if (cfg.naturalSpawnMethodEnum() == VoidClamConfig.NaturalSpawnMethod.DUNGEON) {
-            scanChunkForSpawners(world, chunk);
+        if (worldCfg.methodEnum() == VoidClamConfig.NaturalSpawnMethod.DUNGEON) {
+            scanChunkForSpawners(world, chunk, worldCfg);
             return;
         }
         long key = chunkKey(world, cp.x, cp.z);
         if (spawnedChunks.putIfAbsent(key, Boolean.TRUE) != null) return;
-        Random rand = Random.create(cp.x * 31L ^ cp.z);
+        long rollSeed = naturalSpawnSeed(world, cp.x, cp.z, 0x9E3779B97F4A7C15L);
+        Random rand = Random.create(rollSeed);
         double roll = rand.nextDouble();
-        double chance = cfg.clam_spawn_natural_default_chunk_chance;
+        double chance = worldCfg.default_chunk_chance;
         boolean pass = roll < chance;
-        if (cfg.clam_spawn_natural_debug_log) {
+        if (worldCfg.debug_log) {
             LOGGER.info(
                 "[natural_spawn] default chunk roll world={} chunk=({}, {}) roll={} threshold={} pass={}",
                 world.getRegistryKey().getValue(),
@@ -51,11 +53,10 @@ public final class NaturalSpawnHandler {
         }
         if (!pass) return;
         // Avoid heightmap / setBlockState / makeStub while still inside chunk generation (re-entrant load deadlock).
-        long randSeed = cp.x * 31L ^ cp.z;
+        long randSeed = naturalSpawnSeed(world, cp.x, cp.z, 0xD1B54A32D192ED03L);
         VoidClamMod.scheduleDelayed(world, 1L, () -> {
             Random deferred = Random.create(randSeed);
-            deferred.nextDouble();
-            trySpawnAtChunkCenter(world, cp, deferred);
+            trySpawnAtChunkCenter(world, cp, deferred, worldCfg);
         });
     }
 
@@ -63,9 +64,8 @@ public final class NaturalSpawnHandler {
         return ((long) world.getRegistryKey().hashCode() << 32) ^ (ChunkPos.toLong(cx, cz) & 0xffffffffL);
     }
 
-    private static void scanChunkForSpawners(ServerWorld world, WorldChunk chunk) {
-        VoidClamConfig cfg = VoidClamConfig.get();
-        Random rand = Random.create(world.getSeed() ^ ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z));
+    private static void scanChunkForSpawners(ServerWorld world, WorldChunk chunk, VoidClamConfig.NaturalSpawnWorldSettings worldCfg) {
+        Random rand = Random.create(naturalSpawnSeed(world, chunk.getPos().x, chunk.getPos().z, 0x94D049BB133111EBL));
         ChunkPos cp = chunk.getPos();
         int baseX = cp.getStartX();
         int baseZ = cp.getStartZ();
@@ -76,7 +76,7 @@ public final class NaturalSpawnHandler {
                     m.set(baseX + x, y, baseZ + z);
                     BlockState st = chunk.getBlockState(m);
                     if (!st.isOf(Blocks.SPAWNER)) continue;
-                    if (rand.nextDouble() >= cfg.clam_spawn_natural_dungeon_rate) continue;
+                    if (rand.nextDouble() >= worldCfg.dungeon_rate) continue;
                     if (!(chunk.getBlockEntity(m.toImmutable()) instanceof MobSpawnerBlockEntity)) continue;
                     world.setBlockState(m, Blocks.AIR.getDefaultState());
                     int cx = m.getX();
@@ -94,12 +94,17 @@ public final class NaturalSpawnHandler {
     private static final int NATURAL_SPAWN_SIZE_MIN = 5;
     private static final int NATURAL_SPAWN_SIZE_MAX = 9;
 
-    private static void trySpawnAtChunkCenter(ServerWorld world, ChunkPos cp, Random rand) {
+    private static void trySpawnAtChunkCenter(
+        ServerWorld world,
+        ChunkPos cp,
+        Random rand,
+        VoidClamConfig.NaturalSpawnWorldSettings worldCfg
+    ) {
+        VoidClamConfig cfg = VoidClamConfig.get();
         int centerX = cp.getCenterX() + rand.nextBetween(-2, 2);
         int centerZ = cp.getCenterZ() + rand.nextBetween(-2, 2);
         if (!world.isChunkLoaded(centerX >> 4, centerZ >> 4)) return;
 
-        VoidClamConfig cfg = VoidClamConfig.get();
         int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE_WG, centerX, centerZ);
         if (surfaceY <= world.getBottomY()) return;
 
@@ -108,7 +113,7 @@ public final class NaturalSpawnHandler {
         int t = rand.nextBetween(NATURAL_SPAWN_SIZE_MIN, maxT);
 
         int dyBottom = VoidClamMod.obsidianShellBottomDy(t);
-        int sphereR = (int) Math.ceil(CommandToolbox.clamOctahedronCircumsphereRadius(t)) + cfg.clam_spawn_natural_sphere_padding;
+        int sphereR = (int) Math.ceil(CommandToolbox.clamOctahedronCircumsphereRadius(t)) + worldCfg.sphere_padding;
         int minShellBottomY = world.getBottomY() + 16;
         int maxShellBottomY = surfaceY;
         if (maxShellBottomY < minShellBottomY) return;
@@ -120,6 +125,21 @@ public final class NaturalSpawnHandler {
 
         clearSphere(world, centerX, sphereCy, centerZ, sphereR);
         VoidClamMod.makeNaturalSpawnClam(world, centerX, heartY, centerZ, t);
+    }
+
+    private static long naturalSpawnSeed(ServerWorld world, int cx, int cz, long salt) {
+        long worldSeed = world.getSeed();
+        long chunk = ChunkPos.toLong(cx, cz);
+        long dimSalt = world.getRegistryKey().getValue().toString().hashCode();
+        long mixed = worldSeed ^ Long.rotateLeft(chunk, 21) ^ Long.rotateLeft(dimSalt, 9) ^ salt;
+        return splitmix64(mixed);
+    }
+
+    private static long splitmix64(long z) {
+        z += 0x9E3779B97F4A7C15L;
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        return z ^ (z >>> 31);
     }
 
     private static boolean allChunksIntersectingSphereLoaded(ServerWorld world, int cx, int cy, int cz, int radius) {

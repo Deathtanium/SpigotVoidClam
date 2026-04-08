@@ -4,8 +4,10 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.Block;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
+import net.minecraft.world.World;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -16,8 +18,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +52,52 @@ public final class VoidClamConfig {
         ASYNC
     }
 
+    public static final class NaturalSpawnWorldSettings {
+        /** Namespaced world id (`namespace:path`) this entry applies to. */
+        public String world = "minecraft:overworld";
+        /** Enables natural spawning for this world entry. */
+        public boolean enabled = true;
+        /** `default` or `dungeon`. */
+        public String method = "default";
+        /** If method is dungeon: chance per mob spawner block to replace with a voidclam nest. */
+        public double dungeon_rate = 0.15;
+        /** Approximate chance per newly generated chunk for default natural spawn (0..1). */
+        public double default_chunk_chance = 0.003;
+        /** Logs chunk roll diagnostics for this world at INFO. */
+        public boolean debug_log = false;
+        /** Default natural spawn: top of the cleared sphere must be this many blocks below sea level. */
+        public int min_blocks_below_sea = 24;
+        /** Default natural spawn: top of the clam shell must be this many blocks below local surface. */
+        public int min_blocks_below_surface = 10;
+        /** Extra blocks beyond clam circumsphere radius for the pre-carve cavity. */
+        public int sphere_padding = 2;
+
+        public NaturalSpawnMethod methodEnum() {
+            if (method != null && method.equalsIgnoreCase("dungeon")) {
+                return NaturalSpawnMethod.DUNGEON;
+            }
+            return NaturalSpawnMethod.DEFAULT;
+        }
+
+        void normalize() {
+            if (world == null || Identifier.tryParse(world) == null) {
+                world = "minecraft:overworld";
+            }
+            if (dungeon_rate < 0) dungeon_rate = 0;
+            if (dungeon_rate > 1) dungeon_rate = 1;
+            if (default_chunk_chance < 0) default_chunk_chance = 0;
+            if (default_chunk_chance > 1) default_chunk_chance = 1;
+            if (min_blocks_below_sea < 0) min_blocks_below_sea = 0;
+            if (min_blocks_below_surface < 0) min_blocks_below_surface = 0;
+            if (sphere_padding < 0) sphere_padding = 0;
+            if (method != null && method.equalsIgnoreCase("dungeon")) {
+                method = "dungeon";
+            } else {
+                method = "default";
+            }
+        }
+    }
+
     /** Try to spawn voidclams in freshly generated chunks. */
     public boolean clam_spawn_natural = false;
     /** Only if {@link #clam_spawn_natural}: {@code default} or {@code dungeon}. */
@@ -71,6 +121,11 @@ public final class VoidClamConfig {
     public int clam_spawn_natural_min_blocks_below_surface = 10;
     /** Extra blocks beyond {@link CommandToolbox#clamOctahedronCircumsphereRadius} for the pre-carve cavity. */
     public int clam_spawn_natural_sphere_padding = 2;
+    /**
+     * Per-world natural-spawn settings keyed by namespaced world ids.
+     * Example key: {@code minecraft:overworld}.
+     */
+    public Map<String, NaturalSpawnWorldSettings> clam_spawn_natural_worlds = defaultNaturalSpawnWorlds();
 
     public boolean clam_light_flag_default = false;
     public boolean clam_ores_flag_default = false;
@@ -198,6 +253,14 @@ public final class VoidClamConfig {
     private transient Set<Block> resolvedLightAllowBlocks = Set.of();
     private transient Set<Block> resolvedLightDenyBlocks = Set.of();
 
+    private static Map<String, NaturalSpawnWorldSettings> defaultNaturalSpawnWorlds() {
+        Map<String, NaturalSpawnWorldSettings> worlds = new LinkedHashMap<>();
+        NaturalSpawnWorldSettings overworld = new NaturalSpawnWorldSettings();
+        overworld.world = "minecraft:overworld";
+        worlds.put(overworld.world, overworld);
+        return worlds;
+    }
+
     private static VoidClamConfig defaultInstance() {
         return new VoidClamConfig();
     }
@@ -209,16 +272,22 @@ public final class VoidClamConfig {
     public static void loadFromDisk() {
         Path path = FabricLoader.getInstance().getConfigDir().resolve("voidclam.json");
         VoidClamConfig cfg = defaultInstance();
+        boolean writeBack = false;
         if (Files.isRegularFile(path)) {
-            try (BufferedReader r = Files.newBufferedReader(path)) {
-                VoidClamConfig fromFile = GSON.fromJson(r, VoidClamConfig.class);
+            try {
+                String raw = Files.readString(path);
+                VoidClamConfig fromFile = GSON.fromJson(raw, VoidClamConfig.class);
                 if (fromFile != null) {
                     cfg = fromFile;
+                }
+                if (!raw.contains("\"clam_spawn_natural_worlds\"")) {
+                    writeBack = true;
                 }
             } catch (IOException ignored) {
                 // keep defaults
             }
         } else {
+            writeBack = true;
             try {
                 Files.createDirectories(path.getParent());
                 try (BufferedWriter w = Files.newBufferedWriter(path)) {
@@ -229,6 +298,16 @@ public final class VoidClamConfig {
             }
         }
         cfg.normalize();
+        if (writeBack) {
+            try {
+                Files.createDirectories(path.getParent());
+                try (BufferedWriter w = Files.newBufferedWriter(path)) {
+                    GSON.toJson(cfg, w);
+                }
+            } catch (IOException ignored) {
+                // keep normalized in-memory config
+            }
+        }
         instance = cfg;
         CommandToolbox.configurePathfinderExecutorSize(cfg.effectiveAsyncThreadPoolSize());
     }
@@ -241,6 +320,43 @@ public final class VoidClamConfig {
         if (clam_spawn_natural_min_blocks_below_sea < 0) clam_spawn_natural_min_blocks_below_sea = 0;
         if (clam_spawn_natural_min_blocks_below_surface < 0) clam_spawn_natural_min_blocks_below_surface = 0;
         if (clam_spawn_natural_sphere_padding < 0) clam_spawn_natural_sphere_padding = 0;
+        if (clam_spawn_natural_worlds == null) {
+            clam_spawn_natural_worlds = new LinkedHashMap<>();
+        }
+        if (clam_spawn_natural_worlds.isEmpty()) {
+            NaturalSpawnWorldSettings migrated = new NaturalSpawnWorldSettings();
+            migrated.world = "minecraft:overworld";
+            migrated.enabled = clam_spawn_natural;
+            migrated.method = clam_spawn_natural_method;
+            migrated.dungeon_rate = clam_spawn_natural_dungeon_rate;
+            migrated.default_chunk_chance = clam_spawn_natural_default_chunk_chance;
+            migrated.debug_log = clam_spawn_natural_debug_log;
+            migrated.min_blocks_below_sea = clam_spawn_natural_min_blocks_below_sea;
+            migrated.min_blocks_below_surface = clam_spawn_natural_min_blocks_below_surface;
+            migrated.sphere_padding = clam_spawn_natural_sphere_padding;
+            clam_spawn_natural_worlds.put(migrated.world, migrated);
+        }
+        Map<String, NaturalSpawnWorldSettings> normalizedWorlds = new LinkedHashMap<>();
+        for (Map.Entry<String, NaturalSpawnWorldSettings> e : clam_spawn_natural_worlds.entrySet()) {
+            String key = e.getKey();
+            NaturalSpawnWorldSettings s = e.getValue();
+            if (s == null) {
+                s = new NaturalSpawnWorldSettings();
+            }
+            if (s.world == null || Identifier.tryParse(s.world) == null) {
+                if (key != null && Identifier.tryParse(key) != null) {
+                    s.world = key;
+                } else {
+                    s.world = "minecraft:overworld";
+                }
+            }
+            s.normalize();
+            normalizedWorlds.put(s.world, s);
+        }
+        if (normalizedWorlds.isEmpty()) {
+            normalizedWorlds = defaultNaturalSpawnWorlds();
+        }
+        clam_spawn_natural_worlds = normalizedWorlds;
         if (clam_size_max < 1) clam_size_max = 1;
         if (clam_grow_energymultiplier < 1) clam_grow_energymultiplier = 1;
         if (clam_grow_material_cost < 0) clam_grow_material_cost = 0;
@@ -325,6 +441,21 @@ public final class VoidClamConfig {
             return NaturalSpawnMethod.DUNGEON;
         }
         return NaturalSpawnMethod.DEFAULT;
+    }
+
+    public NaturalSpawnWorldSettings naturalSpawnWorldSettings(RegistryKey<World> worldKey) {
+        if (!clam_spawn_natural) {
+            return null;
+        }
+        if (worldKey == null || worldKey.getValue() == null) {
+            return clam_spawn_natural_worlds.get("minecraft:overworld");
+        }
+        String id = worldKey.getValue().toString();
+        NaturalSpawnWorldSettings exact = clam_spawn_natural_worlds.get(id);
+        if (exact != null) {
+            return exact;
+        }
+        return clam_spawn_natural_worlds.get("minecraft:overworld");
     }
 
     public AstarMode astarModeEnum() {
