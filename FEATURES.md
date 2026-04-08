@@ -73,9 +73,12 @@ Abstract feature list:
     - see flow below for more details
     
 - natural spawning:
-    - ✅ partial — `NaturalSpawnHandler`: **default** mode places a stub at chunk surface after clearing a sphere (`clam_spawn_natural`, `clam_spawn_natural_default_chunk_chance`); **dungeon** mode can replace mob spawners (`clam_spawn_natural_method`, `clam_spawn_natural_dungeon_rate`). All use `VoidClamMod.makeStub`.
+    - ✅ chunk-generate hook — `NaturalSpawnHandler` runs on `ServerChunkEvents.CHUNK_GENERATE` with a per-chunk deterministic roll mixed from **world seed + chunk coords + dimension salt**.
+    - ✅ per-world config — `clam_spawn_natural_worlds` keyed by namespaced world ids (`namespace:path`), with `minecraft:overworld` as the default entry; legacy top-level keys migrate into that entry.
+    - ✅ default method — selects a spawn depth between surface and `bottomY+16`, clears a sphere cavity, and spawns a clam directly at target size **5–9** (built flesh + shell immediately).
+    - ✅ dungeon method — optional spawner replacement per-world via `dungeon_rate` (still creates a stub at the spawner position).
     - ❌ vanilla structure / jigsaw integration (still ad-hoc placement)
-    - ✅ `makeStub` currently creates a **size 3** teen clam and runs `buildStub` (not a 5–9 size roll)
+    - ✅ `makeStub` still creates a **size 3** teen clam and runs `buildStub` (used by commands and dungeon conversion), but default natural spawn now uses the dedicated full-size spawn path
     - ? chunk-center mode clears a sphere then spawns; **not** the same pass-through / resistance scoring as auto-grow room check
     
 - composition

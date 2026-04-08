@@ -122,9 +122,13 @@ These effects exist because the server **cannot** rely on custom block models on
 
 ---
 
-## Natural spawning (optional) (currently broken)
+## Natural spawning (optional)
 
-If enabled in config, new **Overworld** chunks can **roll** to spawn a clam near **chunk surface**, or a **dungeon** method can **replace spawners** with clams at configurable rates. **Defaults are conservative**; turn features on deliberately.
+If enabled in `config/voidclam.json`, newly generated chunks can **roll** to spawn a clam (or convert dungeon spawners) using a **seed-deterministic** RNG mixed from **world seed + chunk coordinates + dimension salt**.
+
+Natural spawn is now **configured per world/dimension** via `clam_spawn_natural_worlds` (namespaced ids like `minecraft:overworld`), so modpacks can enable/disable and tune spawn behavior independently per dimension. By default, `minecraft:overworld` is present (disabled unless you turn `clam_spawn_natural` on).
+
+Default-mode placement chooses a random depth between the **current ground level** and **16 blocks above bedrock**, so clams are mostly underground but can still appear embedded in cliffs/mountains depending on terrain.
 
 ---
 
