@@ -1776,6 +1776,40 @@ public final class VoidClamMod {
         return m.clamId;
     }
 
+    /**
+     * Natural-spawn helper: create clam directly at target size so first visible state is already full-size
+     * flesh+shell instead of a tiny stub that grows later.
+     */
+    public static @Nullable UUID makeNaturalSpawnClam(ServerWorld world, int x, int y, int z, int targetSize) {
+        VoidClamConfig cfg = VoidClamConfig.get();
+        int t = Math.max(3, Math.min(cfg.clam_size_max, targetSize));
+        Clam m = new Clam();
+        m.clamId = UUID.randomUUID();
+        m.type = 1;
+        m.x = x;
+        m.y = y;
+        m.z = z;
+        m.worldKey = world.getRegistryKey();
+        m.currentSize = t;
+        m.status = 0;
+        m.energy = 0;
+        m.age = 0;
+        m.seekLights = cfg.clam_light_flag_default;
+        m.seekOres = cfg.clam_ores_flag_default;
+        m.protectItself = cfg.clam_protect_itself_default;
+        m.materialSeekThreshold = materialSeekThresholdBaselineForSize(m.currentSize);
+        m.repairWakeCyclesRemaining = 0;
+        if (!registerClam(m)) {
+            return null;
+        }
+        placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
+        CommandToolbox.buildShell(world, x, y, z, t, Blocks.NETHER_WART_BLOCK, false);
+        CommandToolbox.buildShell(world, x, y, z, t, Blocks.OBSIDIAN, false);
+        m.stubBuilt = true;
+        startSeekCachesRebuild(m);
+        return m.clamId;
+    }
+
     public static void clamKill(MinecraftServer server, UUID clamId, boolean saveAfter) {
         clamKillBlocking(server, clamId, saveAfter);
     }

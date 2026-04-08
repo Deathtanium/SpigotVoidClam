@@ -92,7 +92,7 @@ public final class NaturalSpawnHandler {
 
     /** Inclusive natural spawn size for default method (see {@link VoidClamMod#makeStubWithTargetSize}). */
     private static final int NATURAL_SPAWN_SIZE_MIN = 5;
-    private static final int NATURAL_SPAWN_SIZE_MAX = 11;
+    private static final int NATURAL_SPAWN_SIZE_MAX = 9;
 
     private static void trySpawnAtChunkCenter(ServerWorld world, ChunkPos cp, Random rand) {
         int centerX = cp.getCenterX() + rand.nextBetween(-2, 2);
@@ -100,7 +100,6 @@ public final class NaturalSpawnHandler {
         if (!world.isChunkLoaded(centerX >> 4, centerZ >> 4)) return;
 
         VoidClamConfig cfg = VoidClamConfig.get();
-        int sea = world.getSeaLevel();
         int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE_WG, centerX, centerZ);
         if (surfaceY <= world.getBottomY()) return;
 
@@ -110,26 +109,17 @@ public final class NaturalSpawnHandler {
 
         int dyBottom = VoidClamMod.obsidianShellBottomDy(t);
         int sphereR = (int) Math.ceil(CommandToolbox.clamOctahedronCircumsphereRadius(t)) + cfg.clam_spawn_natural_sphere_padding;
-
-        int minBelowSea = cfg.clam_spawn_natural_min_blocks_below_sea;
-        int minBelowSurface = cfg.clam_spawn_natural_min_blocks_below_surface;
-
-        int capSeaSphere = sea - minBelowSea - dyBottom - 2 * sphereR;
-        int capSurfSphere = surfaceY - minBelowSurface - dyBottom - 2 * sphereR;
-        int capSeaShell = sea - minBelowSea - (t - 1);
-        int capSurfShell = surfaceY - minBelowSurface - (t - 1);
-        int maxHeartY = Math.min(Math.min(capSeaSphere, capSurfSphere), Math.min(capSeaShell, capSurfShell));
-        int minHeartY = world.getBottomY() + 1 - dyBottom;
-
-        if (maxHeartY < minHeartY) return;
-
-        int heartY = rand.nextBetween(minHeartY, maxHeartY);
-        int sphereCy = heartY + dyBottom + sphereR;
+        int minShellBottomY = world.getBottomY() + 16;
+        int maxShellBottomY = surfaceY;
+        if (maxShellBottomY < minShellBottomY) return;
+        int shellBottomY = rand.nextBetween(minShellBottomY, maxShellBottomY);
+        int heartY = shellBottomY - dyBottom;
+        int sphereCy = shellBottomY + sphereR;
 
         if (!allChunksIntersectingSphereLoaded(world, centerX, sphereCy, centerZ, sphereR)) return;
 
         clearSphere(world, centerX, sphereCy, centerZ, sphereR);
-        VoidClamMod.makeStubWithTargetSize(world, centerX, heartY, centerZ, t);
+        VoidClamMod.makeNaturalSpawnClam(world, centerX, heartY, centerZ, t);
     }
 
     private static boolean allChunksIntersectingSphereLoaded(ServerWorld world, int cx, int cy, int cz, int radius) {
