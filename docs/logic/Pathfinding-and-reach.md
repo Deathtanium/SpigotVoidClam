@@ -28,6 +28,52 @@ When **`true`** in `voidclam.json`, **`CommandToolbox.clamReach`** builds a **fu
 - **Success:** Enqueue goal `Node` on `targets`; leave busy flag for `buildPath` to clear.
 - **Failure:** Set `mainCycleBusy = 0`.
 
+### Sync mode (`astar_mode = sync_batched`): reach pipeline with batching + pause/resume
+
+```mermaid
+flowchart TD
+  A["tickLoadedClamCores -> clamReach tick"] --> B{"Reach guards pass?<br/>awake + chunk loaded + mainCycleBusy==0<br/>!growPending + !kill/shutdown + pathfindingAllowedYet"}
+  B -- no --> A
+  B -- yes --> C["Acquire lock: mainCycleBusy=1"]
+  C --> D{"volatile reach map enabled?"}
+
+  D -- yes --> E["Enqueue VolatileReachFloodJob<br/>MAIN_THREAD_BATCHED BFS over ticks"]
+  E --> E1["tickSyncMainThreadPathWork gives per-tick budget"]
+  E1 --> E2{"abort / pause gate hit?<br/>kill, unload, shutdown, resize cooldown"}
+  E2 -- yes --> E3["Release busy; drop job"]
+  E2 -- no --> E4{"flood finished?"}
+  E4 -- no --> E1
+  E4 -- yes --> F["finishClamReachAfterVolatileFlood:<br/>pick best target + enqueueSyncAStarJob"]
+
+  D -- no --> G["Reach scan picks target"]
+  G --> H["enqueueSyncAStarJob"]
+  F --> H
+
+  H --> I["syncAStarJobs queue + fairness deque"]
+  I --> J["tickSyncAStarJobsConsumeBudget<br/>round-robin consume remaining tick budget"]
+  J --> K{"job eligible now?<br/>isPathfindingAllowedYet"}
+  K -- no (paused) --> K1["Requeue at tail (resume later)"] --> J
+  K -- yes --> L["job.step(budget): PREPASS then A*"]
+  L --> M{"job state"}
+  M -- running --> J
+  M -- success --> N["enqueueTarget(goal)"]
+  M -- fail/abort/cap --> O["releasePathfindingMainCycle (busy=0)"]
+
+  N --> P["tickTargets -> buildPath on main thread"]
+  P --> Q{"container routing needed?"}
+  Q -- no --> R["final path step releases busy"]
+  Q -- yes --> S["pathStoppedAwaitingContainer keeps lock"]
+  S --> T["container BFS + apply result"]
+  T --> U["release busy after apply"]
+```
+
+**Reading the diagram:**
+
+- **Batching:** Both volatile reach flood and sync A* run in **small per-tick batches** under `tickSyncMainThreadPathWork`, bounded by sync budget knobs (`astar_sync_global_max_steps_per_tick`, per-job expansion cap).
+- **Pause:** A job can be skipped (not advanced) when `isPathfindingAllowedYet` is false (notably resize/path cooldown), and is rotated to the fairness tail instead of burning the whole tick budget.
+- **Resume:** Once eligible again, the same queued job keeps stepping from stored phase/frontier state (`PREPASS` -> `ASTAR`) until success/failure.
+- **Lock lifetime:** `mainCycleBusy` spans the whole reach->path->apply pipeline. In container-routing cases, `pathStoppedAwaitingContainer` prevents early unlock from earlier scheduled path pulses.
+
 ## `buildPath` (`Pathfinder`)
 
 Runs on **main thread** from `tickTargets`.
