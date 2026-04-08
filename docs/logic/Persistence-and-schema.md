@@ -38,7 +38,7 @@ Display:
 **Not stored in `module`:**
 
 - **Block position** `x,y,z` — taken from the block entity’s world position (or set on place from `BlockPos`).
-- **Seek caches** (`lightsCache`, `oresCache`), **blacklists**, **path goals**, **busy flags**, **`pathApplyPendingSteps`**, **`pathfindingResumeWorldTime`**, **`nextAutoGrowRepairWorldTime`**, unload-expiry fields, rebuild cursors/ticks — all **runtime or derived** after load (`applyTemplateOntoClam` clears them explicitly when applying a snapshot).
+- **Seek caches** (`lightsCache`, `oresCache`), **path goals**, **busy flags**, **`pathApplyPendingSteps`**, **`pathfindingResumeWorldTime`**, **`nextAutoGrowRepairWorldTime`**, unload-expiry fields, rebuild cursors/ticks — all **runtime or derived** after load (`applyTemplateOntoClam` clears them explicitly when applying a snapshot).
 
 Legacy hearts that once stored cache lists in NBT are no longer written; readers should not expect list keys.
 

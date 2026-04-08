@@ -151,7 +151,7 @@ public final class BlockBfs {
 
     /**
      * Drain immediately without participating in the per-tick main-thread step pool. Use when the caller must observe a
-     * fully drained queue in one return (e.g. commands, {@link Pathfinder#buildVolatileReachabilityMap}).
+     * fully drained queue in one return (e.g. commands, goal-directed prepass).
      */
     public void runToCompletionIgnoringSyncMainThreadStepBudget() {
         if (mode == ExecutionMode.BACKGROUND) {

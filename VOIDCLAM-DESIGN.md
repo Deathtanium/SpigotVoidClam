@@ -86,7 +86,7 @@ That makes the clam feel like **part of the world** rather than an overlay on it
 
 - Paths are computed with **A\*** on a 3D grid around the clam, with **custom costs** (soft tissue is cheap; very hard blocks or block entities are expensive or impassable).
 - A **reachability pre-check** avoids wasting work when a target is **caged** or unreachable.
-- **Stamina** limits how far a single path can “chew” through hard terrain in one go; running out can **blacklist** a target and **drain energy**.
+- **Stamina** limits how far a single path can “chew” through hard terrain in one go; running out **drains energy** and may still consume **one last break** on breakable cells before the path stops (see `docs/logic/Pathfinding-and-reach.md`).
 - Pathfinding can run **asynchronously** (worker pool) or in **sync batched** mode depending on config; **block changes** always apply on the **main server thread**.
 - **Delayed placement** spreads tendril steps over time so one path does not freeze the server tick.
 - The performance of all of these has been made very resource-friendly, but a first-party implementation could make it even better
@@ -141,7 +141,7 @@ Server operators (and configured trusted players) get a **`/voidclam`** command 
 ## Persistence and worlds
 
 - Each clam’s **authoritative save data** lives in its **heart block entity** in the chunk file (custom data components / NBT).
-- **Ephemeral** runtime data (path blacklists, seek caches) is rebuilt after load.
+- **Ephemeral** runtime data (seek caches, in-flight path goals) is rebuilt or cleared after load / chunk expiry as documented.
 - Worlds remain **compatible with vanilla clients**; only the **server** needs the mod.
 
 ---

@@ -22,7 +22,6 @@
 | `age` | Age / phase timing (persisted on heart) |
 | `seekLights`, `seekOres` | Whether periodic reach scans consider lights and/or ores |
 | `protectItself` | Defense behavior when large enough |
-| `lightsBlackList`, `oresBlackList` | Position sets; **in memory only** (not written to heart NBT in current code) |
 | `busyFlagPlaceEvent` | Declared on `Clam`; reserved / legacy |
 | `mainCycleBusy` | **Reach / path lifecycle lock** — see [[Threading-queues-locks]] |
 | `nextAutoGrowRepairWorldTime` | Per-dimension `getTime()` deadline for the next **per-clam** auto repair/grow (in-memory scheduling; heart NBT carries other persisted fields) |

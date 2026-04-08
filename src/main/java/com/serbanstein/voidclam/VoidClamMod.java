@@ -51,11 +51,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Central state: clams keyed by {@link Clam#clamId}, path-result queue, grow-pending coordination.
- * Persistence is the searing heart (blast furnace) in-world (no seek cache / blacklist lists on disk); each {@link Clam}
+ * Persistence is the searing heart (blast furnace) in-world (no seek caches on disk); each {@link Clam}
  * records {@link Clam#worldKey}.
  */
 public final class VoidClamMod {
     private static final Logger LOGGER = LoggerFactory.getLogger("voidclam/VoidClamMod");
+    /** Temporary; gated by {@link VoidClamConfig#path_apply_debug_log}. TODO remove with that flag. */
+    private static final Logger PATH_APPLY_DEBUG = LoggerFactory.getLogger("voidclam/path_apply_debug");
+
+    /** Temporary path-apply diagnostics. TODO remove when {@link VoidClamConfig#path_apply_debug_log} is removed. */
+    public static void pathApplyDebug(String message, Object... args) {
+        if (!VoidClamConfig.get().path_apply_debug_log) {
+            return;
+        }
+        PATH_APPLY_DEBUG.info("[PATH_APPLY_DEBUG TODO-remove] " + message, args);
+    }
     private static final int MAX_CLAMS = 1001;
     /** Throttle "orphaned activity" warnings per clam (world-time ticks, overworld clock). */
     private static final int ORPHANED_ACTIVITY_WARN_COOLDOWN_TICKS = 20 * 60;
@@ -293,15 +303,21 @@ public final class VoidClamMod {
      * Clears busy, targets queue, and sync A* jobs for this clam. Call at the start of {@link CommandToolbox#clamReSize}.
      */
     public static void prepareClamForResizeShell(Clam m) {
+        prepareClamForResizeShell(m, true);
+    }
+
+    /**
+     * @param markResizeChainAwaitingCompletion when {@code false}, the caller finishes shell work synchronously
+     *     (see {@link CommandToolbox#instantRepairShellForNaturalSpawn}) and no delayed resize chain runs.
+     */
+    public static void prepareClamForResizeShell(Clam m, boolean markResizeChainAwaitingCompletion) {
         if (m == null) return;
         releasePathfindingMainCycle(m);
-        m.lightsBlackList.clear();
-        m.oresBlackList.clear();
         m.seekEphemeralDataExpireAtWorldTime = 0L;
         m.seekEphemeralNeedSeekDataRefresh = false;
         purgeTargetsForClam(m.clamId);
         Pathfinder.clearSyncAStarJobsForClam(m.clamId);
-        m.repairResizeChainAwaitingCompletion = true;
+        m.repairResizeChainAwaitingCompletion = markResizeChainAwaitingCompletion;
     }
 
     public static boolean isIceVariant(Block block) {
@@ -427,8 +443,6 @@ public final class VoidClamMod {
         victim.lightCacheRebuildCursor = 0L;
         victim.oreCacheRebuildTicksRemaining = 0;
         victim.oreCacheRebuildCursor = 0L;
-        victim.lightsBlackList.clear();
-        victim.oresBlackList.clear();
         victim.seekEphemeralDataExpireAtWorldTime = 0L;
         victim.seekEphemeralNeedSeekDataRefresh = false;
         purgeTargetsForVictimClamId(victimId);
@@ -582,7 +596,7 @@ public final class VoidClamMod {
 
     /**
      * When a clam’s heart chunk stays unloaded for {@link #autoGrowRepairIntervalTicks()} in that dimension’s world time,
-     * drops in-memory seek caches, blacklists, and path state (same cadence as auto repair). Reloading the chunk triggers
+     * drops in-memory seek caches and path state (same cadence as auto repair). Reloading the chunk triggers
      * cache rebuild when {@link VoidClamConfig#seekTargetCacheEnabled()}.
      */
     public static void tickSeekEphemeralExpiry(MinecraftServer server) {
@@ -606,13 +620,13 @@ public final class VoidClamMod {
             if (m.seekEphemeralDataExpireAtWorldTime == 0L) {
                 m.seekEphemeralDataExpireAtWorldTime = t + (long) autoGrowRepairIntervalTicks();
             } else if (t >= m.seekEphemeralDataExpireAtWorldTime) {
-                clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry(m);
+                clearSeekCachesAfterChunkUnloadExpiry(m);
                 m.seekEphemeralDataExpireAtWorldTime = 0L;
             }
         }
     }
 
-    static void clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry(Clam m) {
+    static void clearSeekCachesAfterChunkUnloadExpiry(Clam m) {
         if (m == null) {
             return;
         }
@@ -621,8 +635,6 @@ public final class VoidClamMod {
         Pathfinder.clearSyncAStarJobsForClam(m.clamId);
         m.lightsCache.clear();
         m.oresCache.clear();
-        m.lightsBlackList.clear();
-        m.oresBlackList.clear();
         m.lightCacheRebuildTicksRemaining = 0;
         m.lightCacheRebuildCursor = 0L;
         m.oreCacheRebuildTicksRemaining = 0;
@@ -1114,13 +1126,56 @@ public final class VoidClamMod {
         }
     }
 
+    /**
+     * Remove light cache entries that no longer qualify as lights in the live world (chunk loaded only).
+     * Torches etc. can disappear without a block change at their own position when support is mined;
+     * this keeps {@link Clam#lightsCache} consistent before {@code clamReach} / path prepass.
+     */
+    public static void pruneLightsSeekCacheAgainstWorld(ServerWorld world, Clam m) {
+        if (m == null || !m.seekLights || !world.getRegistryKey().equals(m.dimensionWorldKey())) {
+            return;
+        }
+        if (!VoidClamConfig.get().lightBlockCacheEnabled()) {
+            return;
+        }
+        for (long packed : new ArrayList<>(m.lightsCache)) {
+            BlockPos pos = BlockPos.fromLong(packed);
+            if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
+                continue;
+            }
+            if (!isLight(world.getBlockState(pos), world, pos)) {
+                m.lightsCache.remove(packed);
+            }
+        }
+    }
+
+    /**
+     * Same as {@link #pruneLightsSeekCacheAgainstWorld} for {@link Clam#oresCache}.
+     */
+    public static void pruneOresSeekCacheAgainstWorld(ServerWorld world, Clam m) {
+        if (m == null || !world.getRegistryKey().equals(m.dimensionWorldKey())) {
+            return;
+        }
+        if (!VoidClamConfig.get().oreBlockCacheEnabled()) {
+            return;
+        }
+        for (long packed : new ArrayList<>(m.oresCache)) {
+            BlockPos pos = BlockPos.fromLong(packed);
+            if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
+                continue;
+            }
+            if (!isOre(world.getBlockState(pos).getBlock())) {
+                m.oresCache.remove(packed);
+            }
+        }
+    }
+
     /** When pathfinding cannot reach a light goal, drop it from the cache until the next repair rebuild. */
     public static void removeLightFromClamCacheAfterFailedPath(UUID clamId, BlockPos pos) {
         Clam m = getClamById(clamId);
         if (m != null) {
             long p = pos.asLong();
             m.lightsCache.remove(p);
-            m.lightsBlackList.remove(p);
             if (m.lightPathGoalPacked != null && m.lightPathGoalPacked == p) {
                 m.lightPathGoalPacked = null;
             }
@@ -1152,7 +1207,6 @@ public final class VoidClamMod {
         if (m != null) {
             long p = pos.asLong();
             m.oresCache.remove(p);
-            m.oresBlackList.remove(p);
             if (m.orePathGoalPacked != null && m.orePathGoalPacked == p) {
                 m.orePathGoalPacked = null;
             }
@@ -1175,20 +1229,11 @@ public final class VoidClamMod {
     }
 
     /**
-     * Clears main-cycle busy, releases path locks in {@link Clam#lightsBlackList} / {@link Clam#oresBlackList},
-     * and clears active light / ore goals.
+     * Clears main-cycle busy and active light / ore path goals.
      */
     public static void releasePathfindingMainCycle(Clam m) {
         if (m == null) return;
         m.pathApplyPendingSteps = 0;
-        Long lightGoal = m.lightPathGoalPacked;
-        if (lightGoal != null) {
-            m.lightsBlackList.remove(lightGoal);
-        }
-        Long oreGoal = m.orePathGoalPacked;
-        if (oreGoal != null) {
-            m.oresBlackList.remove(oreGoal);
-        }
         m.mainCycleBusy = 0;
         m.lightPathGoalPacked = null;
         m.orePathGoalPacked = null;
@@ -1308,7 +1353,6 @@ public final class VoidClamMod {
             if (Math.abs(m.x - px) > e || Math.abs(m.y - py) > e || Math.abs(m.z - pz) > e) continue;
             if (wasLight && !nowLight) {
                 m.lightsCache.remove(packed);
-                m.lightsBlackList.remove(packed);
                 if (m.lightPathGoalPacked != null && m.lightPathGoalPacked == packed) {
                     m.lightPathGoalPacked = null;
                 }
@@ -1344,7 +1388,6 @@ public final class VoidClamMod {
             if (Math.abs(m.x - px) > e || Math.abs(m.y - py) > e || Math.abs(m.z - pz) > e) continue;
             if (wasOre && !nowOre) {
                 m.oresCache.remove(packed);
-                m.oresBlackList.remove(packed);
                 if (m.orePathGoalPacked != null && m.orePathGoalPacked == packed) {
                     m.orePathGoalPacked = null;
                 }
@@ -1572,7 +1615,6 @@ public final class VoidClamMod {
             lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " orePathGoalPacked=" + m.orePathGoalPacked
                 + " resumeWorldTime=" + m.pathfindingResumeWorldTime + " pathAllowed=?");
             lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
-                + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
                 + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
             lines.add("resources: energy=" + m.energy + " soul=" + m.soul + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
                 + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
@@ -1591,7 +1633,6 @@ public final class VoidClamMod {
         lines.add("path: lightPathGoalPacked=" + m.lightPathGoalPacked + " orePathGoalPacked=" + m.orePathGoalPacked
             + " resumeWorldTime=" + m.pathfindingResumeWorldTime + " pathAllowed=" + isPathfindingAllowedYet(world, m));
         lines.add("caches: lightsCache=" + m.lightsCache.size() + " oresCache=" + m.oresCache.size()
-            + " lightsBL=" + m.lightsBlackList.size() + " oresBL=" + m.oresBlackList.size()
             + " lightOreRebuildTicks=" + m.lightCacheRebuildTicksRemaining + "/" + m.oreCacheRebuildTicksRemaining);
         lines.add("resources: energy=" + m.energy + " soul=" + m.soul + " material=" + m.material + " cap=" + resourceCapForSize(m.currentSize)
             + " prioritizeRepairOreSeek=" + m.prioritizeRepairOreSeek + " orePathForMaterialHunger=" + m.orePathForMaterialHunger);
@@ -1620,16 +1661,6 @@ public final class VoidClamMod {
                 + " savedSeekLightsWhilePending=" + savedL + " savedSeekOresWhilePending=" + savedO);
         }
         return lines;
-    }
-
-    public static void removeOresBlackList(UUID clamId, BlockPos pos) {
-        Clam m = getClamById(clamId);
-        if (m != null) m.oresBlackList.remove(pos.asLong());
-    }
-
-    public static void addOresBlackList(UUID clamId, BlockPos pos) {
-        Clam m = getClamById(clamId);
-        if (m != null) m.oresBlackList.add(pos.asLong());
     }
 
     public static void addEnergy(UUID clamId, int delta) {
@@ -1777,8 +1808,9 @@ public final class VoidClamMod {
     }
 
     /**
-     * Natural-spawn helper: create clam directly at target size so first visible state is already full-size
-     * flesh+shell instead of a tiny stub that grows later.
+     * Natural-spawn helper: creates an already-awake ({@link #isSearingHeartThermallyActive}), full-size clam using
+     * {@link CommandToolbox#instantRepairShellForNaturalSpawn} (same shell/flesh rules as same-size {@link CommandToolbox#clamReSize}
+     * repair, without costs or delayed animation).
      */
     public static @Nullable UUID makeNaturalSpawnClam(ServerWorld world, int x, int y, int z, int targetSize) {
         VoidClamConfig cfg = VoidClamConfig.get();
@@ -1791,7 +1823,7 @@ public final class VoidClamMod {
         m.z = z;
         m.worldKey = world.getRegistryKey();
         m.currentSize = t;
-        m.status = 0;
+        m.status = 1;
         m.energy = 0;
         m.age = 0;
         m.seekLights = cfg.clam_light_flag_default;
@@ -1803,10 +1835,8 @@ public final class VoidClamMod {
             return null;
         }
         placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
-        CommandToolbox.buildShell(world, x, y, z, t, Blocks.NETHER_WART_BLOCK, false);
-        CommandToolbox.buildShell(world, x, y, z, t, Blocks.OBSIDIAN, false);
+        CommandToolbox.instantRepairShellForNaturalSpawn(world, m);
         m.stubBuilt = true;
-        startSeekCachesRebuild(m);
         return m.clamId;
     }
 
@@ -2085,8 +2115,6 @@ public final class VoidClamMod {
         if (shellDamage > 0) {
             m.prioritizeRepairOreSeek = m.seekLights && m.material < shellDamage;
             CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
-            m.oresBlackList.clear();
-            m.lightsBlackList.clear();
             clampResourcesForSize(m);
             return;
         }
@@ -2096,8 +2124,6 @@ public final class VoidClamMod {
         syncClamCoreBlockEntityFromClam(world, m);
         // No shell damage healthy cycle: raise ore comfort target so material gathering scales with time intact.
         CommandToolbox.clamReSize(world, m.clamId, m.currentSize);
-        m.oresBlackList.clear();
-        m.lightsBlackList.clear();
         VoidClamConfig cfg = VoidClamConfig.get();
         if (m.energy > cfg.clam_grow_energymultiplier * m.currentSize && m.currentSize < cfg.clam_size_max) {
             double cst = 0;

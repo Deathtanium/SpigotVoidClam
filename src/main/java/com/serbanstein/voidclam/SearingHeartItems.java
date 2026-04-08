@@ -30,10 +30,9 @@ public final class SearingHeartItems {
     private static final String CLAM_NBT_SUBKEY = "module";
 
     /**
-     * Seek caches / blacklists are no longer written to the heart NBT; this snapshot supports legacy reads and
-     * always reports zero persisted list sizes when lists were removed from {@link #writeClamNbt}.
+     * Seek caches are not written to the heart NBT; this snapshot supports legacy reads and reports zero persisted sizes.
      */
-    public record PersistedSeekCacheSnapshot(int lightsC, int oresC, int oresBL, boolean hadVoidclamClamNbt) {
+    public record PersistedSeekCacheSnapshot(int lightsC, int oresC, boolean hadVoidclamClamNbt) {
     }
 
     private SearingHeartItems() {
@@ -197,8 +196,6 @@ public final class SearingHeartItems {
         into.worldKey = snapshot.worldKey;
         into.lightsCache.clear();
         into.oresCache.clear();
-        into.oresBlackList.clear();
-        into.lightsBlackList.clear();
         into.busyFlagPlaceEvent = 0;
         into.mainCycleBusy = 0;
         into.pathApplyPendingSteps = 0;
@@ -262,22 +259,22 @@ public final class SearingHeartItems {
      */
     public static PersistedSeekCacheSnapshot readPersistedSeekCacheSnapshot(AbstractFurnaceBlockEntity furnace) {
         if (furnace == null) {
-            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+            return new PersistedSeekCacheSnapshot(0, 0, false);
         }
         net.minecraft.component.ComponentMap current = furnace.getComponents();
         NbtComponent data = current.get(DataComponentTypes.CUSTOM_DATA);
         if (data == null) {
-            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+            return new PersistedSeekCacheSnapshot(0, 0, false);
         }
         NbtCompound root = data.copyNbt();
         var clamOpt = root.getCompound(ROOT_KEY);
         if (clamOpt.isEmpty()) {
-            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+            return new PersistedSeekCacheSnapshot(0, 0, false);
         }
         var modOpt = clamOpt.get().getCompound(CLAM_NBT_SUBKEY);
         if (modOpt.isEmpty()) {
-            return new PersistedSeekCacheSnapshot(0, 0, 0, false);
+            return new PersistedSeekCacheSnapshot(0, 0, false);
         }
-        return new PersistedSeekCacheSnapshot(0, 0, 0, true);
+        return new PersistedSeekCacheSnapshot(0, 0, true);
     }
 }

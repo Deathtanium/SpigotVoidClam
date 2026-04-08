@@ -5,7 +5,7 @@ Heart (`Clam`) resources are persisted in **`SearingHeartItems`** / `voidclam.mo
 | Field | Cap | Gained from | Spent on |
 |-------|-----|-------------|----------|
 | `energy` | `10 × max(1, currentSize)` | Eating **light** blocks at path goal (`Pathfinder.buildPath`), `lightEnergyForBlock` | Failed path stamina (−1 in some cases); auto-grow uses `energy > clam_grow_energymultiplier × currentSize` before +1 size |
-| `material` | same as energy | Ores (goal), shell repair | Auto-grow `clam_grow_material_cost`, obsidian repair in `clamReSize` |
+| `material` | same as energy | Ores **ingested** during path apply (see [[Pathfinding-and-reach]] — goal material-flow flag and/or live hunger under `seekLights`), shell repair | Auto-grow `clam_grow_material_cost`, obsidian repair in `clamReSize` |
 | `soul` | **same as energy** | **Soul** light sources only: `minecraft:soul_fire`, `soul_torch`, `soul_wall_torch`, `soul_lantern`, **lit** `soul_campfire` — **+1 soul** per consumed goal block, plus **energy** matching the non-soul counterpart (`fire`, `torch`, `lantern`, lit `campfire` rules in `lightEnergyForSoulCounterpart`) | *None yet* (reserved) |
 | `materialSeekThreshold` | same cap | Healthy auto cycles (+1) | (not spent — hunger bar for ore seeking) |
 

@@ -38,7 +38,7 @@ Constants in **`VoidClamMod`**:
 
 **Apply (`applyLightCacheDelta` / `applyOreCacheDelta`):** For **each registered clam** in the **same dimension** as the delta, heart chunk loaded, core block present, position inside that clam’s seek box:
 
-- Transitions **light added/removed** update `lightsCache` and blacklist/goal fields as appropriate.
+- Transitions **light added/removed** update `lightsCache` and goal fields as appropriate.
 - Ore analog for `oresCache`.
 - **`ensureLightSeekCacheForIncomingDelta`** / **`ensureOreSeekCacheForIncomingDelta`**: if seek flag on, cache empty, no rebuild in progress → **start full rebuild** so deltas are not the sole source forever.
 
@@ -46,7 +46,7 @@ Constants in **`VoidClamMod`**:
 
 ## Unload expiry
 
-Heart chunk unloaded: **`tickSeekEphemeralExpiry`** arms a dimension **`world.getTime()`** deadline; when it fires, **`clearSeekCachesAndBlacklistsAfterChunkUnloadExpiry`** clears ephemeral path/seek state. Reload may set **`seekEphemeralNeedSeekDataRefresh`** to restart rebuilds when chunk loads (see `tickLoadedClamCores`).
+Heart chunk unloaded: **`tickSeekEphemeralExpiry`** arms a dimension **`world.getTime()`** deadline; when it fires, **`clearSeekCachesAfterChunkUnloadExpiry`** clears ephemeral path/seek state. Reload may set **`seekEphemeralNeedSeekDataRefresh`** to restart rebuilds when chunk loads (see `tickLoadedClamCores`).
 
 ## Related notes
 

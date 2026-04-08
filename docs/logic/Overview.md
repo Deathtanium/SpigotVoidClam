@@ -4,7 +4,7 @@ VoidClam simulates **clams** — creatures made of blocks that consume energy an
 
 ## Core nouns
 
-- **Clam** — One organism instance: position, `currentSize`, `type`, `status`, `energy`, `age`, `seekLights`, `seekOres`, blacklists for targets that failed or should be skipped, and busy flags (`Clam.java`).
+- **Clam** — One organism instance: position, `currentSize`, `type`, `status`, `energy`, `age`, `seekLights`, `seekOres`, seek caches, path-goal packed fields, and busy flags (`Clam.java`).
 - **Path** — A chain of `Node` from clam center toward a goal block; the goal node is enqueued; `buildPath` walks parent pointers from goal toward start and schedules placement per step.
 - **Targets queue** — `ConcurrentLinkedQueue<Node>` holding path *results* ready for `buildPath` (`VoidClamMod.enqueueTarget` / `tickTargets`).
 

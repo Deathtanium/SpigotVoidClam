@@ -40,7 +40,7 @@ Work tied to a specific clam stops when **any** of: the server is stopping; a **
 
 ## `Clam` mutation from pathfinding workers
 
-`clamReach` runs on the pathfinder pool and reads/writes the same **`Clam`** instance the main thread uses (`mainCycleBusy`, blacklists). Ordering is relied on so the busy flag is not corrupted in normal operation; blacklists are also cleared on grow/repair. This matches historical risk; a stricter port could confine `Clam` mutation to the main thread only.
+`clamReach` runs on the pathfinder pool and reads/writes the same **`Clam`** instance the main thread uses (`mainCycleBusy`, seek caches, goal fields). Ordering is relied on so the busy flag is not corrupted in normal operation. This matches historical risk; a stricter port could confine `Clam` mutation to the main thread only.
 
 **Porting:** New off-thread work must respect `shouldAbortAsyncPathfindingWork` and the kill barrier; new kill paths should use the same coordinator or extend it.
 

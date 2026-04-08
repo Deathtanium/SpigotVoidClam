@@ -65,14 +65,8 @@ public class Clam {
     public long lightCacheRebuildCursor;
     /**
      * Packed light block this clam is currently routing toward (set in {@code clamReach}, cleared when pathfinding releases busy).
-     * Entries are also in {@link #lightsBlackList} so scans skip this goal until the path/build cycle ends or repair clears all.
      */
     public volatile Long lightPathGoalPacked;
-    /**
-     * Packed positions of lights reserved for an in-flight path (concurrency lock): skip in {@code clamReach} until
-     * {@link VoidClamMod#releasePathfindingMainCycle} or full clear on repair.
-     */
-    public final Set<Long> lightsBlackList = ConcurrentHashMap.newKeySet();
     /**
      * Packed {@link BlockPos#asLong()} positions of ore blocks in seek range (same box as {@code clamReach}).
      * Incrementally updated on block changes; fully rebuilt in batches during the clam repair cycle.
@@ -84,14 +78,8 @@ public class Clam {
     public long oreCacheRebuildCursor;
     /**
      * Packed ore block this clam is currently routing toward (set in {@code clamReach}, cleared when pathfinding releases busy).
-     * Entries are also in {@link #oresBlackList} so scans skip this goal until the path/build cycle ends or repair clears all.
      */
     public volatile Long orePathGoalPacked;
-    /**
-     * Packed positions of ores reserved for an in-flight path or marked unreachable: skip in {@code clamReach} until
-     * {@link VoidClamMod#releasePathfindingMainCycle} or full clear on repair.
-     */
-    public final Set<Long> oresBlackList = ConcurrentHashMap.newKeySet();
     public short busyFlagPlaceEvent;
     /**
      * Unified lock for the clam’s main activity pipeline: non-zero while reach / pathfinding owns the clam
@@ -134,8 +122,8 @@ public class Clam {
 
     /**
      * When the heart chunk is unloaded, {@link VoidClamMod#tickSeekEphemeralExpiry} sets this to overworld-equivalent world time
-     * (+ {@link VoidClamMod#autoGrowRepairIntervalTicks()}) for that dimension; when reached, in-memory seek caches and
-     * blacklists are cleared. {@code 0} means not counting down (chunk loaded or no timer).
+     * (+ {@link VoidClamMod#autoGrowRepairIntervalTicks()}) for that dimension; when reached, in-memory seek caches are
+     * cleared. {@code 0} means not counting down (chunk loaded or no timer).
      */
     public long seekEphemeralDataExpireAtWorldTime;
     /**

@@ -12,6 +12,7 @@ import net.minecraft.world.chunk.WorldChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -20,6 +21,11 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class NaturalSpawnHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger("voidclam/natural_spawn");
     private static final ConcurrentHashMap<Long, Boolean> spawnedChunks = new ConcurrentHashMap<>();
+
+    /** Total trySpawn runs (first + deferred) while waiting for the carve sphere's chunks to load. */
+    private static final int NATURAL_SPAWN_CHUNK_LOAD_ATTEMPTS = 64;
+    /** World-tick delay between attempts when carving would otherwise touch unloaded chunks. */
+    private static final int NATURAL_SPAWN_CHUNK_LOAD_RETRY_DELAY_TICKS = 10;
 
     public static void clearForSessionEnd() {
         spawnedChunks.clear();
@@ -41,23 +47,20 @@ public final class NaturalSpawnHandler {
         double roll = rand.nextDouble();
         double chance = worldCfg.default_chunk_chance;
         boolean pass = roll < chance;
+        if (!pass) return;
         if (worldCfg.debug_log) {
             LOGGER.info(
-                "[natural_spawn] default chunk roll world={} chunk=({}, {}) roll={} threshold={} pass={}",
+                ("[natural_spawn] chunk roll PASS world={} chunk=({}, {}) roll={} threshold={} — scheduling trySpawn in 1 tick"),
                 world.getRegistryKey().getValue(),
                 cp.x,
                 cp.z,
                 roll,
-                chance,
-                pass);
+                chance);
         }
-        if (!pass) return;
         // Avoid heightmap / setBlockState / makeStub while still inside chunk generation (re-entrant load deadlock).
-        long randSeed = naturalSpawnSeed(world, cp.x, cp.z, 0xD1B54A32D192ED03L);
-        VoidClamMod.scheduleDelayed(world, 1L, () -> {
-            Random deferred = Random.create(randSeed);
-            trySpawnAtChunkCenter(world, cp, deferred, worldCfg);
-        });
+        long placementRandSeed = naturalSpawnSeed(world, cp.x, cp.z, 0xD1B54A32D192ED03L);
+        VoidClamMod.scheduleDelayed(world, 1L, () ->
+            trySpawnAtChunkCenter(world, cp, worldCfg, placementRandSeed, 0));
     }
 
     private static long chunkKey(ServerWorld world, int cx, int cz) {
@@ -97,34 +100,191 @@ public final class NaturalSpawnHandler {
     private static void trySpawnAtChunkCenter(
         ServerWorld world,
         ChunkPos cp,
-        Random rand,
-        VoidClamConfig.NaturalSpawnWorldSettings worldCfg
+        VoidClamConfig.NaturalSpawnWorldSettings worldCfg,
+        long placementRandSeed,
+        int loadAttemptIndex
     ) {
+        Random rand = Random.create(placementRandSeed);
+        final boolean dbg = worldCfg.debug_log;
+        if (dbg) {
+            LOGGER.info(
+                "[natural_spawn] trySpawn begin world={} source_chunk=({}, {}) worldTime={} loadAttempt={}/{}",
+                world.getRegistryKey().getValue(),
+                cp.x,
+                cp.z,
+                world.getTime(),
+                loadAttemptIndex + 1,
+                NATURAL_SPAWN_CHUNK_LOAD_ATTEMPTS);
+        }
         VoidClamConfig cfg = VoidClamConfig.get();
         int centerX = cp.getCenterX() + rand.nextBetween(-2, 2);
         int centerZ = cp.getCenterZ() + rand.nextBetween(-2, 2);
-        if (!world.isChunkLoaded(centerX >> 4, centerZ >> 4)) return;
+        if (!world.isChunkLoaded(centerX >> 4, centerZ >> 4)) {
+            deferTrySpawnForChunkLoad(
+                world,
+                cp,
+                worldCfg,
+                placementRandSeed,
+                loadAttemptIndex,
+                dbg,
+                "center_column_chunk_unloaded");
+            return;
+        }
 
         int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE_WG, centerX, centerZ);
-        if (surfaceY <= world.getBottomY()) return;
+        if (surfaceY <= world.getBottomY()) {
+            if (dbg) {
+                LOGGER.info(
+                    "[natural_spawn] SKIP reason=no_surface_heightmap world={} source_chunk=({}, {}) centerXZ=({}, {}) surfaceY={} bottomY={}",
+                    world.getRegistryKey().getValue(),
+                    cp.x,
+                    cp.z,
+                    centerX,
+                    centerZ,
+                    surfaceY,
+                    world.getBottomY());
+            }
+            return;
+        }
 
         int maxT = Math.min(NATURAL_SPAWN_SIZE_MAX, cfg.clam_size_max);
-        if (maxT < NATURAL_SPAWN_SIZE_MIN) return;
+        if (maxT < NATURAL_SPAWN_SIZE_MIN) {
+            if (dbg) {
+                LOGGER.info(
+                    "[natural_spawn] SKIP reason=clam_size_max_too_small_for_natural world={} source_chunk=({}, {}) clam_size_max={} need_min={}",
+                    world.getRegistryKey().getValue(),
+                    cp.x,
+                    cp.z,
+                    cfg.clam_size_max,
+                    NATURAL_SPAWN_SIZE_MIN);
+            }
+            return;
+        }
         int t = rand.nextBetween(NATURAL_SPAWN_SIZE_MIN, maxT);
 
         int dyBottom = VoidClamMod.obsidianShellBottomDy(t);
         int sphereR = (int) Math.ceil(CommandToolbox.clamOctahedronCircumsphereRadius(t)) + worldCfg.sphere_padding;
         int minShellBottomY = world.getBottomY() + 16;
         int maxShellBottomY = surfaceY;
-        if (maxShellBottomY < minShellBottomY) return;
+        if (maxShellBottomY < minShellBottomY) {
+            if (dbg) {
+                LOGGER.info(
+                    "[natural_spawn] SKIP reason=no_room_for_shell_between_bottom_and_surface world={} source_chunk=({}, {}) minShellBottomY={} maxShellBottomY={} surfaceY={}",
+                    world.getRegistryKey().getValue(),
+                    cp.x,
+                    cp.z,
+                    minShellBottomY,
+                    maxShellBottomY,
+                    surfaceY);
+            }
+            return;
+        }
         int shellBottomY = rand.nextBetween(minShellBottomY, maxShellBottomY);
         int heartY = shellBottomY - dyBottom;
         int sphereCy = shellBottomY + sphereR;
 
-        if (!allChunksIntersectingSphereLoaded(world, centerX, sphereCy, centerZ, sphereR)) return;
+        long unloadedPacked = firstUnloadedChunkInSphere(world, centerX, sphereCy, centerZ, sphereR);
+        if (unloadedPacked != Long.MIN_VALUE) {
+            if (dbg) {
+                int ucx = (int) (unloadedPacked >> 32);
+                int ucz = (int) unloadedPacked;
+                LOGGER.info(
+                    "[natural_spawn] sphere_intersects_unloaded_chunk world={} source_chunk=({}, {}) sphereCenter=({}, {}, {}) sphereR={} first_unloaded_chunk=({}, {}) — will retry if attempts remain (min_blocks_below_* unused in this path)",
+                    world.getRegistryKey().getValue(),
+                    cp.x,
+                    cp.z,
+                    centerX,
+                    sphereCy,
+                    centerZ,
+                    sphereR,
+                    ucx,
+                    ucz);
+            }
+            deferTrySpawnForChunkLoad(
+                world,
+                cp,
+                worldCfg,
+                placementRandSeed,
+                loadAttemptIndex,
+                dbg,
+                "sphere_intersects_unloaded_chunk");
+            return;
+        }
 
         clearSphere(world, centerX, sphereCy, centerZ, sphereR);
-        VoidClamMod.makeNaturalSpawnClam(world, centerX, heartY, centerZ, t);
+        UUID clamId = VoidClamMod.makeNaturalSpawnClam(world, centerX, heartY, centerZ, t);
+        if (clamId == null) {
+            if (dbg) {
+                LOGGER.info(
+                    "[natural_spawn] SKIP reason=makeNaturalSpawnClam_failed world={} source_chunk=({}, {}) heart=({}, {}, {}) targetSize={}",
+                    world.getRegistryKey().getValue(),
+                    cp.x,
+                    cp.z,
+                    centerX,
+                    heartY,
+                    centerZ,
+                    t);
+            }
+            return;
+        }
+        if (dbg) {
+            LOGGER.info(
+                "[natural_spawn] SUCCESS world={} source_chunk=({}, {}) clamId={} heart=({}, {}, {}) targetSize={} sphereCenter=({}, {}, {}) sphereR={} shellBottomY={}",
+                world.getRegistryKey().getValue(),
+                cp.x,
+                cp.z,
+                clamId,
+                centerX,
+                heartY,
+                centerZ,
+                t,
+                centerX,
+                sphereCy,
+                centerZ,
+                sphereR,
+                shellBottomY);
+        }
+    }
+
+    /**
+     * Neighbors are often still absent one tick after {@code CHUNK_GENERATE}; reschedule with the same
+     * {@code placementRandSeed} so XZ, size, and depth stay deterministic.
+     */
+    private static void deferTrySpawnForChunkLoad(
+        ServerWorld world,
+        ChunkPos cp,
+        VoidClamConfig.NaturalSpawnWorldSettings worldCfg,
+        long placementRandSeed,
+        int loadAttemptIndex,
+        boolean dbg,
+        String reason
+    ) {
+        int nextAttempt = loadAttemptIndex + 1;
+        if (nextAttempt >= NATURAL_SPAWN_CHUNK_LOAD_ATTEMPTS) {
+            if (dbg) {
+                LOGGER.info(
+                    "[natural_spawn] SKIP reason={} exhausted_chunk_load_retries world={} source_chunk=({}, {}) attempts={}",
+                    reason,
+                    world.getRegistryKey().getValue(),
+                    cp.x,
+                    cp.z,
+                    NATURAL_SPAWN_CHUNK_LOAD_ATTEMPTS);
+            }
+            return;
+        }
+        if (dbg) {
+            LOGGER.info(
+                "[natural_spawn] DEFER reason={} world={} source_chunk=({}, {}) next_in_ticks={} next_attempt_index={}/{}",
+                reason,
+                world.getRegistryKey().getValue(),
+                cp.x,
+                cp.z,
+                NATURAL_SPAWN_CHUNK_LOAD_RETRY_DELAY_TICKS,
+                nextAttempt + 1,
+                NATURAL_SPAWN_CHUNK_LOAD_ATTEMPTS);
+        }
+        VoidClamMod.scheduleDelayed(world, NATURAL_SPAWN_CHUNK_LOAD_RETRY_DELAY_TICKS, () ->
+            trySpawnAtChunkCenter(world, cp, worldCfg, placementRandSeed, nextAttempt));
     }
 
     private static long naturalSpawnSeed(ServerWorld world, int cx, int cz, long salt) {
@@ -142,7 +302,11 @@ public final class NaturalSpawnHandler {
         return z ^ (z >>> 31);
     }
 
-    private static boolean allChunksIntersectingSphereLoaded(ServerWorld world, int cx, int cy, int cz, int radius) {
+    /**
+     * @return {@link Long#MIN_VALUE} if every chunk column intersecting the sphere's XZ footprint is loaded;
+     *         otherwise packed chunk coords {@code (chunkX << 32) | (chunkZ & 0xffffffffL)} for the first missing column.
+     */
+    private static long firstUnloadedChunkInSphere(ServerWorld world, int cx, int cy, int cz, int radius) {
         int minX = cx - radius;
         int maxX = cx + radius;
         int minZ = cz - radius;
@@ -154,11 +318,11 @@ public final class NaturalSpawnHandler {
         for (int icx = minCx; icx <= maxCx; icx++) {
             for (int icz = minCz; icz <= maxCz; icz++) {
                 if (!world.isChunkLoaded(icx, icz)) {
-                    return false;
+                    return ((long) icx << 32) | (icz & 0xffffffffL);
                 }
             }
         }
-        return true;
+        return Long.MIN_VALUE;
     }
 
     private static void clearSphere(ServerWorld world, int cx, int cy, int cz, int radius) {

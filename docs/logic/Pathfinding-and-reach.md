@@ -6,18 +6,17 @@
 
 **Guards:** Clam non-null, awake (`status == 1`), center chunk loaded, same `ServerWorld` as clam dimension, **`mainCycleBusy == 0`**, **not** **`VoidClamMod.isGrowRepairPendingForClam`**, kill barrier / shutdown / path resume time OK.
 
-## Volatile reachability map (`clam_reachability_volatile_map`)
-
-When **`true`** in `voidclam.json`, **`CommandToolbox.clamReach`** builds a **full** 6-neighbor BFS from the heart (same axis bounds as A*), using **`isPassibleForAStarStep`** without the goal exception on interior cells, and records **`BlockState`** + hop distance per visited cell in **`ReachabilityVolatileMap`**. Targets (lights/ores) are ranked by **minimum BFS distance to an adjacent step onto the goal**, then Euclidean. The same map is passed into **`Pathfinder.calculatePath`**, which wraps **`PathfindChunkCache`** so A* reads the **frozen** state for cells in the flood (others still use chunk snapshot / live world). Goal-directed prepass is **skipped** when this prebuilt map is supplied. Default **`false`** (cost tradeoff).
+## Target choice (lights / ores)
 
 **Flow:**
 
 1. Set `mainCycleBusy = 1`.
-2. On executor thread: scan a box around the clam from `y - 4*cSize` to `y + 4*cSize` and horizontal `±4*cSize` for each axis.
-3. Track closest **light** (if `seekLights`) and closest **ore** (if `seekOres`), excluding blacklisted positions.
-4. **Tie-break:** If both exist, choose the one with **smaller squared distance**; if equal distance, **light wins** (`closestLightDist <= closestOreDist`).
-5. Chosen target is added to the appropriate blacklist **before** pathfinding (so retries skip it until removed).
-6. If a target exists: `Pathfinder.calculatePath(world, clamId, ...)`. If not: clear `mainCycleBusy`.
+2. On executor thread: optionally prune **seek caches** against the live world; scan from **`lightsCache` / `oresCache`** when enabled, otherwise scan the seek box (`y - 4*cSize` … `y + 4*cSize`, horizontal `±4*cSize`).
+3. Track closest **light** (if `seekLights`) and closest **ore** (if `seekOres` or material-hunger flow) by **squared Euclidean distance** from the heart.
+4. **Tie-break:** Material-hunger flow prefers ore, then light if needed; otherwise if both exist, pick by distance; if equal distance, **light wins** (`closestLightDist <= closestOreDist`).
+5. If a target exists: set **`lightPathGoalPacked`** / **`orePathGoalPacked`** and run **`Pathfinder.calculatePath`**. If not: clear `mainCycleBusy`.
+
+Reachability for the actual dig route is established only in **`calculatePath`** (prepass BFS + A\*), not by a separate volatile flood.
 
 ## `calculatePath` (`Pathfinder`)
 
@@ -36,19 +35,24 @@ Runs on **main thread** from `tickTargets`.
 
 - Goal node cost `f >= 2500`
 - Clam center chunk unloaded
-- Goal block is ore but `!seekOres`, or light but `!seekLights` (stale enqueue after seek toggles / grow pending)
+- Goal block is ore but `!seekOres` **and** the clam is not in the **material-hunger ore flow** that still permits ore goals (`Pathfinder.pathApplyOreCountsAsMaterialHunger` — `orePathForMaterialHunger` from reach and/or live `seekLights` + material/repair rules), or light but `!seekLights` (stale enqueue after seek toggles / grow pending)
 
-**Stamina:** `stamina[0]` starts at the clam’s `currentSize`. Each scheduled step subtracts a **cost** derived from block hardness (except goal step forced to 0). If stamina would go negative:
-
-- Set `blocked`; if the block was not air/water/lava, **blacklist the goal** for both lights and ores and **`addEnergy(clamId, -1)`**.
+**Stamina:** `PathApplySliceState.stamina` starts at the clam’s `currentSize`. Each scheduled step uses a **cost** derived from block hardness (goal step is usually 0; indestructible uses a huge sentinel). If stamina would go negative for a **breakable** step, the clam still **consumes that step** (wart replace / ore / beacon / light / solid-store pipeline), then **`pathStopped`** halts further digs; **`addEnergy(clamId, -1)`** still applies. For **unbreakable** (sentinel cost), **`pathStopped`** without digging; goal may fall out of seek caches like other failures.
 
 **Path stop (`pathStopped`):** If the step would replace a non-goal block that has a non-air item drop, the path **stops** (no energy change for that case): schedule off-thread container BFS + main-thread apply (see below); busy flag clears after apply.
 
-**Ore goal:** Fortune-3 style drops from `getFortune3Drops`, off-thread container BFS, then replace or barrel; busy clears after apply (or immediately if no fortune drops).
+### Ore blocks along the path (`pathApplyOreBreakUsesMaterialIngestion`)
+
+**`seekOres`** affects reach scans and whether a queued **ore goal** is still legal at `buildPath`; it does **not** by itself mean “always consume ore for `material`.”
+
+When a scheduled step breaks an ore:
+
+- **Material ingestion** (wart replace + `addMaterial` from block type): **path goal** and reach flagged **`orePathForMaterialHunger`** (material-flow ore target for that run), **or** **`seekLights`** on and live **`material < materialSeekThreshold`** or **`prioritizeRepairOreSeek`** (applies to **non-goal** tunnel ores too — no session-wide ore flag on incidental breaks).
+- **Otherwise:** `VoidClamBlockLoot.resolveDrops` (fortune-style table), then off-thread container BFS + main-thread apply (barrel/wart fallback); busy clears after apply. Empty drop list → wart replace only.
+
+**`goalDigTargetStillExpected`** still treats ore at the packed goal as the expected target when **`seekOres` OR `pathApplyOreCountsAsMaterialHunger`** — orthogonal to per-step ingest vs loot.
 
 **Light goal:** Replacing the light with wart grants energy via **`addEnergy(clamId, lightEnergyForBlock)`**; soul-fire family blocks also **`addSoul(…, 1)`** (see [[Resources-and-caps]]). Clear busy flag on that final scheduled step.
-
-**Blacklist cleanup:** Schedules `removeLightsBlackList` / `removeOresBlackList` for the goal position after a delay derived from path length (`timer`).
 
 **Scheduling:** Walks from goal toward start; each step schedules a `VoidClamMod.scheduleDelayed` at `timer`, `timer-2`, … so pulses fire in order along the path.
 

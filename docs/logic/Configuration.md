@@ -45,7 +45,6 @@ Notes:
 | `astar_sync_max_total_expansions_per_job` | Cap on prepass + A* expansions per sync job; `null`/omitted ≈ 400k; `-1` = uncapped (dangerous). |
 | `bfs_mode` | `sync_batched` vs `async`: how heavy BFS (omni pulse graph, storage container discovery) runs. Does **not** change prepass threading relative to A* on one worker. |
 | `pathfind_chunk_cache` | `true` (default): per-job `PathfindChunkCache` snapshot. `false`: live `getBlockState` only (legacy/debug). |
-| `clam_reachability_volatile_map` | `false` (default): when `true`, each `clamReach` builds a volatile reachability flood (+ snapshots) for target ordering and consistent A* reads; higher CPU/RAM. See [[Pathfinding-and-reach]]. |
 | `seek_target_cache` | `true` (default): maintain `Clam` light/ore seek caches + block deltas. `false`: full box rescan each `clamReach` (still follows `astar_mode` for threading). Legacy `light_block_cache` / `ore_block_cache` migrate into this. |
 
 ## Size, economy, cadence

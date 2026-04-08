@@ -26,14 +26,7 @@ Abstract feature list:
         - ✅ prepass edge admission **matches A\***: a step is allowed iff that step’s `aStarNeighborCost` is strictly below the wall sentinel `2500` (same wall vs passable tie‑break as A\*, including goal exception for block entities); BFS does not sum numeric costs
         - ? async mode (haven't tested yet)
         - ✅ sync_batched vs async mode
-    - ✅ volatile target cache, to ignore unreachable blocks; I want to deprecate this in favor of the "reachability map" feature
-    - ✅ reachability map **MVP (volatile)** — `clam_reachability_volatile_map` in `voidclam.json` (default **off**)
-        - ✅ Full BFS flood from heart within pathfinding bounds; edge rule matches A* interior steps; per-visit `BlockState` snapshot + hop distance (`ReachabilityVolatileMap`); discarded after the path job.
-        - ❌ debug telemetry for map RAM footprint
-        - ❌ persistent map + block-change delta + full rebuild on repair; unload lifecycle
-        - ❌ separate sync/async “map job” mode (map today runs on the same thread as pathfinding for that reach)
-        - ❌ BFS distance as A* heuristic (Manhattan unchanged)
-        - ✅ When enabled: pick target by **minimum BFS adjacency depth** to goal, then Euclidean; pass map into A* so flooded cells read frozen states via `PathfindChunkCache` overlay; skip redundant goal-directed prepass when map is prebuilt in `clamReach`.
+    - **Removed:** volatile reachability map / overlay (`ReachabilityVolatileMap`, `clam_reachability_volatile_map`). Targeting uses **seek caches or box scan** + Euclidean closest; **`calculatePath`** prepass + A\* own reachability.
     - ✅ path build after calculation
         - ✅ final, atomic, sanity check; path will stop early:
             - ✅ after a block has been broken

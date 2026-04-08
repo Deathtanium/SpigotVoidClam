@@ -108,6 +108,9 @@ public final class CommandToolbox {
         Runnable task
     ) {
         if (VoidClamMod.isAsyncPathfindingKillBarrierInEffect() || VoidClamMod.isAsyncPathfindingShutdownRequested()) {
+            VoidClamMod.pathApplyDebug(
+                "CommandToolbox.submitPathfinding ABORT reason=kill_barrier_or_shutdown center=({}, {}) clamId={}",
+                clamCenterX, clamCenterZ, pathfindingClamId);
             if (onAbortedBeforeRun != null) {
                 onAbortedBeforeRun.run();
             }
@@ -115,6 +118,11 @@ public final class CommandToolbox {
         }
         Clam pauseClam = pathfindingClamId != null ? VoidClamMod.getClamById(pathfindingClamId) : null;
         if (!VoidClamMod.isPathfindingAllowedYet(world, pauseClam)) {
+            Clam pc = pauseClam;
+            VoidClamMod.pathApplyDebug(
+                "CommandToolbox.submitPathfinding ABORT reason=pathfinding_not_allowed_yet center=({}, {}) clamId={} resumeWorldTime={}",
+                clamCenterX, clamCenterZ, pathfindingClamId,
+                pc == null ? "n/a" : pc.pathfindingResumeWorldTime);
             if (onAbortedBeforeRun != null) {
                 onAbortedBeforeRun.run();
             }
@@ -122,6 +130,9 @@ public final class CommandToolbox {
         }
         if (VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED) {
             if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
+                VoidClamMod.pathApplyDebug(
+                    "CommandToolbox.submitPathfinding ABORT reason=cooperative_abort_before_task sync_batched center=({}, {}) clamId={}",
+                    clamCenterX, clamCenterZ, pathfindingClamId);
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -132,6 +143,9 @@ public final class CommandToolbox {
         }
         pathfindingExecutor.execute(() -> {
             if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, clamCenterX, clamCenterZ, pathfindingClamId)) {
+                VoidClamMod.pathApplyDebug(
+                    "CommandToolbox.submitPathfinding ABORT reason=cooperative_abort_before_task async_worker center=({}, {}) clamId={}",
+                    clamCenterX, clamCenterZ, pathfindingClamId);
                 if (onAbortedBeforeRun != null) {
                     onAbortedBeforeRun.run();
                 }
@@ -386,6 +400,55 @@ public final class CommandToolbox {
         buildShell(world, x, y, z, tsize, mat, true);
     }
 
+    /**
+     * Same-size repair shell logic as {@link #clamReSize} (wart layers {@code 1..size-1} with repair wart rules, then
+     * obsidian on expected shell blocks), but immediate: no material cost, sounds, or delayed tasks.
+     * For {@link VoidClamMod#makeNaturalSpawnClam} only (heart already placed; {@code m.currentSize} is final size).
+     */
+    public static void instantRepairShellForNaturalSpawn(ServerWorld world, Clam m) {
+        if (m == null || !world.isChunkLoaded(m.x >> 4, m.z >> 4)) return;
+        VoidClamMod.prepareClamForResizeShell(m, false);
+        int csize = m.currentSize;
+        int size = Math.max(1, csize);
+        int x = m.x, y = m.y, z = m.z;
+        int yMin = -size / 2 + 1;
+        int yMax = size - 1;
+        int horiz = Math.max(0, size - 1);
+        for (int i = 1; i <= Math.max(1, size - 1); i++) {
+            buildShell(world, x, y, z, i, Blocks.NETHER_WART_BLOCK, false);
+        }
+        int initialMaterial = m.material;
+        int obsidianPresent = 0;
+        int shellMissing = 0;
+        List<BlockPos> missingShell = new ArrayList<>();
+        for (int dy = yMin; dy <= yMax; dy++) {
+            for (int dx = -horiz; dx <= horiz; dx++) {
+                for (int dz = -horiz; dz <= horiz; dz++) {
+                    if (!VoidClamMod.isExpectedObsidianShellBlock(dx, dy, dz, size)) continue;
+                    BlockPos p = new BlockPos(x + dx, y + dy, z + dz);
+                    BlockState state = world.getBlockState(p);
+                    if (state.isOf(Blocks.OBSIDIAN)) {
+                        obsidianPresent++;
+                    } else {
+                        shellMissing++;
+                        missingShell.add(p.toImmutable());
+                    }
+                }
+            }
+        }
+        int shellObserved = obsidianPresent + shellMissing;
+        for (BlockPos p : missingShell) {
+            if (!world.getBlockState(p).isOf(Blocks.OBSIDIAN)) {
+                world.setBlockState(p, Blocks.OBSIDIAN.getDefaultState());
+            }
+        }
+        m.prioritizeRepairOreSeek = m.seekLights && shellObserved > 0 && shellMissing > initialMaterial;
+        m.currentSize = csize;
+        m.pathfindingResumeWorldTime = 0L;
+        VoidClamMod.placeHeartBlockForClam(world, new BlockPos(x, y, z), m);
+        VoidClamMod.startSeekCachesRebuild(m);
+    }
+
     public static void clamReSize(ServerWorld world, UUID clamId, int tsize) {
         Clam m = VoidClamMod.getClamById(clamId);
         if (m == null) return;
@@ -574,7 +637,7 @@ public final class CommandToolbox {
                 boolean syncReach = VoidClamConfig.get().astarModeEnum() == VoidClamConfig.AstarMode.SYNC_BATCHED;
                 reachProcessDebug(m, "task_begin", "thread=" + Thread.currentThread().getName()
                     + " sync_batched_inline=" + syncReach);
-                int x = m.x, y = m.y, z = m.z, cSize = Math.max(1, m.currentSize);
+                int x = m.x, y = m.y, z = m.z;
                 BlockPos modPos = new BlockPos(x, y, z);
                 BlockPos closestLight = null;
                 double closestLightDist = Double.MAX_VALUE;
@@ -585,29 +648,26 @@ public final class CommandToolbox {
                 boolean oreRepairPriority = m.seekLights && m.prioritizeRepairOreSeek;
                 boolean materialOreFlow = oreHunger || oreRepairPriority;
                 boolean shouldSeekOre = m.seekOres || materialOreFlow;
-                boolean useReachMap = cfg.clam_reachability_volatile_map;
-                List<BlockPos> reachLightCandidates = useReachMap ? new ArrayList<>() : null;
-                List<BlockPos> reachOreCandidates = useReachMap ? new ArrayList<>() : null;
-                ReachabilityVolatileMap reachMap = null;
                 reachProcessDebug(m, "scan_plan", "seekLights=" + m.seekLights + " seekOres=" + shouldSeekOre
-                    + " volatileReachMap=" + useReachMap + " materialOreFlow=" + materialOreFlow
+                    + " materialOreFlow=" + materialOreFlow
                     + " lightCache=" + cfg.lightBlockCacheEnabled() + " oreCache=" + cfg.oreBlockCacheEnabled());
 
                 if (m.seekLights || shouldSeekOre) {
+                    if (m.seekLights && VoidClamConfig.get().lightBlockCacheEnabled()) {
+                        VoidClamMod.pruneLightsSeekCacheAgainstWorld(world, m);
+                    }
+                    if (shouldSeekOre && VoidClamConfig.get().oreBlockCacheEnabled()) {
+                        VoidClamMod.pruneOresSeekCacheAgainstWorld(world, m);
+                    }
                     if (m.seekLights) {
                         if (VoidClamConfig.get().lightBlockCacheEnabled()) {
                             for (long packed : m.lightsCache) {
-                                if (m.lightsBlackList.contains(packed)) {
-                                    continue;
-                                }
                                 BlockPos pos = BlockPos.fromLong(packed);
                                 if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
                                 net.minecraft.block.BlockState lst = world.getBlockState(pos);
                                 if (!VoidClamMod.isLight(lst, world, pos)) continue;
                                 double dist = modPos.getSquaredDistance(pos);
-                                if (useReachMap) {
-                                    reachLightCandidates.add(pos.toImmutable());
-                                } else if (dist < closestLightDist) {
+                                if (dist < closestLightDist) {
                                     closestLightDist = dist;
                                     closestLight = pos.toImmutable();
                                 }
@@ -627,16 +687,10 @@ public final class CommandToolbox {
                                             continue;
                                         }
                                         BlockPos pos = new BlockPos(ix, iy, iz);
-                                        long pl = pos.asLong();
-                                        if (m.lightsBlackList.contains(pl)) {
-                                            continue;
-                                        }
                                         net.minecraft.block.BlockState lst = world.getBlockState(pos);
                                         if (!VoidClamMod.isLight(lst, world, pos)) continue;
                                         double dist = modPos.getSquaredDistance(pos);
-                                        if (useReachMap) {
-                                            reachLightCandidates.add(pos.toImmutable());
-                                        } else if (dist < closestLightDist) {
+                                        if (dist < closestLightDist) {
                                             closestLightDist = dist;
                                             closestLight = pos.toImmutable();
                                         }
@@ -650,17 +704,12 @@ public final class CommandToolbox {
                             && !(materialOreFlow && m.oresCache.isEmpty());
                         if (useOreCache) {
                             for (long packed : m.oresCache) {
-                                if (m.oresBlackList.contains(packed)) {
-                                    continue;
-                                }
                                 BlockPos pos = BlockPos.fromLong(packed);
                                 if (!world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
                                 net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
                                 if (!VoidClamMod.isOre(block)) continue;
                                 double dist = modPos.getSquaredDistance(pos);
-                                if (useReachMap) {
-                                    reachOreCandidates.add(pos.toImmutable());
-                                } else if (dist < closestOreDist) {
+                                if (dist < closestOreDist) {
                                     closestOreDist = dist;
                                     closestOre = pos.toImmutable();
                                 }
@@ -680,18 +729,12 @@ public final class CommandToolbox {
                                             continue;
                                         }
                                         BlockPos pos = new BlockPos(ix, iy, iz);
-                                        long pl = pos.asLong();
-                                        if (m.oresBlackList.contains(pl)) {
-                                            continue;
-                                        }
                                         net.minecraft.block.Block block = world.getBlockState(pos).getBlock();
                                         double dist = modPos.getSquaredDistance(pos);
                                         if (!VoidClamMod.isOre(block)) {
                                             continue;
                                         }
-                                        if (useReachMap) {
-                                            reachOreCandidates.add(pos.toImmutable());
-                                        } else if (dist < closestOreDist) {
+                                        if (dist < closestOreDist) {
                                             closestOreDist = dist;
                                             closestOre = pos.toImmutable();
                                         }
@@ -707,54 +750,19 @@ public final class CommandToolbox {
                     }
                 }
 
-                reachProcessDebug(m, "scan_done", (useReachMap
-                    ? "mode=volatile_candidates lights=" + reachLightCandidates.size() + " ores=" + reachOreCandidates.size()
-                    : "mode=direct_euclidean")
-                    + " pickSoFar light=" + (closestLight != null) + " ore=" + (closestOre != null));
+                reachProcessDebug(m, "scan_done", "mode=direct_euclidean pickSoFar light=" + (closestLight != null) + " ore=" + (closestOre != null));
 
-                BlockPos closest = null;
-                BlockPos reachPickOre = null;
-                BlockPos reachPickLight = null;
-                if (useReachMap) {
-                    if (!reachLightCandidates.isEmpty() || !reachOreCandidates.isEmpty()) {
-                        if (syncReach) {
-                            reachProcessDebug(m, "reach_flood", "enqueue_incremental lights=" + reachLightCandidates.size()
-                                + " ores=" + reachOreCandidates.size());
-                            Pathfinder.enqueueSyncVolatileReachFloodJob(Pathfinder.newVolatileReachFloodJob(
-                                world, m, reachLightCandidates, reachOreCandidates, materialOreFlow));
-                            return;
-                        }
-                        reachProcessDebug(m, "reach_flood", "start (async) lights=" + reachLightCandidates.size()
-                            + " ores=" + reachOreCandidates.size());
-                        reachMap = Pathfinder.buildVolatileReachabilityMap(world, m, reachLightCandidates, reachOreCandidates);
-                        reachProcessDebug(m, "reach_flood", "done visitedCells=" + reachMap.visitedCount());
-                        reachPickOre = pickBestReachCandidate(reachOreCandidates, modPos, world, m, reachMap);
-                        reachPickLight = pickBestReachCandidate(reachLightCandidates, modPos, world, m, reachMap);
-                    } else {
-                        reachProcessDebug(m, "reach_flood", "skip (no candidates)");
-                    }
-                    if (materialOreFlow && reachPickOre != null) {
-                        closest = reachPickOre;
-                    } else if (materialOreFlow && reachPickLight != null) {
-                        closest = reachPickLight;
-                    } else if (reachPickLight != null && (reachPickOre == null
-                        || compareReachTargets(reachPickLight, reachPickOre, modPos, world, m, reachMap) <= 0)) {
-                        closest = reachPickLight;
-                    } else {
-                        closest = reachPickOre;
-                    }
-                    closestLight = reachPickLight;
-                    closestOre = reachPickOre;
+                BlockPos closest;
+                if (materialOreFlow && closestOre != null) {
+                    closest = closestOre;
+                } else if (materialOreFlow && closestLight != null) {
+                    closest = closestLight;
+                } else if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
+                    closest = closestLight;
+                } else if (closestOre != null) {
+                    closest = closestOre;
                 } else {
-                    if (materialOreFlow && closestOre != null) {
-                        closest = closestOre;
-                    } else if (materialOreFlow && closestLight != null) {
-                        closest = closestLight;
-                    } else if (closestLight != null && (closestOre == null || closestLightDist <= closestOreDist)) {
-                        closest = closestLight;
-                    } else if (closestOre != null) {
-                        closest = closestOre;
-                    }
+                    closest = null;
                 }
 
                 if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
@@ -766,16 +774,14 @@ public final class CommandToolbox {
                     String goalKind = closestLight != null && closest.equals(closestLight) ? "light"
                         : (closestOre != null && closest.equals(closestOre) ? "ore" : "mixed");
                     reachProcessDebug(m, "target_pick", "goal=(" + closest.getX() + "," + closest.getY() + "," + closest.getZ()
-                        + ") kind=" + goalKind + " prebuiltMap=" + (reachMap != null));
+                        + ") kind=" + goalKind);
                     if (closestLight != null && closest.equals(closestLight)) {
                         long goalPacked = closest.asLong();
-                        m.lightsBlackList.add(goalPacked);
                         m.lightPathGoalPacked = goalPacked;
                         m.orePathGoalPacked = null;
                         m.orePathForMaterialHunger = false;
                     } else if (closestOre != null && closest.equals(closestOre)) {
                         long goalPacked = closest.asLong();
-                        m.oresBlackList.add(goalPacked);
                         m.orePathGoalPacked = goalPacked;
                         m.lightPathGoalPacked = null;
                         m.orePathForMaterialHunger = materialOreFlow;
@@ -785,10 +791,9 @@ public final class CommandToolbox {
                         m.orePathForMaterialHunger = false;
                     }
                     reachProcessDebug(m, "path_enqueue", "calculatePath start=(" + x + "," + y + "," + z + ") goal=("
-                        + closest.getX() + "," + closest.getY() + "," + closest.getZ() + ")"
-                        + (reachMap != null ? " floodCells=" + reachMap.visitedCount() : ""));
+                        + closest.getX() + "," + closest.getY() + "," + closest.getZ() + ")");
                     Pathfinder.calculatePath(
-                        world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ(), reachMap);
+                        world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ());
                 } else {
                     reachProcessDebug(m, "done", "no_target release_busy");
                     m.orePathForMaterialHunger = false;
@@ -801,118 +806,6 @@ public final class CommandToolbox {
         });
     }
 
-    /**
-     * Final leg of {@code clamReach} after a volatile reach flood finishes ({@link Pathfinder.VolatileReachFloodJob}) —
-     * rank targets, reserve blacklists, {@link Pathfinder#calculatePath}.
-     */
-    static void finishClamReachAfterVolatileFlood(
-        ServerWorld world,
-        Clam m,
-        BlockPos modPos,
-        int x, int y, int z,
-        List<BlockPos> reachLightCandidates,
-        List<BlockPos> reachOreCandidates,
-        boolean materialOreFlow,
-        ReachabilityVolatileMap reachMap
-    ) {
-        BlockPos reachPickOre = pickBestReachCandidate(reachOreCandidates, modPos, world, m, reachMap);
-        BlockPos reachPickLight = pickBestReachCandidate(reachLightCandidates, modPos, world, m, reachMap);
-        BlockPos closest;
-        if (materialOreFlow && reachPickOre != null) {
-            closest = reachPickOre;
-        } else if (materialOreFlow && reachPickLight != null) {
-            closest = reachPickLight;
-        } else if (reachPickLight != null && (reachPickOre == null
-            || compareReachTargets(reachPickLight, reachPickOre, modPos, world, m, reachMap) <= 0)) {
-            closest = reachPickLight;
-        } else {
-            closest = reachPickOre;
-        }
-        BlockPos closestLight = reachPickLight;
-        BlockPos closestOre = reachPickOre;
-
-        if (VoidClamMod.shouldAbortAsyncPathfindingWork(world, x, z, m.clamId)) {
-            reachProcessDebug(m, "task_abort", "after_target_pick");
-            VoidClamMod.releasePathfindingMainCycle(m);
-            return;
-        }
-        if (closest != null) {
-            String goalKind = closestLight != null && closest.equals(closestLight) ? "light"
-                : (closestOre != null && closest.equals(closestOre) ? "ore" : "mixed");
-            reachProcessDebug(m, "target_pick", "goal=(" + closest.getX() + "," + closest.getY() + "," + closest.getZ()
-                + ") kind=" + goalKind + " prebuiltMap=true");
-            if (closestLight != null && closest.equals(closestLight)) {
-                long goalPacked = closest.asLong();
-                m.lightsBlackList.add(goalPacked);
-                m.lightPathGoalPacked = goalPacked;
-                m.orePathGoalPacked = null;
-                m.orePathForMaterialHunger = false;
-            } else if (closestOre != null && closest.equals(closestOre)) {
-                long goalPacked = closest.asLong();
-                m.oresBlackList.add(goalPacked);
-                m.orePathGoalPacked = goalPacked;
-                m.lightPathGoalPacked = null;
-                m.orePathForMaterialHunger = materialOreFlow;
-            } else {
-                m.lightPathGoalPacked = null;
-                m.orePathGoalPacked = null;
-                m.orePathForMaterialHunger = false;
-            }
-            reachProcessDebug(m, "path_enqueue", "calculatePath start=(" + x + "," + y + "," + z + ") goal=("
-                + closest.getX() + "," + closest.getY() + "," + closest.getZ() + ") floodCells=" + reachMap.visitedCount());
-            Pathfinder.calculatePath(
-                world, m.clamId, x, y, z, closest.getX(), closest.getY(), closest.getZ(), reachMap);
-        } else {
-            reachProcessDebug(m, "done", "no_target release_busy");
-            m.orePathForMaterialHunger = false;
-            VoidClamMod.releasePathfindingMainCycle(m);
-        }
-    }
-
-    private static @Nullable BlockPos pickBestReachCandidate(
-        List<BlockPos> candidates,
-        BlockPos modPos,
-        ServerWorld world,
-        Clam m,
-        ReachabilityVolatileMap map
-    ) {
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        BlockPos best = null;
-        int bestR = Integer.MAX_VALUE;
-        double bestEu = Double.MAX_VALUE;
-        for (BlockPos p : candidates) {
-            int r = Pathfinder.adjacentReachBfsStepsToGoal(map, p, world, m);
-            if (r == Integer.MAX_VALUE) {
-                continue;
-            }
-            double eu = modPos.getSquaredDistance(p);
-            if (r < bestR || (r == bestR && eu < bestEu)) {
-                bestR = r;
-                bestEu = eu;
-                best = p;
-            }
-        }
-        return best;
-    }
-
-    /** Reach-depth primary, Euclidean secondary; negative/zero if {@code a} is at least as good as {@code b}. */
-    private static int compareReachTargets(
-        BlockPos a,
-        BlockPos b,
-        BlockPos modPos,
-        ServerWorld world,
-        Clam m,
-        ReachabilityVolatileMap map
-    ) {
-        int ra = Pathfinder.adjacentReachBfsStepsToGoal(map, a, world, m);
-        int rb = Pathfinder.adjacentReachBfsStepsToGoal(map, b, world, m);
-        if (ra != rb) {
-            return Integer.compare(ra, rb);
-        }
-        return Double.compare(modPos.getSquaredDistance(a), modPos.getSquaredDistance(b));
-    }
 
     /**
      * Writes the searing heart block entity’s full NBT (including identifying fields, same as chunk disk form) to

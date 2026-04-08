@@ -67,7 +67,7 @@ VoidClam/
 
 | File | Role |
 |------|------|
-| **`Clam.java`** | One VoidClam: position, size, energy, type, blacklists, busy flags. |
+| **`Clam.java`** | One VoidClam: position, size, energy, type, seek caches, busy flags. |
 | **`Node.java`** | One A* node (position, f/g/h, parent, clam id). |
 
 ### Build / config (change when upgrading or tweaking)

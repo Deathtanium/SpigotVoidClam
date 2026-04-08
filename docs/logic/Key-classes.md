@@ -58,7 +58,7 @@ Quick index: **what to read** when preserving behavior. Package: `com.serbanstei
 | `calculatePath` | A\*; enqueue or clear busy |
 | `tickSyncAStarJobs`, `enqueueSyncAStarJob`, `hasSyncAStarWorkForClam`, `clearSyncAStarJobsForClam` | Sync-batched A* stepping |
 | `buildPath` | Schedule placement along path, stamina, drops |
-| `getFortune3Drops` | Ore rewards |
+| `pathApplyOreBreakUsesMaterialIngestion`, `pathApplyOreCountsAsMaterialHunger` | Ore: ingest vs `VoidClamBlockLoot.resolveDrops` + routing |
 | Container helpers | BFS, insert, barrel fallback |
 
 ## `Clam`, `Node`, `Cursor`

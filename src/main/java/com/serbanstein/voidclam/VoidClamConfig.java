@@ -63,7 +63,10 @@ public final class VoidClamConfig {
         public double dungeon_rate = 0.15;
         /** Approximate chance per newly generated chunk for default natural spawn (0..1). */
         public double default_chunk_chance = 0.003;
-        /** Logs chunk roll diagnostics for this world at INFO. */
+        /**
+         * When {@code true}, logs at INFO for this world only if a chunk passes the default-method roll,
+         * then logs each deferred try-spawn step (skip reason or success). Failed rolls are silent.
+         */
         public boolean debug_log = false;
         /** Default natural spawn: top of the cleared sphere must be this many blocks below sea level. */
         public int min_blocks_below_sea = 24;
@@ -107,8 +110,8 @@ public final class VoidClamConfig {
     /** Approximate chance per newly generated overworld chunk for default natural spawn (ignored for dungeon method). */
     public double clam_spawn_natural_default_chunk_chance = 0.003;
     /**
-     * When {@code true}, {@link NaturalSpawnHandler} logs each default-method chunk roll to {@code voidclam/natural_spawn}
-     * at INFO (world, chunk, roll vs threshold, pass/fail). Off by default.
+     * When {@code true}, {@link NaturalSpawnHandler} enables the same logging as per-world {@code debug_log} for migrated
+     * single-world configs (passing rolls and deferred try-spawn only; no {@code pass=false} spam). Off by default.
      */
     public boolean clam_spawn_natural_debug_log = false;
     /**
@@ -158,16 +161,9 @@ public final class VoidClamConfig {
     public Boolean pathfind_chunk_cache;
 
     /**
-     * When {@code true}, each {@link CommandToolbox#clamReach} run performs a full reachability flood from the heart
-     * (same bounds as pathfinding), snapshots visited {@link net.minecraft.block.BlockState}s for A*, and picks targets
-     * by minimum BFS adjacency depth then Euclidean tie-break. Volatile only for that job. Default {@code false} (extra CPU/RAM).
-     */
-    public boolean clam_reachability_volatile_map = false;
-
-    /**
      * Light + ore seek caches: when {@code true} (default), {@link Clam#lightsCache}/{@link Clam#oresCache} are
-     * maintained (tick rebuild + block deltas) and {@link CommandToolbox#clamReach} reads them; cache and blacklist
-     * positions stay in server memory only (see {@link VoidClamMod#tickSeekEphemeralExpiry}). When {@code false}
+     * maintained (tick rebuild + block deltas) and {@link CommandToolbox#clamReach} reads them; caches stay in server
+     * memory only (see {@link VoidClamMod#tickSeekEphemeralExpiry}). When {@code false}
      * (“live”), caches are not maintained and clamReach rescans the full seek box each run; threading follows
      * {@link #astar_mode} like A*.
      * {@code null} after load ⇒ {@code true}, or legacy migration from {@link #light_block_cache}/{@link #ore_block_cache}.
@@ -202,9 +198,14 @@ public final class VoidClamConfig {
     public double clam_seek_attempt_probability = 1.0;
     /**
      * When {@code true}, {@link CommandToolbox#clamReach} logs each pipeline phase to the {@code voidclam/reach} logger at INFO
-     * (light/ore scan, volatile reach map, target choice, path enqueue). Off by default.
+     * (light/ore scan, target choice, path enqueue). Off by default.
      */
     public boolean reach_process_debug_log = false;
+    /**
+     * Temporary: INFO logs for path apply / storage-routing aborts and early failures ({@code voidclam/path_apply_debug}).
+     * <strong>TODO remove</strong> once investigations are done.
+     */
+    public boolean path_apply_debug_log = false;
     /** Player defense check cadence in seconds; keep at or above goat-horn sound length to avoid overlap. */
     public int clam_defense_detection_interval_seconds = 8;
     /**
